@@ -1,4 +1,4 @@
-// hiphop_gen 持久化模型。MySQL + Prisma。详见 PRODUCT.md §15(持久化宪法)。
+// SunoGrid 持久化模型。MySQL + Prisma。详见 PRODUCT.md §15(持久化宪法)。
 // 设计要点:
 //  - User:顶层账户(用户名 + 密码哈希);AuthSession:DB 会话(cookie token → user)。
 //  - Project:用户下的工程(主BPM/量化 + pad 布局 + studio sessions)。
