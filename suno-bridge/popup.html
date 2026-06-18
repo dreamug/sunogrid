@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 12px/1.4 -apple-system, system-ui, sans-serif; width: 380px; margin: 0; padding: 10px; }
+    h1 { font-size: 13px; margin: 0 0 8px; }
+    .row { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
+    input[type=text] { flex: 1; padding: 4px 6px; }
+    button { padding: 4px 8px; cursor: pointer; }
+    label { font-size: 11px; color: #555; }
+    #count { color: #888; }
+    #list { max-height: 320px; overflow: auto; border-top: 1px solid #eee; margin-top: 6px; }
+    .item { padding: 4px 2px; border-bottom: 1px solid #f2f2f2; cursor: pointer; }
+    .item:hover { background: #f7f7ff; }
+    .m { font-weight: bold; color: #06c; }
+    .s2 { color: #0a0; } .s4, .s5 { color: #c00; }
+    .u { color: #333; word-break: break-all; }
+    .auth { color: #b80; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Suno Bridge — Sniffer</h1>
+  <div class="row">
+    <input id="filter" type="text" placeholder="过滤 URL（默认 api）" value="api" />
+    <span id="count">0</span>
+  </div>
+  <div class="row">
+    <label><input id="onlyauth" type="checkbox" /> 只看带 token 的</label>
+    <button id="dl">下载 JSON</button>
+    <button id="clear">清空</button>
+  </div>
+  <div id="list"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

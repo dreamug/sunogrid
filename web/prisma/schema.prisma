@@ -1,0 +1,255 @@
+// hiphop_gen 持久化模型。MySQL + Prisma。详见 PRODUCT.md §15(持久化宪法)。
+// 设计要点:
+//  - User:顶层账户(用户名 + 密码哈希);AuthSession:DB 会话(cookie token → user)。
+//  - Project:用户下的工程(主BPM/量化 + pad 布局 + studio sessions)。
+//  - Asset:本地"模拟 CDN"的文件登记(源音频 + 变速渲染结果),sha256 去重,**全局共享**(不挂 userId)。
+//  - Gen:每次生成的生命周期(queued→generating→streaming→complete→failed),状态写库可续跑。
+//  - Sound:**用户级共享库**(userId),记 originProjectId(哪个项目生成的,用于 filter);含 analysis + 默认 warp。
+//  - PadClip:老 loop 机;放到 pad 上是复制一份,warp/编辑存这、跟 (project,bank,index) 绑定;音频字节共享 Asset。
+//  - WarpRender:变速渲染结果落盘缓存(签名→warped Asset),全局共享、刷新不丢。
+//  - StudioSession/StudioInstrument/Clip:Studio 规范化模型(§15)。乐器外壳拍平成列;Clip 是单原子(sample=1 / collage=N)。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  projects Project[]
+  sounds   Sound[]
+  gens     Gen[]
+  sessions AuthSession[]
+}
+
+model AuthSession {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  masterBpm   Int      @default(90)
+  quantize    String   @default("1bar") // 1bar | 1/2 | 1/4 | off
+  beatsPerBar Int      @default(4)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  gens             Gen[]
+  padClips         PadClip[]
+  originatedSounds Sound[]         @relation("SoundOrigin")
+  studioSessions   StudioSession[]
+
+  @@index([userId])
+}
+
+model Asset {
+  id          String   @id @default(cuid())
+  kind        String // source | warped | stem
+  path        String // storage 下相对路径,如 audio/<id>.mp3
+  contentType String   @default("audio/mpeg")
+  bytes       Int      @default(0)
+  sha256      String?  @unique // 源音频去重
+  sourceUrl   String?  @db.Text // cdn1 原始 url(诊断)
+  createdAt   DateTime @default(now())
+
+  soundSources Sound[]      @relation("SoundSource")
+  padSources   PadClip[]    @relation("PadSource")
+  warpRenders  WarpRender[] @relation("WarpRenderAsset")
+  clipSources  Clip[]       @relation("ClipAsset")
+}
+
+model Gen {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  mode         String // sound | advanced
+  prompt       String   @db.Text
+  bpm          Int
+  musicalKey   String? // 'Am' 等
+  loop         Boolean  @default(true)
+  instrumental Boolean  @default(false)
+  status       String   @default("queued") // queued | generating | streaming | complete | failed
+  error        String?  @db.Text
+  sunoBatchId  String?
+  sunoClipIds  Json? // string[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sounds Sound[]
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([status])
+}
+
+model Sound {
+  id              String   @id @default(cuid())
+  userId          String // 用户级共享库
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  originProjectId String? // 库内 filter:哪个项目生成的
+  originProject   Project? @relation("SoundOrigin", fields: [originProjectId], references: [id], onDelete: SetNull)
+  genId           String?
+  gen             Gen?     @relation(fields: [genId], references: [id], onDelete: SetNull)
+
+  name        String
+  mode        String // sound | advanced
+  sourceBpm   Float // = 生成填的 BPM(nativeBpm,可靠)
+  musicalKey  String?
+  durationSec Float   @default(0)
+  sampleRate  Int     @default(48000)
+  channels    Int     @default(2)
+  analysis    Json? // {bpm,bars,confidence,exactBars,onsets[],startSample,endSample} —— 快照,留 JSON
+  warp        Json? // 默认 warp(整体写入的种子)—— 留 JSON
+
+  // 乐器分离:stem 子 Sound 继承父的 analysis/warp(逐样本对齐 → 同 BPM/小节,天然锁相)。
+  parentSoundId String?
+  parent        Sound?  @relation("SoundStems", fields: [parentSoundId], references: [id], onDelete: Cascade)
+  stems         Sound[] @relation("SoundStems")
+  stemKind      String? // 子 stem:drums|bass|other|vocals|guitar|piano
+  stemStatus    String? // 父上分离状态:separating|done|failed(null=未分离)
+
+  assetId String
+  asset   Asset  @relation("SoundSource", fields: [assetId], references: [id])
+
+  tags      String? // 逗号分隔,先简单
+  trashed   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  padClips PadClip[]
+  clips    Clip[]    @relation("ClipSound")
+
+  @@index([userId])
+  @@index([originProjectId])
+  @@index([trashed])
+  @@index([parentSoundId])
+}
+
+model PadClip {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  bank      Int // 0-3
+  padIndex  Int // 0-15
+
+  sourceSoundId String?
+  sourceSound   Sound?  @relation(fields: [sourceSoundId], references: [id], onDelete: SetNull)
+
+  assetId String // 共享源音频字节
+  asset   Asset  @relation("PadSource", fields: [assetId], references: [id])
+
+  warp   Json // 本 pad 自己的 warp(可编辑)
+  label  String?
+  gainDb Float   @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, bank, padIndex]) // 一个位置一个 clip
+}
+
+model WarpRender {
+  id        String   @id @default(cuid())
+  signature String   @unique // sha(assetId|start|end|bars|semitones|masterBpm)
+  assetId   String
+  asset     Asset    @relation("WarpRenderAsset", fields: [assetId], references: [id], onDelete: Cascade)
+  bars      Float
+  masterBpm Int
+  createdAt DateTime @default(now())
+}
+
+// Studio 规范化模型(§15)。操场(Session)= 一组并行乐器;乐器(Instrument)= 外壳列 + Clip 子表。
+model StudioSession {
+  id          String             @id @default(cuid())
+  projectId   String
+  project     Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  index       Int
+  instruments StudioInstrument[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([projectId])
+}
+
+model StudioInstrument {
+  id        String        @id @default(cuid())
+  sessionId String
+  session   StudioSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  slot      Int // 0..99(4×25)
+  type      String // sample | collage
+  label     String
+  color     String?
+  icon      String? // 乐器图标 key(instrumentIcons);null = 默认 wav
+  enabled   Boolean       @default(false)
+
+  // —— mixer 拍平成列(§15:每个旋钮独立编辑)——
+  gainDb   Float @default(0)
+  pan      Float @default(0)
+  eqLowDb  Float @default(0)
+  eqHighDb Float @default(0)
+
+  // —— collage 专属(sample 为 null)——
+  collageBars   Int? // payload.bars = loop 长度(小节)
+  stepsPerBar   Int? // payload.stepsPerBar
+  loopStartStep Int? @default(0) // loop 起点(step);loop 区间 = [loopStartStep, loopStartStep + collageBars×stepsPerBar)
+  bakedAssetId  String? // collage 烘焙缓存(指向 Asset.id)
+
+  sends Json? // Send[]（总线落地前占位)
+  extra Json? // 逃生口:实验性参数,稳定后毕业成列
+
+  clips Clip[]
+
+  @@index([sessionId])
+}
+
+// 单原子:一份 warp/trim 的独立拷贝,挂共享 Asset。sample 乐器=1 条(startStep=null);collage=N 条(按 startStep)。
+model Clip {
+  id           String           @id @default(cuid())
+  instrumentId String
+  instrument   StudioInstrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  soundId      String? // 源 Sound（删库 SetNull,字节仍在 Asset）
+  sound        Sound?           @relation("ClipSound", fields: [soundId], references: [id], onDelete: SetNull)
+  assetId      String // 共享源音频字节
+  asset        Asset            @relation("ClipAsset", fields: [assetId], references: [id])
+
+  startSample Int
+  endSample   Int
+  bars        Float
+  timeMul     Float? // ÷2/×2 快捷;null/1=原速
+  semitones   Float  @default(0)
+  // per-片 mixer(arrange 层;collage 片用,sample 片走乐器 mixer 故为 0)。gain + pan + 两段 shelf EQ,与 Mixer 同口径。
+  gainDb      Float  @default(0)
+  pan         Float  @default(0)
+  eqLowDb     Float  @default(0)
+  eqHighDb    Float  @default(0)
+  startStep   Int? // null=sample 唯一片;有值=collage 轨上位置
+  orderIndex  Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([instrumentId])
+  @@index([soundId])
+}

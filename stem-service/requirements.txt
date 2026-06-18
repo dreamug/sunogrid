@@ -1,0 +1,7 @@
+numpy<2
+torch
+torchaudio
+demucs==4.0.1
+soundfile
+fastapi
+uvicorn[standard]
