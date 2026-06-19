@@ -437,3 +437,72 @@ model Instrument {
 **持久化(§15.A/B)**:① 全局 = `Project.fx` JSON 逃生口(同 `gridPrefs` 套路;改参即 `eng.setFx()` + 防抖乐观 PATCH;load 走 `page.tsx`→`StudioApp`→建引擎后 `setFx`)。② per-乐器 send = `Instrument.sends{dist,delay,reverb}`,走**已有的 `sends` JSON 列**(schema/sync `NInstrument.sends`/`/api/studio` GET+ops 全程已带,原是 `Send[]` 占位,现定型为固定三效果对象);在 sessions 树里 → 走细粒度发件箱 diff,改即存。
 
 **undo**:① 全局 `Project.fx` 按 §16 铁律②**显式扩口径**纳入(snapshot 抓 `fx` + applyEntry 还原 + 引擎 `setFx` + 反向 PATCH;FxRack 旋钮拖动**开始**压一次 `pushHistory`,不是每帧)。② per-乐器 send 在 sessions 树里 → **天然在快照口径**,`changeSends` 走 `pushHistory`+树更新,自动可撤。
+
+## 18. Solo(每件乐器独奏)—— 2026-06-20
+
+每件乐器 pad **右下角**一个方形 **S** 按钮(hover 显形、active 常驻、再点取消),做**隔离式 + 多选**独奏:点 S = 只听被 solo 的乐器,其余全部静音;可同时 solo 多个;清掉所有 solo 回到原 ▶ 混音。是 ▶(`enabled`,运行态/持久化)之上的**第二层瞬态遮罩**,不替代 ▶。
+
+**语义(隔离式 + 多选,2026-06-20 用户拍板)** —— 设 `soloActive = 任一乐器被 solo`,每件乐器:
+- **是否可听** `audible = soloActive ? soloed : enabled`。
+- **player 是否在跑** `running = enabled || soloed` —— solo 一个 ▶ 关着的乐器会把它**点起来发声**(隔离它),清 solo 再停;armed 但没被 solo 的乐器在 solo 期被静音但 **player 不停**(保相位,清 solo 即原相位接回)。
+
+| pad | 无 solo | solo 它 | solo 别的 |
+|---|---|---|---|
+| ▶ 开(armed) | 响 | 响 | 静音(仍在跑、保相位) |
+| ▶ 关(stopped) | 不响 | **响**(被点起) | 不响 |
+
+**引擎落点(`audio/studioEngine.ts`)**:每个 voice 在 `eq.high → panner` 之间插一个 `muteGain`(`Tone.Gain`,在 sends 分叉**之前** → 静音连干声带 FX send 一起灭)。`setSolo(ids)` 替换内部 `soloIds` 集后对所有 voice `reconcileVoice`:`muteGain.rampTo(audible?1:0, 15ms)`(即时、防 click、不动 player → 保相位)+ `setRunning(running)`(把原 `setEnabled` 的量化 fire/stop 逻辑抽出、键于 `running` 而非 `enabled`)。`setEnabled` 改为只设 `wantOn` 再 `reconcileVoice`;`startTransport` 按 `running` 起声 + 按 `audible` 置 muteGain;`stopTransport` 把所有 muteGain 复位 1(走带停时不静音 → 预览/audition 经同一链不被 solo 灭,下次起播再按 solo 重置);`clearAll` 清空 `soloIds`(无 voice = 无 solo)。meter 抽在 muteGain 之后 → 被静音的 pad 电平表自然归零。
+
+**状态/持久化/undo**:solo 是**瞬态演奏态** —— **不落库、不进 undo**(§16:走带/播放=瞬态,同 play/stop)。authority 在 `StudioApp` 的 `soloRef`/`soloIds`(state),`toggleSolo` 改集合 + `eng.setSolo`;切 session(`switchSession`)、undo/redo(`applyEntry`)→ `clearSolo()`;删乐器(`removeInst`)→ 从集合剔除再 `setSolo`。引擎 `soloIds` 仅经 `setSolo` 改 + `clearAll` 清,两边保持同步。
+
+**UI(`StudioApp.tsx` + `globals.css`)**:`.solobtn` 绝对定位 pad 右下角 19px 方形,三态 —— 静止 `opacity:0`、`.clip.filled:hover` 显形描边、`.on` 填充 solo-amber 常驻;`onMouseDown` 置 `dragOK=false`(同 `.launch`,防误拖)、`onClick` `stopPropagation`+`toggleSolo`。`soloActive` 时非 soloed 的 pad 加 `.solo-off`(`opacity:.4`,hover 抬到 .72,看清在点什么);soloed 的加 `.solo-on`(amber 内环)。新 token `--solo:#e3b53f` / `--solo-ink:#2a1f05`。空 sample 乐器(无声)不显 S。
+
+## 19. 桌面化 / Electron 宿主(📐 设计 · 2026-06-20)—— 灵感来自 Ableton×Splice
+
+**目标体验**:像 Ableton 挂 Splice 那样——一个能托管 Suno 登录态、能直接读本地采样库、不出 app 就浏览+就地贴速试听+一拖即用的**桌面宿主**。注意:Splice 之所以爽,根子不是"库大",是它是**能摸到本地文件系统 + 托管登录态的原生宿主**;而那套"就地贴速预览"我们 [`auditionSound`](web/src/studio/StudioApp.tsx:444)(`warpToBuffer(s, c.bpm, …)`)**已经在做**,贴调待 §11 的 auto key-conform 补上。
+
+**为什么是 Electron 而不是 Tauri**:§9 当初否原生的**唯一理由是 WKWebView 的 Web MIDI 差**(冲着 Tauri)。Electron 自带 **Chromium** → Web Audio / Web MIDI / WASM warp / OPFS / AudioWorklet **零改动平移**。即整个实时音频核心(最难、最怕动)不碰。Electron 是唯一不推翻任何既有技术决策的原生外壳。
+
+### 形态:双轨并存(2026-06-20 用户拍板)
+web 版与桌面版**共享同一个 Next app + 同一份音频/数据核心**,平台差异收进**一个适配层**,代码不分叉。三处接缝(seam),各给 web / desktop 两种实现:
+
+| seam | web(现状,保留) | desktop(新增) |
+|---|---|---|
+| **Suno 桥** | Chrome 插件(`suno-bridge/` 的 `interceptor/relay/bridge` 跨三上下文 + `externally_connectable`) | **隐藏 suno.com `BrowserView` + preload + IPC**(见②) |
+| **数据库** | MySQL(`prisma` `provider="mysql"`,多租户) | **SQLite**(本地单用户;§7 早注"本地单用户 SQLite 更省事") |
+| **素材源 / 文件系统** | Suno CDN 下载入 storage | + **Node fs 选夹 + watch + 本地采样拷贝入 storage**(见③) |
+
+- **统一接口**:桥抽成 `SunoBridge`(`gens/generate/feed/detectLoop`,签名 = 现 `playground/studioGens.ts` 调的那套),web 注入插件实现、desktop 注入 IPC 实现;调用方(`StudioApp`/`studioGens`)无感。DB 走 Prisma 同一 schema、仅切 provider(注意 `@db.Text` 等 MySQL 专属类型在 SQLite 的等价/降级)。素材源抽成"产出 `Asset{path}` 的 ingest"——Suno 下载与本地拷贝是它的两个实现。
+- **后端**:desktop 先走 **`next start` 当 Electron 子进程**、窗口指向 localhost(改动最小,先出活);路由逻辑搬进主进程 IPC 是后续可选优化。`stem-service`(Demucs :8008)由 Electron 拉子进程 / 仍作本地 sidecar,逻辑不变。
+- **多租户/scoping(§15.D)**:web 保持 User 层多租户;desktop 退化为**固定一个本地 user**(数据模型仍带 `userId`,只是只有一个)。web↔desktop 云同步 = 开放问题(见下)。
+
+### ② Suno 登录搬进 Electron(收益最大;是简化不是移植)
+现状痛点([suno-bridge-ops] 笔记):token 现取、改完重载插件 + 刷两标签、chrome:// 不能自动 —— 根因是要横跨 `bridge.js↔relay.js↔interceptor.js` 三个隔离上下文借用 Suno 页面活会话(`externally_connectable` + 三 content script)。
+
+桌面端**塌缩成一个 preload + IPC**:
+- 隐藏 `BrowserView` 指向 suno.com,**独立持久 session 分区** → 用户登录一次(Clerk),cookie **重启不丢**。
+- generate/feed 仍走**页面内 fetch**(`interceptor.js` 现在的活、`suno-bridge/api-map.md` 逻辑完全不变),由 preload 执行 → IPC 回渲染进程。
+- 安全模型不变(**token 不落地、在活会话里跑**),但第一方、无插件安装/重载、无两标签刷新、登录持久、生命周期可控(静默续期 / 感知登出)。
+- ⚠ ToS 风险同 §2(已知接受),不因桥换壳而变。退役插件**仅 desktop**;web 仍用插件。
+
+### ③ 本地采样库(拷贝入 storage,2026-06-20 用户拍板)
+数据模型早就为它留好:[`Asset`](web/prisma/schema.prisma:68) 本就是源无关的 `{path, kind, sha256, sourceUrl}`,[`Sound`](web/prisma/schema.prisma:112) 有 `sourceBpm/musicalKey`。本地采样 = Asset 的又一个来源。流程:
+1. **选夹 + watch**(主进程 Node fs,像 Ableton 指向 Splice 下载夹)。
+2. **入库 = 拷贝进 app storage**(和 Suno 下载成素材一致,库自包含、不怕源文件挪位;代价是磁盘占用翻倍 —— 已选此权衡而非原地引用)。`sha256` 去重 schema 已有。warped 缓存照旧另放(`WarpRender`)。
+3. **补 BPM/调**:① Splice 文件名自带(`...90bpm...Cmin...`)→ 解析,近乎免费;② 无标签 → 跑现成 [`conditioning.ts`](web/src/audio/conditioning.ts)(onset 自相关估速,§10 已验证)。③ **one-shot vs loop** 区分(loop 走 warp;one-shot 走切片/触发,后置)。
+4. **汇入现有流水线**:warp 到主 BPM → 试听(已贴速)→ 拖进 slot。= §11 "外部样本导入(可早加)"在桌面端几乎白送。
+
+### 持久化 / undo(不破宪法)
+本地采样入库、桥调用都走 §15 乐观更新/发件箱;入库/删除走 §16 软删口径(库存活集已在 undo 口径,见 [undo-constitution])。SQLite 下发件箱/乐观更新机制不变(只换 Prisma 后端)。
+
+### 分期
+1. **Electron 外壳包住现有 Next app**(`next start` 子进程)+ 桌面构建切 SQLite → 能双击启动;验证音频/MIDI(Chromium,基本白跑通)。
+2. **Suno 桥搬进 Electron**(②)→ 桌面退役插件。← 干掉最大运维痛点。
+3. **本地采样库**(③)→ 选夹 + 拷贝入库 + BPM/调 + 汇入试听/拖拽。← Splice-夹体验。
+4. **(再做之前那轮库打磨)**:预览 auto key-conform(§11)、库搜索/按 BPM·调筛选/收藏。
+
+### 开放问题
+- web↔desktop **云同步**(MySQL 多租户 ↔ 本地 SQLite):暂留 desktop 纯本地,后续按需。
+- SQLite 与 MySQL 的 schema 类型差异清单(`@db.Text`/`Float`/默认值)需逐列过一遍。
+- 打包签名:electron-builder + Mac 公证 + 自动更新(标准开销)。
+- one-shot 触发(非 loop)= 新乐器形态 or 复用 sample 乐器,后置。

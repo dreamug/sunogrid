@@ -17,6 +17,7 @@ interface ShelfEq { low: Tone.Filter; high: Tone.Filter; }
 interface Voice {
   player: Tone.Player;
   eq: ShelfEq;
+  muteGain: Tone.Gain;  // §18 solo 遮罩(audible?1:0):接在 sends 分叉之前 → 静音连干声带 FX send 一起灭;不动 player → 保相位
   panner: Tone.Panner;
   sendDist: Tone.Gain; sendDelay: Tone.Gain; sendReverb: Tone.Gain; // aux send 量(post-panner 旁路进 3 个 fx return,§17)
   meter: Tone.Meter;
@@ -48,6 +49,7 @@ export class StudioEngine {
   private retempoTarget?: number;  // 改速目标 BPM(边界前停走带也要把 transport 落到它,免重启后 buffer 与 transport 不匹配)
   private retempoBuilds?: Map<string, Promise<AudioBuffer | null>>; // 改速在渲的新 buffer;边界前停走带 → 由 stopTransport 就地兜底应用(否则只剩旧长度 buffer 配新速度 = drift)
   private quantize: Quantize = '1bar';                              // 启停量化粒度(顶栏 Quantize 选择器);launch/stop/audition 用 nextBoundary 读它
+  private soloIds = new Set<string>();                              // §18 独奏集(隔离式+多选,瞬态);仅经 setSolo 改 + clearAll 清;UI soloRef 是 authority
   private master?: Tone.Volume; private masterClip?: Tone.WaveShaper; // 主总线:汇总(FX链+节拍器)→ 主音量(master Volume)→ 软削波天花板(memoryless)→ destination
   private split?: Tone.Split; private meterL?: Tone.Meter; private meterR?: Tone.Meter; // 总输出 L/R 电平表(抽 master = post-FX/post 主音量/pre-软削波 的真实总线电平)
   private clickSynth?: Tone.Synth; private clickVol?: Tone.Volume;  // 节拍器:click synth → 音量节点 → master(随主音量+限制器,但不进 FX)
@@ -157,8 +159,9 @@ export class StudioEngine {
     player.loopStart = 0;
     player.loopEnd = buffer.duration;
     const eq = this.makeEq();
+    const muteGain = new Tone.Gain(1); // §18 solo 遮罩(audible?1:0);在 sends 分叉前 → 静音连干声带 FX send 一起灭
     const panner = new Tone.Panner(0);
-    player.chain(eq.low, eq.high, panner, this.master ?? Tone.getDestination()); // low→high→panner→master(干声,随主音量+限制器)
+    player.chain(eq.low, eq.high, muteGain, panner, this.master ?? Tone.getDestination()); // low→high→muteGain→panner→master(干声,随主音量+限制器)
     // aux send(§17):post-panner 旁路进 3 个共享 fx return,各自一个量;送量 0 = 不出。
     const sendDist = new Tone.Gain(0), sendDelay = new Tone.Gain(0), sendReverb = new Tone.Gain(0);
     if (this.fx) {
@@ -168,7 +171,7 @@ export class StudioEngine {
     }
     const meter = new Tone.Meter();
     panner.connect(meter); // 旁路抽头(pre-FX),只给本乐器 mixer 电平表;主 L/R 表抽在 master(见 init)= 真实总线,不再逐 panner 并联(那样会与 master 双计)
-    const v: Voice = { player, eq, panner, sendDist, sendDelay, sendReverb, meter, bars, wantOn: false, state: 'off' };
+    const v: Voice = { player, eq, muteGain, panner, sendDist, sendDelay, sendReverb, meter, bars, wantOn: false, state: 'off' };
     this.voices.set(id, v);
     this.applyMixer(v, mixer);
     if (sends) this.applySends(v, sends);
@@ -331,6 +334,7 @@ export class StudioEngine {
     v.player.dispose();
     v.eq.low.dispose();
     v.eq.high.dispose();
+    v.muteGain.dispose();
     v.panner.dispose();
     v.sendDist.dispose(); v.sendDelay.dispose(); v.sendReverb.dispose();
     v.meter.dispose();
@@ -338,14 +342,40 @@ export class StudioEngine {
   }
   clearAll(): void {
     [...this.voices.keys()].forEach((id) => this.clearInstrument(id));
+    this.soloIds.clear(); // §18:无 voice = 无 solo(切 session / undo 重灌时自然清掉,UI 侧也 clearSolo 保持同步)
   }
 
-  /** 开关:总走带在跑→量化进/出(UI 闪烁等边界);没起走带→on 立即起走带+出声、off 直接停。 */
+  // --- 开关(enabled)+ 独奏(solo,§18)。可听性 = solo 遮罩后的最终结果。 ---
+  private soloActive(): boolean { return this.soloIds.size > 0; }
+  /** 该乐器是否可听(solo 遮罩后):有 solo → 只听被 solo 的;无 solo → 听所有 armed。 */
+  private isAudible(id: string, v: Voice): boolean { return this.soloActive() ? this.soloIds.has(id) : v.wantOn; }
+  /** 该乐器 player 是否该在跑:armed,或被 solo 强行点起(隔离一个 ▶ 关着的乐器)。 */
+  private shouldRun(id: string, v: Voice): boolean { return v.wantOn || this.soloIds.has(id); }
+
+  /** 开关:只改播放意图 wantOn,再让 reconcile 按 solo 算最终的"跑/听"。 */
   setEnabled(id: string, on: boolean): void {
     const v = this.voices.get(id);
     if (!v) return;
-    this.cancelPending(v); // 开关变更 → 作废还没接管的换 buffer
     v.wantOn = on;
+    this.reconcileVoice(id, v);
+  }
+
+  /** 设置独奏集(§18,隔离式 + 多选):替换 soloIds 后重算所有 voice 的"跑 + 听"。 */
+  setSolo(ids: Iterable<string>): void {
+    this.soloIds = new Set(ids);
+    this.voices.forEach((v, id) => this.reconcileVoice(id, v));
+  }
+
+  /** 按当前 wantOn + soloIds 重算单个 voice:muteGain 遮罩(即时、保相位)+ player 跑/停(量化)。 */
+  private reconcileVoice(id: string, v: Voice): void {
+    v.muteGain.gain.rampTo(this.isAudible(id, v) ? 1 : 0, 0.015); // 遮罩即时跟随,不动 player → 保相位、清 solo 原相位接回
+    this.setRunning(v, this.shouldRun(id, v));
+  }
+
+  /** player 跑/停:走带在跑→量化进/出(UI 等边界);没起走带→只记意图、不出声。
+   *  原 setEnabled 的启停逻辑抽到这里,键于 run(=wantOn||solo)而非 enabled —— solo 能点起 ▶ 关着的乐器。 */
+  private setRunning(v: Voice, run: boolean): void {
+    this.cancelPending(v); // 变更 → 作废还没接管的换 buffer
     const t = Tone.getTransport();
     if (t.state !== 'started') {
       // 没总走带:不出声。播放态只记在 wantOn(UI 用 enabled 体现);按总播放才一起响。
@@ -354,14 +384,15 @@ export class StudioEngine {
       v.state = 'off';
       return;
     }
-    this.clearScheduled(v);
-    if (on) {
-      if (v.state === 'on') return;
+    if (run) {
+      if (v.state === 'on' || v.state === 'queued') return; // 已在响 / 已排队 → 不重排
+      this.clearScheduled(v);
       v.state = 'queued';
       v.scheduledId = t.scheduleOnce((time) => { v.scheduledId = undefined; this.fire(v, time); v.state = 'on'; this.onChange?.(); }, this.nextBoundary()); // 边界:queued→on,通知上层(呼吸 className 收掉)
     } else {
-      if (v.state === 'queued') { v.state = 'off'; return; }
-      if (v.state !== 'on') return;
+      if (v.state === 'off' || v.state === 'stopping') return; // 已停 / 已在停途中 → 不重排
+      this.clearScheduled(v);
+      if (v.state === 'queued') { v.state = 'off'; return; } // 还没出声 → 直接取消
       v.state = 'stopping';
       v.scheduledId = t.scheduleOnce((time) => { v.scheduledId = undefined; v.player.stop(time); v.state = 'off'; this.onChange?.(); }, this.nextBoundary()); // 边界:stopping→off
     }
@@ -372,8 +403,9 @@ export class StudioEngine {
     const t = Tone.getTransport();
     this.scheduleMetro(); // 重挂节拍器(上次 stop 的 t.cancel() 清掉了)
     t.start();
-    this.voices.forEach((v) => {
-      if (v.wantOn) { this.fire(v, Tone.now()); v.state = 'on'; } else v.state = 'off';
+    this.voices.forEach((v, id) => {
+      if (this.shouldRun(id, v)) { this.fire(v, Tone.now()); v.state = 'on'; } else v.state = 'off'; // §18:armed 或被 solo 点起的都起声
+      v.muteGain.gain.value = this.isAudible(id, v) ? 1 : 0; // 起播即按 solo 置遮罩(瞬时,非斜坡)
     });
   }
   stopTransport(): void {
@@ -389,6 +421,7 @@ export class StudioEngine {
       v.scheduledId = undefined;
       try { v.player.playbackRate = 1; } catch { /* */ } // 清掉可能残留的顶速桥接
       v.player.stop();
+      v.muteGain.gain.value = 1; // §18:走带停 → 解除 solo 遮罩(预览/audition 走同一链,不该被静音);下次起播 startTransport 再按 solo 重置
       v.state = 'off'; // 停走带=都不出声(state 只管出声);播放态保留在 wantOn,UI 仍显示激活
       v.startTime = undefined;
     });

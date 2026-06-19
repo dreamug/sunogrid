@@ -54,11 +54,25 @@ export async function GET(req: Request) {
   const proj = await db.project.findFirst({ where: { id: projectId, userId: user.id }, select: { id: true } });
   if (!proj) return new Response('not found', { status: 404 });
 
-  const sessions = await db.studioSession.findMany({
+  const query = {
     where: { projectId },
-    include: { instruments: { orderBy: { slot: 'asc' }, include: { clips: { orderBy: { orderIndex: 'asc' } } } } },
-    orderBy: { index: 'asc' },
-  });
+    include: { instruments: { orderBy: { slot: 'asc' as const }, include: { clips: { orderBy: { orderIndex: 'asc' as const } } } } },
+    orderBy: { index: 'asc' as const },
+  };
+  let sessions = await db.studioSession.findMany(query);
+  // 空工程:服务端落地默认会话(Verse/Break),给真实持久化 id。否则客户端会兜底造 emptySessions(),
+  // 那批 id 不在库 → 之后 inst.add 引用孤儿 sessionId,被 /api/studio/ops 静默丢弃(返回 200 却 0 落库)——
+  // 新工程的 pad 永远存不进去就是这么来的。确定性 id + skipDuplicates → 并发 GET(StrictMode 双挂载)也不会建重复。
+  if (sessions.length === 0) {
+    await db.studioSession.createMany({
+      data: [
+        { id: `${projectId}-verse`, projectId, name: 'Verse', index: 0 },
+        { id: `${projectId}-break`, projectId, name: 'Break', index: 1 },
+      ],
+      skipDuplicates: true,
+    });
+    sessions = await db.studioSession.findMany(query);
+  }
   return Response.json(
     sessions.map((s) => ({
       id: s.id, name: s.name, index: s.index,

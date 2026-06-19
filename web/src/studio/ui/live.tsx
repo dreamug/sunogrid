@@ -74,12 +74,18 @@ export function SampleWave({ engine, id, peaks, color, playing }: { engine: Stud
   );
 }
 
-/** collage tile 播放头线:自驱动读 voicePhase(底块/波形/网格由 memo 的 CollagePadBody 一次渲好)。 */
+/** collage tile 播放头线:自驱动读 voicePhase(底块/波形/网格由 memo 的 CollagePadBody 一次渲好)。
+ *  包一层 .cwave —— 与 CollagePadBody / SampleWave 同一坐标系(让开左侧 24px launch 键),
+ *  否则 ph% 会按整 pad 算 → 从最左边(播放键背后)起跳,且与波形/小节网格错位。 */
 export function CollageHead({ engine, id, playing }: { engine: StudioEngine | null; id: string; playing: boolean }) {
   useFrame(playing && !!engine);
   const ph = playing && engine ? engine.voicePhase(id) : null;
   if (ph == null) return null;
-  return <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${(ph * 100).toFixed(1)}%`, width: 1, background: '#fff', opacity: 0.9, pointerEvents: 'none' }} />;
+  return (
+    <div className="cwave" aria-hidden="true">
+      <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${(ph * 100).toFixed(1)}%`, width: 1, background: '#fff', opacity: 0.9, pointerEvents: 'none' }} />
+    </div>
+  );
 }
 
 /** tile launch 键的电平填充(竖向):自驱动读 voiceLevel。 */

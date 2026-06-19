@@ -52,6 +52,7 @@ export async function POST(req: Request) {
     for (const s of owned) ownedSounds.add(s.id);
   }
 
+  const skipped: Op[] = []; // 父不在本项目而被丢弃的 add(正常流程下应为空;非空=客户端基准与 DB 失配的 bug 信号)
   try {
     await db.$transaction(async (tx) => {
       // 本项目现存的 session / instrument id(用于校验 create 的父合法 + 维护批内新建)。
@@ -74,7 +75,7 @@ export async function POST(req: Request) {
             liveSessions.delete(op.id);
             break;
           case 'inst.add':
-            if (!liveSessions.has(op.row.sessionId)) break; // 父会话不在本项目 → 拒绝
+            if (!liveSessions.has(op.row.sessionId)) { skipped.push(op); break; } // 父会话不在本项目 → 拒绝
             await tx.studioInstrument.create({ data: { id: op.row.id, ...instData(op.row) } as never });
             liveInstruments.add(op.row.id);
             break;
@@ -86,7 +87,7 @@ export async function POST(req: Request) {
             liveInstruments.delete(op.id);
             break;
           case 'clip.add':
-            if (!liveInstruments.has(op.row.instrumentId)) break; // 父乐器不在本项目 → 拒绝
+            if (!liveInstruments.has(op.row.instrumentId)) { skipped.push(op); break; } // 父乐器不在本项目 → 拒绝
             await tx.clip.create({ data: { id: op.row.id, ...clipData(op.row, ownedSounds) } as never });
             break;
           case 'clip.upd':
@@ -101,5 +102,7 @@ export async function POST(req: Request) {
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : 'apply failed' }, { status: 500 });
   }
-  return Response.json({ ok: true, applied: ops.length });
+  // 静默丢弃过 add(孤儿父)→ 这是 bug,不是正常路径。打日志 + 据实回报 skipped,让客户端别再当"已保存"。
+  if (skipped.length) console.warn(`[studio/ops] 丢弃 ${skipped.length} 条孤儿 add(父 session/instrument 不在 DB):`, skipped.map((o) => o.t));
+  return Response.json({ ok: true, applied: ops.length - skipped.length, skipped: skipped.length });
 }

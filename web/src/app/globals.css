@@ -5,6 +5,7 @@
   --tx:#ece9e3; --tx-2:#a39d92; --tx-3:#6f6a60;
   --acc:#c2724f; --acc-ink:#2a150b; --acc-dim:rgba(194,114,79,.13);
   --on:#454039; --play:#d2ccc0; --danger:#cf8a7a; --queue:#c2a24f;
+  --solo:#e3b53f; --solo-ink:#2a1f05; /* §18 独奏:暖金,区别于播放态的乐器色 + queue 的呼吸色 */
   --r:3px; --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
 }
 * { box-sizing: border-box; }
@@ -32,7 +33,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .sg-spin { width:14px; height:14px; flex:none; border-radius:50%; border:1.6px solid var(--bg-3); border-top-color:var(--acc); animation:sg-spin .8s linear infinite; }
 .sg-spin.sm { width:10px; height:10px; border-width:1.4px; }
 .sg-eq { display:inline-flex; align-items:flex-end; gap:2px; height:12px; color:var(--acc); }
-.sg-eq span { width:2.5px; background:currentColor; border-radius:1px; transform-origin:bottom; animation:sg-eq .7s ease-in-out infinite; }
+.sg-eq span { width:2.5px; height:100%; background:currentColor; border-radius:1px; transform-origin:bottom; animation:sg-eq .7s ease-in-out infinite; }
 .sg-eq span:nth-child(2) { animation-delay:.18s; } .sg-eq span:nth-child(3) { animation-delay:.36s; } .sg-eq span:nth-child(4) { animation-delay:.1s; }
 
 .home { max-width:680px; margin:0 auto; padding:48px 24px 80px; }
@@ -172,8 +173,8 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 /* collage 轨上一片(--c=本片色):默认/hover 提亮/选中加亮白内环。几何(left/width)走内联。 */
 .lane-clip { position:absolute; top:20px; bottom:10px; box-sizing:border-box; overflow:hidden; cursor:grab;
   background:color-mix(in srgb, var(--c) 30%, var(--bg-1)); border:1px solid color-mix(in srgb, var(--c) 60%, var(--line)); transition:background .1s, border-color .1s, box-shadow .1s; }
-.lane-clip:hover:not(.sel) { background:color-mix(in srgb, var(--c) 40%, var(--bg-1)); border-color:color-mix(in srgb, var(--c) 76%, var(--line)); }
-.lane-clip.sel { background:color-mix(in srgb, var(--c) 52%, var(--bg-1)); border-color:color-mix(in srgb, var(--c) 70%, #fff); }
+.lane-clip:hover:not(.csel) { background:color-mix(in srgb, var(--c) 40%, var(--bg-1)); border-color:color-mix(in srgb, var(--c) 76%, var(--line)); }
+.lane-clip.csel { background:color-mix(in srgb, var(--c) 52%, var(--bg-1)); border-color:color-mix(in srgb, var(--c) 70%, #fff); } /* 独立类名,避开全局 .sel(顶栏选择器)的 max-width:170px/padding 泄漏 → 选中片被截短 */
 .lane-clip:active { cursor:grabbing; }
 .lane-scroll::-webkit-scrollbar { display:none; } /* 藏系统横滚条,改用 .we-scroll 自定义条(mac 上系统条会自动隐藏) */
 .clip.filled.st-playing { border-color:var(--c); } /* 播放中=自己颜色全亮(比 ready 的 mix 边更亮);白色只留给选中。用 .filled.st-playing 提高优先级,稳过 .clip.filled 的 mix 边 */
@@ -195,6 +196,19 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .clip:hover .ctools { opacity:1; }
 .ctools button { width:20px; height:20px; display:flex; align-items:center; justify-content:center; font-size:13px; background:var(--bg-3); border:1px solid var(--line-2); border-radius:2px; color:var(--tx-2); cursor:pointer; line-height:1; }
 .ctools button:hover { color:var(--tx); }
+
+/* §18 solo:pad 右下角方形 S(hover 显形 → 点击填充常驻 → 再点取消);独奏中非独奏 pad 压暗、独奏 pad 加金色内环 */
+.solobtn { position:absolute; right:6px; bottom:6px; z-index:3; width:19px; height:19px; display:flex; align-items:center; justify-content:center;
+  font-family:var(--mono); font-size:11px; font-weight:500; line-height:1; border-radius:var(--r); cursor:pointer;
+  background:transparent; color:color-mix(in srgb, var(--solo) 55%, var(--tx-2)); border:1px solid var(--line-2);
+  opacity:0; transition:opacity .1s, background-color .12s, color .12s, border-color .12s; }
+.clip.filled:hover .solobtn { opacity:1; }
+.solobtn:hover { border-color:var(--solo); color:var(--solo); }
+.solobtn.on { opacity:1; background:var(--solo); color:var(--solo-ink); border-color:var(--solo); } /* 常驻 */
+.solobtn.on:hover { background:color-mix(in srgb, var(--solo) 88%, #fff); }
+.clip.filled.solo-on { box-shadow:inset 0 0 0 1px var(--solo); } /* 被独奏 = 金色内环 */
+.clip.filled.solo-off { opacity:.4; transition:opacity .12s; }       /* 被静音 = 压暗 */
+.clip.filled.solo-off:hover { opacity:.72; }                          /* hover 抬亮,看清在点什么 */
 
 /* 生成 + 库 */
 .gen-body { padding:11px 12px; display:flex; flex-direction:column; gap:9px; }
