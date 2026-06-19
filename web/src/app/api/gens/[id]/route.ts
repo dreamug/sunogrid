@@ -23,12 +23,12 @@ export async function PATCH(req: Request, { params }: P) {
   if (!(await ownsGen(id))) return new Response('not found', { status: 404 });
   const b = await req.json();
   const data: Record<string, unknown> = {};
-  for (const k of ['status', 'error', 'sunoBatchId', 'sunoClipIds'] as const) if (k in b) data[k] = b[k];
+  for (const k of ['status', 'error', 'sunoBatchId', 'sunoClipIds', 'trashed'] as const) if (k in b) data[k] = b[k]; // trashed:撤销恢复整组(§16 口径⑦)
   const gen = await db.gen.update({ where: { id }, data });
   return Response.json(gen);
 }
 
-// 删除一组生成:软删其下所有变体(及变体的 stem),再删 gen 行。失败 gen 通常无变体 → 只删行。
+// 删除一组生成:全软删 —— 标记 gen.trashed + 软删其下所有变体(及变体的 stem)。整组可被 undo 恢复(§16 口径⑦:gen 行不再硬删)。
 export async function DELETE(_req: Request, { params }: P) {
   const { id } = await params;
   if (!(await ownsGen(id))) return new Response('not found', { status: 404 });
@@ -40,6 +40,6 @@ export async function DELETE(_req: Request, { params }: P) {
       data: { trashed: true },
     });
   }
-  await db.gen.delete({ where: { id } });
+  await db.gen.update({ where: { id }, data: { trashed: true } });
   return Response.json({ ok: true });
 }

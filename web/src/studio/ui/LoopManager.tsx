@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import type { GenView } from '../useLoopMachine';
 import { SunoStatus } from '@/studio/ui/SunoStatus';
+import { TransportIcon } from '@/studio/ui/glyphs';
 
 interface Props {
   gens: GenView[];
@@ -111,7 +112,7 @@ export function LoopManager(p: Props) {
   const playInner = (id: string) => {
     if (p.warmingId === id) return <span className="sg-spin sm" aria-hidden="true" />;
     if (p.selectedLoopId === id && p.previewing) return <span className="sg-eq" aria-hidden="true"><span /><span /><span /></span>;
-    return <span aria-hidden="true">▶</span>;
+    return <TransportIcon size={11} />;
   };
   const drag = (id: string) => ({
     draggable: true,

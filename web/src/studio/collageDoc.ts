@@ -70,6 +70,33 @@ export function moveItem(doc: CollageDoc, id: string, desiredStart: number): Col
   return { ...doc, items: sortItems(doc.items.map((i) => (i.id === id ? { ...i, startStep: start } : i))) };
 }
 
+/** 拖动(cross-into-gaps):把 id 移到 desiredStart;落点空着就用它,否则吸进离它最近、放得下的空隙。
+ *  长度不变、永不重叠、保留留白;能跨过邻居落到对面空位(区别于 moveItem 的"夹邻不可跨")。packed 无空位则原样返回。 */
+export function placeNear(doc: CollageDoc, id: string, desiredStart: number): CollageDoc {
+  const it = doc.items.find((i) => i.id === id);
+  if (!it) return doc;
+  const len = itemLengthSteps(doc, it);
+  const total = totalSteps(doc);
+  const others = sortItems(doc.items.filter((i) => i.id !== id));
+  const want = Math.max(0, Math.min(total - len, Math.round(desiredStart)));
+  const fits = (start: number) => start >= 0 && start + len <= total && others.every((o) => start >= itemEnd(doc, o) || start + len <= o.startStep);
+  const commit = (start: number) => (start === it.startStep ? doc : { ...doc, items: sortItems(doc.items.map((i) => (i.id === id ? { ...i, startStep: start } : i))) });
+  if (fits(want)) return commit(want);
+  // 落点被占 → 枚举空隙 [gapStart, gapEnd),挑离 want 最近、能放下 len 的,夹进去
+  let best: number | null = null;
+  let bestDist = Infinity;
+  let cursor = 0;
+  const consider = (gapStart: number, gapEnd: number) => {
+    if (gapEnd - gapStart < len) return;
+    const cand = Math.max(gapStart, Math.min(gapEnd - len, want));
+    const dist = Math.abs(cand - want);
+    if (dist < bestDist) { bestDist = dist; best = cand; }
+  };
+  for (const o of others) { consider(cursor, o.startStep); cursor = Math.max(cursor, itemEnd(doc, o)); }
+  consider(cursor, total);
+  return best == null ? doc : commit(best);
+}
+
 /** 改 lane 上的可编辑字段(semitones / gainDb;trim/长度走下钻的 warp 编辑器)。 */
 export function patchItem(doc: CollageDoc, id: string, patch: Partial<Pick<CollageClip, 'semitones' | 'gainDb'>>): CollageDoc {
   return { ...doc, items: doc.items.map((i) => (i.id === id ? { ...i, ...patch } : i)) };

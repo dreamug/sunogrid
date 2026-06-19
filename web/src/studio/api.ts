@@ -1,5 +1,6 @@
 'use client';
 // 前端 → 后端持久化 API 的薄客户端。
+import type { FxConfig } from '@/contracts';
 const J = async (r: Response) => {
   if (!r.ok) throw new Error((await r.text().catch(() => '')) || `HTTP ${r.status}`);
   return r.json();
@@ -9,7 +10,8 @@ const patch = (p: string, b: unknown) => fetch(p, { method: 'PATCH', headers: { 
 const del = (p: string) => fetch(p, { method: 'DELETE' }).then(J);
 
 export interface ApiGenPrefs { mode: 'sound' | 'advanced'; loop: boolean; bpm: number }
-export interface ApiProject { id: string; name: string; masterBpm: number; masterKey: string | null; genPrefs: ApiGenPrefs | null; quantize: string; beatsPerBar: number }
+export interface ApiGridPrefs { arrange: number; warp: number; snap: boolean }
+export interface ApiProject { id: string; name: string; masterBpm: number; masterKey: string | null; genPrefs: ApiGenPrefs | null; gridPrefs: ApiGridPrefs | null; fx: FxConfig | null; quantize: string; beatsPerBar: number }
 export interface ApiAsset { id: string; path: string; contentType: string }
 export interface ApiSound {
   id: string; name: string; mode: string; sourceBpm: number; musicalKey: string | null;

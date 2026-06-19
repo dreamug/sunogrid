@@ -4,7 +4,7 @@
 import type { ApiSound } from '@/studio/api';
 import { api, cdnUrl } from '@/studio/api';
 import type { Clip, CollageClip, Instrument, SampleWarp, Session } from '@/contracts';
-import { clipTimeMul, defaultMixer } from '@/contracts';
+import { clipTimeMul, defaultMixer, defaultSends } from '@/contracts';
 
 let _ctx: AudioContext | null = null;
 const getCtx = () => (_ctx ??= new AudioContext());
@@ -156,7 +156,7 @@ export async function buildRealStudio(bpm = 90): Promise<RealStudio> {
   const sampleInst = (s: ApiSound, slot: number, idPrefix: string): Instrument => {
     const r = regionFromSound(s);
     const clip: Clip = { soundId: s.id, assetId: s.assetId, startSample: r.startSample, endSample: r.endSample, bars: r.bars, semitones: r.semitones, gainDb: 0 };
-    return { id: `${idPrefix}-${s.id}`, slot, label: s.name, color: COLORS[slot % COLORS.length], mixer: defaultMixer(), sends: [], enabled: false, payload: { kind: 'sample', clip } };
+    return { id: `${idPrefix}-${s.id}`, slot, label: s.name, color: COLORS[slot % COLORS.length], mixer: defaultMixer(), sends: defaultSends(), enabled: false, payload: { kind: 'sample', clip } };
   };
 
   const verseSamples = sounds.slice(0, Math.min(4, sounds.length)).map((s, i) => sampleInst(s, i, 'a'));
@@ -172,7 +172,7 @@ export async function buildRealStudio(bpm = 90): Promise<RealStudio> {
     const chopLen = Math.round(0.45 * s.sampleRate);
     clips.push({ id: `k${i}`, soundId: s.id, assetId: s.assetId, startSample: r.startSample, endSample: r.startSample + chopLen, bars: 0.5, semitones: i === 2 ? 5 : 0, gainDb: 0, startStep: i * 8 });
   }
-  const collage: Instrument = { id: 'a-chops', slot: verseSamples.length, label: 'Chops (slices)', color: COLORS[5], mixer: defaultMixer(), sends: [], enabled: false, payload: { kind: 'collage', bars: 2, stepsPerBar: 16, loopStartStep: 0, bakedAssetId: null, clips } };
+  const collage: Instrument = { id: 'a-chops', slot: verseSamples.length, label: 'Chops (slices)', color: COLORS[5], mixer: defaultMixer(), sends: defaultSends(), enabled: false, payload: { kind: 'collage', bars: 2, stepsPerBar: 16, loopStartStep: 0, bakedAssetId: null, clips } };
 
   const breakSamples = sounds.slice(1, Math.min(3, sounds.length)).map((s, i) => sampleInst(s, i, 'b'));
 

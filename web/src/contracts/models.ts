@@ -81,6 +81,51 @@ export interface GenPrefs {
   bpm: number;
 }
 
+/** 编辑器网格偏好(per-project,持久化 → Project.gridPrefs JSON,见 §15.A)。记住不重置:
+ *  arrange = chop 拼贴轨吸附格(bars/格),warp = clip warp 编辑器的网格,snap = warp 编辑器吸附开关。 */
+export interface GridPrefs {
+  arrange: number;
+  warp: number;
+  snap: boolean;
+}
+
+/** 主总线效果器配置(per-project,持久化 → Project.fx JSON,见 §15.A/§17)。
+ *  三个 insert 效果器串在所有乐器与主输出之间:失真 → 延迟 → 混响。`on=false` 或 `mix=0` = 直通。 */
+export interface FxDistortion {
+  on: boolean;
+  drive: number;                       // 0..1 失真量(前级增益喂入波形整形器)
+  tone: number;                        // 0..1 后置低通(0=暗 1=亮)
+  character: 'soft' | 'hard' | 'fuzz'; // soft=tanh 管味 / hard=hard-clip / fuzz=非对称重谐波
+  mix: number;                         // 0..1 直/湿
+}
+export interface FxDelay {
+  on: boolean;
+  sync: '1/4' | '1/8' | '1/8.' | '1/16' | 'ms'; // 同步分割跟工程 BPM;'ms'=自由毫秒
+  timeMs: number;                      // sync='ms' 时用(20..1000)
+  feedback: number;                    // 0..0.95 反馈量(回声次数)
+  tone: number;                        // 0..1 反馈环阻尼低通(越小回声越暗=模拟味)
+  pingpong: boolean;                   // 左右弹跳
+  mix: number;                         // 0..1 直/湿
+}
+export interface FxReverb {
+  on: boolean;
+  decay: number;                       // 秒 0.3..12(卷积 IR 长度=房间大小)
+  preDelay: number;                    // 秒 0..0.15(混响前的间隙)
+  damp: number;                        // 0..1 高频阻尼(越大越暗)
+  mix: number;                         // 0..1 直/湿
+}
+export interface FxConfig {
+  distortion: FxDistortion;
+  delay: FxDelay;
+  reverb: FxReverb;
+}
+/** 默认全部 bypass —— 不改默认音色,加进信号链零副作用。 */
+export const DEFAULT_FX: FxConfig = {
+  distortion: { on: false, drive: 0.3, tone: 0.5, character: 'soft', mix: 1 },
+  delay: { on: false, sync: '1/8', timeMs: 250, feedback: 0.35, tone: 0.5, pingpong: false, mix: 0.3 },
+  reverb: { on: false, decay: 2.5, preDelay: 0.02, damp: 0.5, mix: 0.3 },
+};
+
 /** 一个工程(整套设置)。 */
 export interface Project {
   id: string;
@@ -90,6 +135,10 @@ export interface Project {
   masterKey: MusicalKey | null;
   /** 生成窗口偏好;null=用默认。 */
   genPrefs: GenPrefs | null;
+  /** 编辑器网格偏好;null=用默认。 */
+  gridPrefs: GridPrefs | null;
+  /** 主总线效果器配置(§17);null=用 DEFAULT_FX。 */
+  fx: FxConfig | null;
   beatsPerBar: number;   // 目前固定 4
   quantize: Quantize;    // 默认 '1bar'
   banks: Bank[];

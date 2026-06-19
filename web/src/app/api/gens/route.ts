@@ -7,7 +7,7 @@ export async function GET(req: Request) {
   if (!user) return unauthorized();
   const projectId = new URL(req.url).searchParams.get('projectId');
   const gens = await db.gen.findMany({
-    where: { userId: user.id, ...(projectId ? { projectId } : {}) },
+    where: { userId: user.id, trashed: false, ...(projectId ? { projectId } : {}) }, // 软删的整组不列(可被 undo 恢复)
     include: {
       sounds: {
         where: { trashed: false, parentSoundId: null }, // 只列顶层;stem 嵌在父下

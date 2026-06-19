@@ -2,22 +2,25 @@
 // Studio —— 老 loop 机 .daw 外壳 + 新模型 Session › Instrument › Clip,接真实库 + 生成 + undo + 真 WarpEditor + 落库。
 // 左 = LoopManager(生成 + 真实库,可拖);中 = 操场(clip 画波形、拖库素材进空 slot=sample 乐器、hover 空 slot=＋sample/＋切片、拖进 collage=加片);
 // 底 = 编辑器(选库素材→预调 warp;选乐器→mixer + warp/collage 下钻)。生产 loop-machine 与 DB 的旧表不碰。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import Link from 'next/link';
-import type { Clip, CollageClip, GenPrefs, Instrument, InstrumentPayload, Mixer, Quantize, SampleWarp, Session } from '@/contracts';
-import { clipMixer, defaultMixer, instrumentBars, mixerToClipPatch, sessionBars, SLOTS_PER_SESSION } from '@/contracts';
+import type { Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, InstrumentPayload, InstrumentSends, Mixer, Quantize, SampleWarp, Session } from '@/contracts';
+import { clipMixer, defaultMixer, defaultSends, DEFAULT_FX, instrumentBars, mixerToClipPatch, sessionBars, SLOTS_PER_SESSION } from '@/contracts';
 import { normalize, diff, type Snapshot } from '@/studio/sync';
 import { StudioEngine } from '@/audio/studioEngine';
 import { buildBuffer, decodeAsset, loadLibrary, regionFromClip, regionFromSound, soundToClip, warpToBuffer } from '@/studio/realLibrary';
 import { loadGens, generateToLibrary, retryGen, conciseError, type GenHooks } from '@/studio/studioGens';
 import { findInst, patchCollageClip, patchMixer, removeInstrument as docRemove } from '@/studio/sessionDoc';
-import { moveItem, placeItem } from '@/studio/collageDoc';
+import { placeItem, placeNear, roomAt, itemLengthSteps } from '@/studio/collageDoc';
 import { MixerStrip } from '@/studio/ui/MixerStrip';
+import { Wave, MasterMeter, TransportPos, SampleWave, CollageHead, LaunchLevel } from '@/studio/ui/live';
 import { InstrumentIcon, INSTRUMENT_ICONS, ICON_KEYS, DEFAULT_ICON } from '@/studio/ui/instrumentIcons';
+import { TransportIcon } from '@/studio/ui/glyphs';
 import { ConfirmDialog, type ConfirmOpts } from '@/ui/ConfirmDialog';
 import { LoopManager } from '@/studio/ui/LoopManager';
+import { FxRack } from '@/studio/ui/FxRack';
 import type { GenView } from '@/studio/useLoopMachine';
 import { api, type ApiSound } from '@/studio/api';
 import { ClipEditor } from '@/studio/ui/WarpEditor';
@@ -74,32 +77,23 @@ const pieceKey = (c: { assetId: string; startSample: number; endSample: number }
 // collage 每片配色:按片序号轮一个调色板(相邻片必不同色,方便分辨);lane 与 pad 用同一序号 → 同片同色。
 const SLICE_COLORS = ['#c2724f', '#6a86a0', '#c2a24f', '#8a9b6a', '#a06f8a', '#9a7bc0', '#5a9b9b', '#b56a6a'];
 const sliceColor = (i: number) => SLICE_COLORS[((i % SLICE_COLORS.length) + SLICE_COLORS.length) % SLICE_COLORS.length];
+// 按片 id 哈希取色 —— 稳定:排序/拖移/重排都不变色(别用数组下标,下标会随 sortItems 漂)。
+const sliceColorFor = (id: string) => { let h = 0; for (let k = 0; k < id.length; k++) h = (Math.imul(h, 31) + id.charCodeAt(k)) | 0; return sliceColor(h); };
 
-function Wave({ peaks, className }: { peaks: number[]; className: string }) {
-  const n = peaks.length; if (n < 2) return null;
-  const sx = 100 / (n - 1);
-  const yT = (p: number) => (50 - Math.max(p, 0.03) * 46).toFixed(2);
-  const yB = (p: number) => (50 + Math.max(p, 0.03) * 46).toFixed(2);
-  let d = `M 0 ${yT(peaks[0])}`;
-  for (let i = 1; i < n; i++) d += `L${(i * sx).toFixed(2)} ${yT(peaks[i])}`;
-  for (let i = n - 1; i >= 0; i--) d += `L${(i * sx).toFixed(2)} ${yB(peaks[i])}`;
-  d += 'Z';
-  return <svg className={className} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d={d} fill="currentColor" /></svg>;
-}
-
-/** collage 乐器 pad:每片一个**彩色底块**(不只波形)+ 片色波形,叠**小节/拍网格线**(和单 sample 的纯波形一眼区分)。 */
-function CollagePadWave({ payload, ph }: { payload: Extract<InstrumentPayload, { kind: 'collage' }>; ph: number | null }) {
+/** collage 乐器 pad 的**静态**底:每片一个彩色底块 + 片色波形 + 小节/拍网格线。memo:payload 不变就不重渲
+ *  (播放头是独立的 <CollageHead> 自驱动叶子,不在这里;故播放时本体一帧都不用重算)。 */
+const CollagePadBody = memo(function CollagePadBody({ payload }: { payload: Extract<InstrumentPayload, { kind: 'collage' }> }) {
   const spb = payload.stepsPerBar;
   const loopLen = Math.max(1, Math.round(payload.bars * spb));
   const barPct = (spb / loopLen) * 100, beatPct = barPct / 4; // 每小节/每拍一条线
   return (
     <div className="cwave" aria-hidden="true">
-      {payload.clips.map((c, i) => {
+      {payload.clips.map((c) => {
         const x = ((c.startStep - payload.loopStartStep) / loopLen) * 100;
         const w = (Math.max(1, Math.round(c.bars * spb)) / loopLen) * 100;
         const vx = Math.max(0, x), vw = Math.min(100, x + w) - vx;
         if (vw <= 0) return null;
-        const col = sliceColor(i), pk = lanePeaksCache.get(pieceKey(c));
+        const col = sliceColorFor(c.id), pk = lanePeaksCache.get(pieceKey(c));
         return (
           <div key={c.id} style={{ position: 'absolute', top: 0, bottom: 0, left: `${vx}%`, width: `${vw}%`, overflow: 'hidden', background: `color-mix(in srgb, ${col} 26%, transparent)`, borderRight: `1px solid color-mix(in srgb, ${col} 50%, transparent)` }}>
             {pk && pk.length > 1 && <div style={{ position: 'absolute', inset: 0, color: `color-mix(in srgb, ${col} 88%, #fff)`, opacity: 0.92 }}><Wave className="" peaks={pk} /></div>}
@@ -108,10 +102,9 @@ function CollagePadWave({ payload, ph }: { payload: Extract<InstrumentPayload, {
       })}
       {/* 网格线叠在彩色块之上 */}
       <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,0.14) 0 1px, transparent 1px ${barPct}%), repeating-linear-gradient(90deg, rgba(255,255,255,0.06) 0 1px, transparent 1px ${beatPct}%)` }} />
-      {ph != null && <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${(ph * 100).toFixed(1)}%`, width: 1, background: '#fff', opacity: 0.9, pointerEvents: 'none' }} />}
     </div>
   );
-}
+});
 
 interface Ctx { soundsById: Map<string, ApiSound>; bpm: number; beatsPerBar: number }
 
@@ -120,14 +113,20 @@ const emptySessions = (): Session[] => [
   { id: nid('sess'), name: 'Break', index: 1, instruments: [] },
 ];
 
-export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = null, genPrefs = null, quantize: propQuantize = '1bar', beatsPerBar = 4 }: { projectId: string; name?: string; masterBpm: number; masterKey?: string | null; genPrefs?: GenPrefs | null; quantize?: Quantize; beatsPerBar?: number }) {
+export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = null, genPrefs = null, gridPrefs = null, fx: fxProp = null, quantize: propQuantize = '1bar', beatsPerBar = 4 }: { projectId: string; name?: string; masterBpm: number; masterKey?: string | null; genPrefs?: GenPrefs | null; gridPrefs?: GridPrefs | null; fx?: FxConfig | null; quantize?: Quantize; beatsPerBar?: number }) {
   const [ctx, setCtx] = useState<Ctx | null>(null);
+  const [projName, setProjName] = useState(name); // 顶栏可编辑工程名;改即乐观写 Project.name(同 quantize 套路,不进 undo/发件箱)
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionIdx, setSessionIdx] = useState(0);
   const [selId, setSelId] = useState<string | null>(null);
   const [selClipId, setSelClipId] = useState<string | null>(null);
   const [libSel, setLibSel] = useState<string | null>(null);
-  const [collageGrid, setCollageGrid] = useState(0.25); // collage arrange 网格分辨率(bars/格),乐器壳 rail 与轨共用
+  const [collageGrid, setCollageGrid] = useState(gridPrefs?.arrange ?? 0.25); // collage arrange 网格分辨率(bars/格),乐器壳 rail 与轨共用;§15.A 持久化
+  // 网格偏好整块持久化(per-project,记住不重置):arrange=拼贴轨吸附、warp/snap=clip warp 编辑器。改即乐观写 Project.gridPrefs。
+  const gridRef = useRef<GridPrefs>({ arrange: gridPrefs?.arrange ?? 0.25, warp: gridPrefs?.warp ?? 0.25, snap: gridPrefs?.snap ?? true });
+  const saveGrid = (patch: Partial<GridPrefs>) => { gridRef.current = { ...gridRef.current, ...patch }; api.projects.update(projectId, { gridPrefs: gridRef.current }).catch(() => {}); };
+  const setArrangeGrid = (bars: number) => { setCollageGrid(bars); saveGrid({ arrange: bars }); };
+  const [arrangeH, setArrangeH] = useState(0); // chop arrange 浮层实测高度 → 选中 chop 时给操场加底部 padding,底部 pad 不被浮层挡住
   const [confirmState, setConfirmState] = useState<(ConfirmOpts & { resolve: (v: boolean) => void }) | null>(null);
   const [gens, setGens] = useState<GenView[]>([]);
   const [gp, setGp] = useState('dusty jazz rhodes chords, lo-fi');
@@ -148,9 +147,17 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [metroVol, setMetroVol] = useState(-8);
   const [metroIv, setMetroIv] = useState<'beat' | 'bar' | '2bar' | '4bar'>('beat');
   const [masterVol, setMasterVol] = useState(0);
-  type HistEntry = { sessions: Session[]; warps: Map<string, unknown>; bpm: number }; // 撤销快照口径(§16):sessions 整树 + 各库声音 warp + 主 bpm
+  // 主总线效果器(§17):per-project,改即时 setFx 到引擎 + 防抖乐观持久化;v1 不进 undo(同 masterVol/quantize,见 §16 沿革)。
+  const [fx, setFx] = useState<FxConfig>(fxProp ?? DEFAULT_FX);
+  const fxRef = useRef<FxConfig>(fx); fxRef.current = fx;
+  // 撤销快照口径(§16):① sessions 整树 ② 各库声音 warp ③ 主 bpm ④ 主总线效果器(§17)⑤ 活动 session(undo 跳回改动现场)⑥ 量化粒度 ⑦ 库存活集(声音/生成组软删可撤)
+  type HistEntry = { sessions: Session[]; warps: Map<string, unknown>; bpm: number; fx: FxConfig; sessionId: string; quantize: Quantize; liveSounds: Set<string>; liveGens: Set<string> };
   const [past, setPast] = useState<HistEntry[]>([]);
   const [future, setFuture] = useState<HistEntry[]>([]);
+  // ⚠ undo/redo 的 snapshot()/applyEntry() 必须在 setState updater **外**只跑一次:React StrictMode(dev)会双调 updater,
+  // 若副作用写在 updater 里会重复跑、把 past/future 栈搞乱(表现:redo 还原不出来)。故用 ref 读最新栈、副作用在外面跑。
+  const pastRef = useRef<HistEntry[]>([]); pastRef.current = past;
+  const futureRef = useRef<HistEntry[]>([]); futureRef.current = future;
   const [over, setOver] = useState<number | null>(null);
   const [overKind, setOverKind] = useState<'inst' | 'sound'>('sound'); // 拖到 pad 上的是乐器(移动/互换)还是素材(新建/替换/加片)
   const [dragSoundId, setDragSoundId] = useState<string | null>(null); // 正在拖的素材 id(波形/库共用)→ 轨内占位块按真实长度画、判重叠
@@ -160,9 +167,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [sync, setSync] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle'); // 自动保存状态(替代 Save 按钮)
 
   const eng = useRef<StudioEngine | null>(null);
-  const raf = useRef<number | null>(null);
   const ctxRef = useRef<Ctx | null>(null);
   const sessionsRef = useRef<Session[]>([]);
+  const gensRef = useRef<GenView[]>([]);              // 快照口径⑦:记录当时存活的生成组 id(库删除可撤)
+  const quantizeRef = useRef<Quantize>(propQuantize); // 快照口径⑥:量化粒度(项目级标量)读最新值
+  // §16 口径⑦:undo/redo 只允许"重删"曾经真删过的 id(restore-only + 这个白名单)→ 撤回到很早的快照时绝不误删之后生成的声音/组。
+  const trashableSounds = useRef<Set<string>>(new Set());
+  const trashableGens = useRef<Set<string>>(new Set());
   const loaded = useRef(false); // 加载完成前不触发自动保存
   const saving = useRef(false); // 保存锁:避免并发 flush
   const pendingSave = useRef(false); // 保存期间又有改动 → 存完再存一次
@@ -171,7 +182,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const dragOK = useRef(true);
   const lastCollageEdit = useRef<Session | null>(null); // collage 拖移/调参后,松手重 bake 取最新一笔(绕开 sessionsRef 渲染滞后)
   const collageRebakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null); // per-片 mixer 拖动:防抖重 bake(MixerStrip 无 onEnd)
-  ctxRef.current = ctx; sessionsRef.current = sessions;
+  ctxRef.current = ctx; sessionsRef.current = sessions; gensRef.current = gens; quantizeRef.current = quantize;
 
   const loadInstrumentToEngine = useCallback(async (inst: Instrument, seamless = false) => {
     const c = ctxRef.current, e = eng.current; if (!c || !e) return;
@@ -182,7 +193,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (seamless && e.hasVoice(inst.id)) {
         e.swapBuffer(inst.id, buf, instrumentBars(inst)); // 在播时:下一个小节边界无缝接管,不断声
       } else {
-        e.loadInstrument(inst.id, buf, instrumentBars(inst), inst.mixer);
+        e.loadInstrument(inst.id, buf, instrumentBars(inst), inst.mixer, inst.sends);
         e.setEnabled(inst.id, inst.enabled);
       }
       // sample:pad 波形 = 源的 trim 区(与 ClipEditor 同一段,所见=所见);collage:乐器层 = 整条 baked loop。
@@ -211,6 +222,12 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   }, [loadInstrumentToEngine]);
 
   const refreshGens = useCallback(async () => { setGens(await loadGens(projectId)); }, [projectId]);
+  // 库重载(删除/恢复/生成后):重拉声音库 + 生成列表(软删项被路由过滤掉,恢复的重新出现)。
+  const reloadLibrary = useCallback(async () => {
+    const sb = await loadLibrary();
+    if (ctxRef.current) { ctxRef.current = { ...ctxRef.current, soundsById: sb }; setCtx(ctxRef.current); }
+    await refreshGens();
+  }, [refreshGens]);
 
   useEffect(() => {
     let alive = true;
@@ -230,7 +247,11 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         const c: Ctx = { soundsById, bpm: masterBpm, beatsPerBar };
         eng.current = new StudioEngine();
         eng.current.init(c.bpm, c.beatsPerBar);
+        // 离散态(voice queued→on/stopping→off、预览 queued→playing 等异步边界跃迁)→ 重渲一次父树,
+        // 让"呼吸 className / 编辑器布尔"跟上。连续视觉(电平/播放头/走带位置)由自驱动叶子负责,不靠这里。
+        eng.current.onChange = () => setTick((t) => t + 1);
         eng.current.setQuantize(propQuantize); // 初始量化粒度(顶栏 Quantize 选择器)
+        eng.current.setFx(fxRef.current);      // 初始主总线效果器(§17)
         ctxRef.current = c;
         setCtx(c); setGens(g); setSessions(sessions);
         await loadSession(sessions[0]);
@@ -239,26 +260,32 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         setStatus(restored ? 'Loaded · drag a sample into an empty slot / hover a slot to add an instrument · ⌘Z · changes auto-save' : 'Empty stage · generate or pick a sample on the left, drag it into a slot = sample instrument · hover a slot to add a slice instrument · changes auto-save');
       } catch (err) { setStatus('Load failed: ' + conciseError(err)); }
     })();
-    return () => { alive = false; if (raf.current != null) cancelAnimationFrame(raf.current); eng.current?.dispose(); };
+    return () => { alive = false; eng.current?.dispose(); };
   }, [loadSession, projectId, masterBpm, beatsPerBar]);
 
-  const startRaf = useCallback(() => { if (raf.current != null) return; const t = () => { setTick((x) => x + 1); raf.current = requestAnimationFrame(t); }; raf.current = requestAnimationFrame(t); }, []);
-  const stopRaf = useCallback(() => { if (raf.current != null) { cancelAnimationFrame(raf.current); raf.current = null; } }, []);
+  // 走带启停只切 playing(setState 即重渲一次);高频视觉(电平/走带位置/播放头)由自驱动叶子按 playing 起停 rAF。
   const togglePlay = useCallback(() => {
     const e = eng.current; if (!e) return;
     e.resume().catch(() => {});
-    if (e.isPlaying()) { e.stopTransport(); setPlaying(false); stopRaf(); setTick((t) => t + 1); }
-    else { e.startTransport(); setPlaying(true); startRaf(); }
-  }, [startRaf, stopRaf]);
+    if (e.isPlaying()) { e.stopTransport(); setPlaying(false); }
+    else { e.startTransport(); setPlaying(true); }
+  }, []);
 
   const curSession = sessions[sessionIdx];
   // §16 撤销宪法:快照口径 = sessions 整树 + 各库声音 warp(预调改 Sound.warp,不在 sessions 里)+ 主 bpm(项目级标量,亦在 sessions 外)。
-  const snapshot = (): HistEntry => {
+  // sessionId 可显式指定(undo/redo 时让对侧快照携带"改动归属的 session",见 undo/redo);默认 = 当前活动 session。
+  const snapshot = (sessionId?: string): HistEntry => {
     const warps = new Map<string, unknown>();
     const sb = ctxRef.current?.soundsById; if (sb) for (const [id, snd] of sb) warps.set(id, snd.warp);
-    return { sessions: sessionsRef.current, warps, bpm: ctxRef.current?.bpm ?? masterBpm };
+    return {
+      sessions: sessionsRef.current, warps, bpm: ctxRef.current?.bpm ?? masterBpm, fx: fxRef.current,
+      sessionId: sessionId ?? sessionsRef.current[sessionIdx]?.id ?? '',
+      quantize: quantizeRef.current,
+      liveSounds: new Set(sb ? sb.keys() : []),            // 当时存活(未软删)的库声音 id 全集(含 stem)
+      liveGens: new Set(gensRef.current.map((g) => g.id)), // 当时存活的生成组 id
+    };
   };
-  const pushHistory = () => { setPast((p) => [...p.slice(-49), snapshot()]); setFuture([]); };
+  const pushHistory = () => { const next = [...pastRef.current.slice(-49), snapshot()]; pastRef.current = next; setPast(next); futureRef.current = []; setFuture([]); };
   const updateSession = (next: Session) => setSessions((ss) => ss.map((s, i) => (i === sessionIdx ? next : s)));
   const mutate = (fn: (s: Session) => Session) => { pushHistory(); updateSession(fn(sessionsRef.current[sessionIdx])); };
   const reconcile = useCallback(async (ss: Session[], idx: number) => { await loadSession(ss[idx]); setTick((t) => t + 1); }, [loadSession]);
@@ -266,6 +293,10 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const applyEntry = (entry: HistEntry) => {
     eng.current?.stopAudition();
     setSessions(entry.sessions);
+    // §16 口径⑤:undo/redo 跳回改动归属的 session(否则改动在别的 session 时 ⌘Z 表现为"毫无反应")。
+    const found = entry.sessions.findIndex((s) => s.id === entry.sessionId);
+    const idx = found >= 0 ? found : sessionIdx;
+    if (idx !== sessionIdx) { eng.current?.stopTransport(); setPlaying(false); setSessionIdx(idx); }
     const c = ctxRef.current;
     if (c) {
       let changed = false; const sounds = new Map(c.soundsById);
@@ -278,13 +309,35 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (bpmChanged) { eng.current?.setBpm(entry.bpm); api.projects.update(projectId, { masterBpm: entry.bpm }).catch(() => {}); }
       if (changed || bpmChanged) { ctxRef.current = { ...c, soundsById: sounds, bpm: entry.bpm }; setCtx(ctxRef.current); }
     }
-    const insts = entry.sessions[sessionIdx]?.instruments ?? [];
+    // §17 口径④:主总线效果器不同则还原 —— 引擎 setFx + state(浮层跟随)+ 反向持久化。
+    // ⚠ 不同步直改 fxRef:让它随 render 更新(同 sessions 口径)。否则 undo 往 future 压的 snapshot() 延迟求值时会读到"还原后"的 fx,redo 抓不到切换态(bpm 因 reconcile 需要才同步改 ctxRef,fx 无此需求)。
+    if (JSON.stringify(entry.fx) !== JSON.stringify(fxRef.current)) {
+      setFx(entry.fx); eng.current?.setFx(entry.fx);
+      api.projects.update(projectId, { fx: entry.fx }).catch(() => {});
+    }
+    // §16 口径⑥:量化粒度(项目级标量)不同则还原 —— 引擎 + state + 反向持久化。
+    if (entry.quantize !== quantizeRef.current) { setQuantizeState(entry.quantize); eng.current?.setQuantize(entry.quantize); api.projects.update(projectId, { quantize: entry.quantize }).catch(() => {}); }
+    // §16 口径⑦:库软删可撤 —— 把声音/生成组的 trashed 状态对齐到快照。
+    //   恢复:快照里存活、现在没了 → un-trash(undo 一次删除)。restore-only 永远安全。
+    //   重删:现在存活、快照里没有,且该 id 曾真删过(在 trashable 白名单)→ re-trash(redo 一次删除)。
+    //   ⚠ 不做对称差集:撤回到很早的快照时,之后生成的声音不在快照里但也不在白名单 → 绝不误删(沿用 §16"不误删之后生成的")。
+    const curSounds = new Set(ctxRef.current?.soundsById.keys() ?? []);
+    const curGens = new Set(gensRef.current.map((g) => g.id));
+    const libOps: Promise<unknown>[] = [];
+    for (const id of entry.liveSounds) if (!curSounds.has(id)) libOps.push(api.sounds.patch(id, { trashed: false }).catch(() => {}));
+    for (const id of curSounds) if (!entry.liveSounds.has(id) && trashableSounds.current.has(id)) libOps.push(api.sounds.patch(id, { trashed: true }).catch(() => {}));
+    for (const id of entry.liveGens) if (!curGens.has(id)) libOps.push(api.gens.patch(id, { trashed: false }).catch(() => {}));
+    for (const id of curGens) if (!entry.liveGens.has(id) && trashableGens.current.has(id)) libOps.push(api.gens.patch(id, { trashed: true }).catch(() => {}));
+    const insts = entry.sessions[idx]?.instruments ?? [];
     setSelId((cur) => (cur && insts.some((i) => i.id === cur) ? cur : null));
     setSelClipId((cur) => (cur && insts.some((i) => i.payload.kind === 'collage' && i.payload.clips.some((k) => k.id === cur)) ? cur : null));
-    reconcile(entry.sessions, sessionIdx);
+    reconcile(entry.sessions, idx);
+    // 库有增删 → 等服务端 trashed 落定后重载库,再 reconcile 一次(此时恢复的声音才回到 soundsById,引用它的乐器才能重建出声)。
+    if (libOps.length) Promise.all(libOps).then(() => reloadLibrary()).then(() => reconcile(sessionsRef.current, idx)).catch(() => {});
   };
-  const undo = () => setPast((p) => { if (!p.length) return p; const prev = p[p.length - 1]; setFuture((f) => [snapshot(), ...f]); applyEntry(prev); return p.slice(0, -1); });
-  const redo = () => setFuture((f) => { if (!f.length) return f; const nx = f[0]; setPast((p) => [...p, snapshot()]); applyEntry(nx); return f.slice(1); });
+  // 对侧快照携带"改动归属 session"(prev/nx.sessionId)而非当前活动 session → redo/undo 都能跳回改动现场(否则切过 session 后 redo 会跳错)。
+  const undo = () => { const p = pastRef.current; if (!p.length) return; const prev = p[p.length - 1]; const nf = [snapshot(prev.sessionId), ...futureRef.current]; futureRef.current = nf; setFuture(nf); const np = p.slice(0, -1); pastRef.current = np; setPast(np); applyEntry(prev); };
+  const redo = () => { const f = futureRef.current; if (!f.length) return; const nx = f[0]; const np = [...pastRef.current, snapshot(nx.sessionId)]; pastRef.current = np; setPast(np); const nf = f.slice(1); futureRef.current = nf; setFuture(nf); applyEntry(nx); };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (confirmState) return; // 弹窗开着时,快捷键交给弹窗(Enter/Esc)
@@ -292,6 +345,10 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); if (!e.repeat) togglePlay(); return; } // 空格 = 走带启停;挡掉列表/页面滚动 + 按钮的空格触发
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd' && selClipId && selId) { // 复制选中的 collage 片(挡掉浏览器收藏夹)
+        const inst = findInst(sessionsRef.current[sessionIdx], selId);
+        if (inst?.payload.kind === 'collage') { e.preventDefault(); duplicateCollagePiece(selId, selClipId); return; }
+      }
       if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey) {
         if (libSel) { e.preventDefault(); requestRemoveSound(libSel); return; } // 选中库素材 → 软删(弹确认)
         if (selClipId && selId) { e.preventDefault(); removeCollagePiece(selId, selClipId); } // 选中片 → 删该 collage 片
@@ -303,13 +360,18 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   });
   useEffect(() => { const clear = () => setDragSoundId(null); window.addEventListener('dragend', clear); return () => window.removeEventListener('dragend', clear); }, []); // 拖拽结束(落下/取消)→ 清掉"正在拖的素材"
 
-  const switchSession = (idx: number) => { eng.current?.stopTransport(); eng.current?.stopAudition(); setPlaying(false); stopRaf(); setSessionIdx(idx); setSelId(null); setSelClipId(null); setLibSel(null); loadSession(sessionsRef.current[idx]).then(() => setTick((t) => t + 1)); };
+  const switchSession = (idx: number) => { eng.current?.stopTransport(); eng.current?.stopAudition(); setPlaying(false); setSessionIdx(idx); setSelId(null); setSelClipId(null); setLibSel(null); loadSession(sessionsRef.current[idx]).then(() => setTick((t) => t + 1)); };
 
   const toggleInst = (id: string) => { const inst = findInst(curSession, id); if (!inst) return; const on = !inst.enabled; mutate((s) => ({ ...s, instruments: s.instruments.map((i) => (i.id === id ? { ...i, enabled: on } : i)) })); eng.current?.setEnabled(id, on); setTick((t) => t + 1); };
   // 真·预览(只走带停时):自由循环试听某乐器当前 warp 产物,再点停;与激活态互不影响。
   const previewInst = (id: string) => { const en = eng.current; if (!en) return; if (en.auditioningId() === id) en.stopAudition(); else en.previewInstrument(id); setTick((t) => t + 1); };
   // 选中乐器 = arrange 上下文(collage)/底部聚焦(sample);切到别的乐器停掉上一个预览。
-  const selectInst = (id: string) => { eng.current?.stopAudition(); setSelId(id); setSelClipId(null); setLibSel(null); };
+  const selectInst = (id: string) => {
+    eng.current?.stopAudition(); setSelId(id); setLibSel(null);
+    const inst = findInst(sessionsRef.current[sessionIdx], id); // 选中切片乐器且有片 → 自动聚焦最左片(否则清空)
+    const first = inst?.payload.kind === 'collage' && inst.payload.clips.length ? [...inst.payload.clips].sort((a, b) => a.startStep - b.startStep)[0].id : null;
+    setSelClipId(first);
+  };
   const selectPiece = (id: string) => { setSelClipId(id); if (id) setLibSel(null); }; // 点片 → 下方编辑器显示该片;清掉素材聚焦
   // 点素材 = 聚焦到它的预调(底部常驻编辑器显示);选中的是切片乐器时不清它(arrange 浮层留着,只换下方)。
   const focusSound = (id: string) => {
@@ -318,6 +380,14 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     if (!cur || cur.payload.kind !== 'collage') setSelId(null);
   };
   const changeMixer = (id: string, patch: Partial<Mixer>, history = false) => { if (history) pushHistory(); const next = patchMixer(sessionsRef.current[sessionIdx], id, patch); updateSession(next); const inst = findInst(next, id); if (inst) eng.current?.setMixer(id, inst.mixer); };
+  // per-乐器 send 量(§17):同 changeMixer —— 拖动开始压一次 undo,值即时落树(走发件箱持久化)+ 引擎 setSends 即时跟手。sends 在 sessions 树里 → 天然可撤。
+  const changeSends = (id: string, patch: Partial<InstrumentSends>, history = false) => {
+    if (history) pushHistory();
+    const cur = sessionsRef.current[sessionIdx];
+    const next: Session = { ...cur, instruments: cur.instruments.map((i) => (i.id === id ? { ...i, sends: { ...i.sends, ...patch } } : i)) };
+    updateSession(next);
+    const inst = findInst(next, id); if (inst) eng.current?.setSends(id, inst.sends);
+  };
   const patchInst = (id: string, patch: Partial<Instrument>) => { mutate((s) => ({ ...s, instruments: s.instruments.map((i) => (i.id === id ? { ...i, ...patch } : i)) })); setTick((t) => t + 1); };
   const removeInst = (id: string) => { eng.current?.stopAudition(); eng.current?.clearInstrument(id); mutate((s) => docRemove(s, id)); if (selId === id) { setSelId(null); setSelClipId(null); } setTick((t) => t + 1); };
   // 通用确认弹窗:const ok = await askConfirm({...}); if (ok) ...
@@ -350,11 +420,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     setTick((t) => t + 1);
   };
   // 顶栏 handlers:量化(乐观持久化 Project 列)/ 节拍器 / 主音量。
-  const commitQuantize = (q: Quantize) => { setQuantizeState(q); eng.current?.setQuantize(q); api.projects.update(projectId, { quantize: q }).catch(() => {}); };
+  const commitQuantize = (q: Quantize) => { if (q === quantizeRef.current) return; pushHistory(); setQuantizeState(q); eng.current?.setQuantize(q); api.projects.update(projectId, { quantize: q }).catch(() => {}); }; // §16 口径⑥:改前压栈
+  const commitProjName = (v: string) => { setProjName(v); api.projects.update(projectId, { name: v }).catch(() => {}); }; // §15.A:Project 列乐观持久化
   const toggleMetro = () => { const on = !metroOn; setMetroOn(on); eng.current?.setMetronome(on); };
   const changeMetroVol = (db: number) => { setMetroVol(db); eng.current?.setMetronomeVolume(db); };
   const changeMetroIv = (iv: 'beat' | 'bar' | '2bar' | '4bar') => { setMetroIv(iv); eng.current?.setMetronomeInterval(iv); };
   const changeMaster = (db: number) => { setMasterVol(db); eng.current?.setMasterVolume(db); };
+  const commitFx = (next: FxConfig) => { setFx(next); eng.current?.setFx(next); }; // §17:即时应用到引擎;持久化由下方防抖 effect
 
   // 解码 / analysis 拼装现在收在 ClipEditor 内部(吃 Clip + Sound 自解码),这里不再手搓 editor 状态。
 
@@ -391,6 +463,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const prefs: GenPrefs = { mode: gmode, loop: gloop, bpm: gbpm };
     api.projects.update(projectId, { genPrefs: prefs }).catch(() => {});
   }, [projectId, gmode, gloop, gbpm]);
+  // 主总线效果器:改即乐观持久化 Project.fx(防抖 300ms,合并连续拖旋钮;§15.A/§17)。引擎应用走 commitFx 即时。
+  const fxHydrated = useRef(false);
+  useEffect(() => {
+    if (!fxHydrated.current) { fxHydrated.current = true; return; } // 首帧是 load 进来的值,不回写
+    const t = setTimeout(() => api.projects.update(projectId, { fx }).catch(() => {}), 300);
+    return () => clearTimeout(t);
+  }, [projectId, fx]);
   const onGenBpm = (n: number) => { if (Number.isFinite(n)) setGbpm(n); };
   const onGenKey = (k: string) => { setGkey(k); api.projects.update(projectId, { masterKey: k || null }).catch(() => {}); }; // 即写工程调
 
@@ -433,16 +512,21 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       .catch((e) => setStatus('Retry failed: ' + conciseError(e)));
   };
   const onDeleteGen = async (id: string) => {
-    setGens((gs) => gs.filter((g) => g.id !== id)); // 乐观移除整组
+    // §16 口径⑦:删前压栈(此刻 gen 及其声音仍存活 → 快照记得住,可被 undo 恢复);把整组的 id 登记进 trashable 白名单 → 允许 redo 重删。
+    pushHistory();
+    const g = gensRef.current.find((x) => x.id === id);
+    if (g) for (const s of g.sounds) { trashableSounds.current.add(s.id); for (const st of s.stems ?? []) trashableSounds.current.add(st.id); }
+    trashableGens.current.add(id);
+    setGens((gs) => gs.filter((x) => x.id !== id)); // 乐观移除整组
     try { await api.gens.remove(id); } catch (e) { setStatus('Delete failed: ' + conciseError(e)); }
-    const sb = await loadLibrary(); if (ctxRef.current) { ctxRef.current.soundsById = sb; setCtx({ ...ctxRef.current }); }
-    await refreshGens();
+    await reloadLibrary();
   };
   const onDeleteSound = async (id: string) => {
     try { await api.sounds.remove(id); } catch (e) { setStatus('Delete failed: ' + conciseError(e)); return; }
+    pushHistory(); // §16 口径⑦:软删成功后压栈(client 尚未重载,快照里该声音仍存活 → 可恢复);登记 trashable → 允许 redo 重删
+    trashableSounds.current.add(id);
     if (libSel === id) setLibSel(null);
-    const sb = await loadLibrary(); if (ctxRef.current) { ctxRef.current.soundsById = sb; setCtx({ ...ctxRef.current }); }
-    await refreshGens();
+    await reloadLibrary();
   };
   const setStemStatus = (id: string, st: string) => setGens((gs) => gs.map((g) => ({ ...g, sounds: g.sounds.map((s) => (s.id === id ? { ...s, stemStatus: st } : s)) })));
   const separateSound = async (id: string) => {
@@ -461,7 +545,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
 
   // --- 操场:加乐器 / 拖入 / hover ---
   const sampleInstFrom = (s: ApiSound, slot: number): Instrument => {
-    return { id: nid('inst'), slot, label: s.name, color: '#c2724f', mixer: defaultMixer(), sends: [], enabled: false, payload: { kind: 'sample', clip: { ...soundToClip(s), id: nid('clip') } } };
+    return { id: nid('inst'), slot, label: s.name, color: '#c2724f', mixer: defaultMixer(), sends: defaultSends(), enabled: false, payload: { kind: 'sample', clip: { ...soundToClip(s), id: nid('clip') } } };
   };
   const addSampleFromSound = (soundId: string, slot: number) => {
     const c = ctxRef.current; if (!c) return; const s = c.soundsById.get(soundId); if (!s) return;
@@ -476,7 +560,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const payload: InstrumentPayload = kind === 'sample'
       ? { kind: 'sample', clip: { id: nid('clip'), soundId: '', assetId: '', startSample: 0, endSample: 0, bars: 1, semitones: 0, gainDb: 0 } }
       : { kind: 'collage', bars: 2, stepsPerBar: 16, loopStartStep: 0, bakedAssetId: null, clips: [] };
-    const inst: Instrument = { id: nid(kind), slot, label: kind === 'sample' ? '(empty sample)' : 'Slice instrument', color: kind === 'collage' ? '#9a7bc0' : '#6a86a0', mixer: defaultMixer(), sends: [], enabled: false, payload };
+    const inst: Instrument = { id: nid(kind), slot, label: kind === 'sample' ? '(empty sample)' : 'Slice instrument', color: kind === 'collage' ? '#9a7bc0' : '#6a86a0', mixer: defaultMixer(), sends: defaultSends(), enabled: false, payload };
     mutate((s) => ({ ...s, instruments: [...s.instruments, inst] }));
     if (kind === 'collage') loadInstrumentToEngine(inst);
     setSelId(inst.id); setSelClipId(null); setLibSel(null);
@@ -512,7 +596,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const writeCollageClip = async (instId: string, clip: CollageClip) => {
     const cur = sessionsRef.current[sessionIdx];
     pushHistory();
-    const next = patchCollageClip(cur, instId, clip.id, { startSample: clip.startSample, endSample: clip.endSample, bars: clip.bars, timeMul: clip.timeMul, semitones: clip.semitones, gainDb: clip.gainDb });
+    const inst0 = findInst(cur, instId); // 兜底:bars 永远夹到「到下一片的空档」内,不论编辑器是否已 clamp(防重叠铁律)
+    const bars = inst0?.payload.kind === 'collage' ? Math.min(clip.bars, roomAt(collageDocView(inst0.payload), clip.startStep, clip.id) / inst0.payload.stepsPerBar) : clip.bars;
+    const next = patchCollageClip(cur, instId, clip.id, { startSample: clip.startSample, endSample: clip.endSample, bars, timeMul: clip.timeMul, semitones: clip.semitones, gainDb: clip.gainDb });
     updateSession(next);
     const inst = findInst(next, instId); if (inst) loadInstrumentToEngine(inst, true);
     const en = eng.current, c = ctxRef.current; // 片在试听中(按 clip.id)→ 同库素材:不停就边界无缝换上新 region
@@ -544,9 +630,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   };
   const beginCollageEdit = () => pushHistory();                                   // 拖动/调参开始压一次撤销
   const rebakeCollage = (instId: string) => { const ns = lastCollageEdit.current ?? sessionsRef.current[sessionIdx]; const u = findInst(ns, instId); if (u) loadInstrumentToEngine(u, true); };
-  const moveCollagePiece = (instId: string, clipId: string, startStep: number) => { // 拖移(实时改位,松手才重 bake);startStep 已 snap
+  const moveCollagePiece = (instId: string, clipId: string, startStep: number) => { // 拖移(cross-into-gaps:可跨邻居落到最近空位;实时改位,松手才重 bake);startStep 已 snap
     const inst = findInst(sessionsRef.current[sessionIdx], instId); if (!inst || inst.payload.kind !== 'collage') return;
-    writeCollagePayload(instId, moveItem(collageDocView(inst.payload), clipId, startStep).items as CollageClip[]);
+    writeCollagePayload(instId, placeNear(collageDocView(inst.payload), clipId, startStep).items as CollageClip[]);
   };
   const dropOnCollageLane = (instId: string, soundId: string, startStep: number) => { // 拖库素材到网格位 → 整片(soundToClip 带 warp 种子+timeMul)
     const c = ctxRef.current; if (!c) return; const s = c.soundsById.get(soundId); if (!s) return;
@@ -575,6 +661,29 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     if (selClipId === clipId) setSelClipId(null);
     const u = findInst(ns, instId); if (u) loadInstrumentToEngine(u, true);
   };
+  // 把片在 desiredStart 克隆一份(新 id = 独立副本,共享 asset);插入后用 placeNear 落到最近空位。返回副本 id。
+  const insertCollageCopy = (instId: string, srcId: string, desiredStart: number): { ns: Session; newId: string } | null => {
+    const inst = findInst(sessionsRef.current[sessionIdx], instId); if (!inst || inst.payload.kind !== 'collage') return null;
+    const src = inst.payload.clips.find((c) => c.id === srcId); if (!src) return null;
+    const newId = nid('k');
+    const view = collageDocView(inst.payload);
+    const withCopy = { ...view, items: [...view.items, { ...src, id: newId, startStep: desiredStart }] };
+    const resolved = placeNear(withCopy, newId, desiredStart); // bars=1e7 → 右侧永远有空位,必落得下
+    const ns = writeCollagePayload(instId, resolved.items as CollageClip[]);
+    setSelClipId(newId);
+    return { ns, newId };
+  };
+  // Cmd/Ctrl+D:复制选中片 → 紧跟其后(放得下)否则吸到最近空位;选中副本、可撤销、重 bake。
+  const duplicateCollagePiece = (instId: string, clipId: string) => {
+    const inst = findInst(sessionsRef.current[sessionIdx], instId); if (!inst || inst.payload.kind !== 'collage') return;
+    const src = inst.payload.clips.find((c) => c.id === clipId); if (!src) return;
+    const desired = src.startStep + itemLengthSteps(collageDocView(inst.payload), src);
+    pushHistory();
+    const r = insertCollageCopy(instId, clipId, desired); if (!r) return;
+    const u = findInst(r.ns, instId); if (u) loadInstrumentToEngine(u).then(() => setTick((t) => t + 1));
+  };
+  // Alt 拖:拖动一开始克隆一份(原片留位,拖的是副本);pushHistory 已由 onMoveStart 压过 → 整次拖一条撤销。
+  const altDuplicateForDrag = (instId: string, srcId: string, desiredStart: number): string | null => insertCollageCopy(instId, srcId, desiredStart)?.newId ?? null;
 
   // sample 乐器:ClipEditor 吐出完整新 Clip(warp/trim/变调/timeMul 全在内) → 整条替换 + 无缝换 buffer(在播不断声) + 可撤销。
   const writeSampleClip = (instId: string, clip: Clip) => {
@@ -634,8 +743,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   useEffect(() => () => { if (retryTimer.current) clearTimeout(retryTimer.current); }, []);
 
   const e = eng.current;
-  const pos = e && playing ? e.barBeat() : { bar: 1, beat: 1, sixteenth: 1 };
-  const meter: [number, number] = e && playing ? e.masterLevel() : [0, 0]; // 总输出 L/R 电平(rAF 每帧重渲时实时取)
+  // 走带位置 / 主电平 不在此处每帧取了 —— 交给 <TransportPos>/<MasterMeter> 自驱动叶子(见 ui/live.tsx)。
   const sel = curSession ? findInst(curSession, selId) : null;
   const arrangeInst = sel && sel.payload.kind === 'collage' ? sel : null; // 选中切片乐器 → arrange 浮层(与下方 clip 聚焦解耦)
   const auditioning = e?.auditioningId() ?? null;
@@ -682,13 +790,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       <header className="tbar">
         {/* 工程 */}
         <Link href="/projects" className="ic" title="Back to projects" style={{ textDecoration: 'none' }}>←</Link>
-        <span className="tb-proj" title={name}>{name}</span>
+        <ProjectNameInput name={projName} onCommit={commitProjName} />
 
         {/* 走带 */}
         <span className="tb-sep" />
-        <button className="tp" data-on={playing} onClick={togglePlay} aria-label={playing ? 'Stop' : 'Play'}>{playing ? '■' : '▶'}</button>
+        <button className="tp" data-on={playing} onClick={togglePlay} aria-label={playing ? 'Stop' : 'Play'}><TransportIcon stop={playing} size={12} /></button>
         <Metronome on={metroOn} vol={metroVol} iv={metroIv} onToggle={toggleMetro} onVol={changeMetroVol} onIv={changeMetroIv} />
-        <span className="tb-pos" title="bar · beat · 16th"><b>{pos.bar}</b><i>.</i><b>{pos.beat}</b><i>.</i><b className="dim">{pos.sixteenth}</b></span>
+        <TransportPos engine={e} playing={playing} />
 
         {/* 音乐设置 */}
         <span className="tb-sep" />
@@ -705,11 +813,12 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         <span className="tb-master">
           <svg className="tb-vico" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /></svg>
           <input className="tb-fader" type="range" min={-40} max={6} step={1} value={masterVol} onChange={(ev) => changeMaster(Number(ev.target.value))} title={`Volume ${masterVol > 0 ? '+' : ''}${masterVol} dB`} />
-          <span className="tb-meter">
-            <span className="mrow"><i style={{ width: `${Math.round(meter[0] * 100)}%` }} /></span>
-            <span className="mrow"><i style={{ width: `${Math.round(meter[1] * 100)}%` }} /></span>
-          </span>
+          <MasterMeter engine={e} playing={playing} />
         </span>
+
+        {/* 主总线效果器(§17):失真 / 延迟 / 混响 */}
+        <span className="tb-sep" />
+        <FxRack fx={fx} bpm={ctx.bpm} onFx={commitFx} onStart={pushHistory} />
 
         {/* 历史 + 保存 */}
         <span className="tb-sep" />
@@ -730,7 +839,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
           />
         </aside>
 
-        <section className="stage" style={{ minWidth: 0 }}>
+        <section className="stage" style={{ minWidth: 0, paddingBottom: arrangeInst ? arrangeH + 24 : undefined }}>
           <div className="banks">
             <span className="sec-l">Session</span>
             {sessions.map((s, i) => (<button key={s.id} className={'bank' + (i === sessionIdx ? ' on' : '')} style={{ width: 'auto', padding: '0 11px' }} onClick={() => switchSession(i)}>{s.name}</button>))}
@@ -750,47 +859,40 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                 },
               };
               if (!inst) {
-                const addBtn: CSSProperties = { font: 'inherit', fontSize: 10.5, padding: '3px 8px', borderRadius: 'var(--r)', background: 'var(--bg-3)', border: '1px solid var(--line-2)', color: 'var(--tx-2)', cursor: 'pointer' };
                 return (
-                  <div key={slot} className={'clip empty' + (over === slot ? ' over' : '')} style={{ minHeight: 0, borderRadius: 0, borderWidth: '0 1px 1px 0', borderStyle: 'solid', borderColor: FAINT }} onMouseEnter={() => setHoverSlot(slot)} onMouseLeave={() => setHoverSlot((h) => (h === slot ? null : h))} {...dnd}>
+                  <div key={slot} className={'clip empty' + (over === slot ? ' over' : '')} style={{ minHeight: 0, borderRadius: 0, borderWidth: '0 1px 1px 0', borderStyle: 'solid', borderColor: FAINT }} onMouseEnter={() => setHoverSlot(slot)} onMouseLeave={() => setHoverSlot((h) => (h === slot ? null : h))} onClick={() => { eng.current?.stopAudition(); setSelId(null); setSelClipId(null); }} {...dnd}>
                     <span className="cidx">{slot + 1}</span>
                     {over === slot ? (
                         <div style={{ margin: 'auto', padding: '6px 12px', border: '1px dashed var(--acc)', borderRadius: 'var(--r)', color: 'var(--acc)', fontSize: 11, fontWeight: 500, background: 'var(--acc-dim)' }}>
                           {overKind === 'inst' ? 'Move here' : 'Drop here · new instrument'}
                         </div>
                       ) : hoverSlot === slot ? (
-                        <div style={{ margin: 'auto', display: 'flex', gap: 5 }}>
-                          <button style={addBtn} onClick={() => addEmptyAt(slot, 'sample')} title="Add an empty sample instrument, then drag a sample in to fill it">＋sample</button>
-                          <button style={addBtn} onClick={() => addEmptyAt(slot, 'collage')} title="Add a slice instrument, drag multiple samples in to arrange">＋slice</button>
+                        <div style={{ position: 'absolute', top: 6, right: 6, display: 'flex', gap: 4 }}>
+                          <button className="addinst" onClick={(ev) => { ev.stopPropagation(); addEmptyAt(slot, 'sample'); }} title="Add an empty sample instrument, then drag a sample in to fill it">＋sample</button>
+                          <button className="addinst" onClick={(ev) => { ev.stopPropagation(); addEmptyAt(slot, 'collage'); }} title="Add a slice instrument, drag multiple samples in to arrange">＋slice</button>
                         </div>
                       ) : null}
                   </div>
                 );
               }
               const color = inst.color ?? 'var(--acc)';
-              const st = e?.voiceState(inst.id) ?? 'off';
-              const ph = e?.voicePhase(inst.id) ?? null;
+              const st = e?.voiceState(inst.id) ?? 'off'; // 仅用于 queued/stopping 呼吸 className(走带边界跃迁经 onChange 重渲)
               const isSel = inst.id === selId;
               const pk = peaks[inst.id];
-              const level = playing ? (e?.voiceLevel(inst.id) ?? 0) : 0; // 实时电平 0..1
               const isEmpty = inst.payload.kind === 'sample' && inst.payload.clip.soundId === '';
               const isBuilding = !!building[inst.id] && !(pk && pk.length > 0); // ⑩ 全新乐器(从未就绪)首建中 → 压暗 + 锁 ▶;已有 peaks 的无缝重建不算
               return (
                 <div key={slot} draggable onMouseDownCapture={() => { dragOK.current = true; }} onDragStart={(ev) => { if (!dragOK.current) { ev.preventDefault(); return; } ev.dataTransfer.setData('application/x-inst-slot', String(slot)); ev.dataTransfer.effectAllowed = 'move'; }} style={{ position: 'relative', minHeight: 0, borderRadius: 0, borderWidth: '0 1px 1px 0', borderStyle: 'solid', borderColor: FAINT, background: over === slot ? 'var(--acc-dim)' : undefined }} {...dnd}>
                   <div className={`clip filled ${inst.enabled ? 'st-playing' : ''}${playing && (st === 'queued' || st === 'stopping') ? (st === 'queued' ? ' st-queued' : ' st-stopping') : ''}`} style={{ ...cvar(color), position: 'absolute', inset: 6, minHeight: 0, borderRadius: 'var(--r)', borderColor: isSel ? `color-mix(in srgb, ${color} 75%, #fff)` : undefined }} onClick={() => selectInst(inst.id)}>
                     {inst.payload.kind === 'collage'
-                      ? <CollagePadWave payload={inst.payload} ph={ph} />
+                      ? <>{/* 底块/波形/网格 memo 静态;播放头独立自驱动叶子 */}<CollagePadBody payload={inst.payload} /><CollageHead engine={e} id={inst.id} playing={playing} /></>
                       : (pk && pk.length > 0 && (
-                        <div className="cwave" aria-hidden="true">
-                          <Wave className="cwave-base" peaks={pk} />
-                          <div className="cwave-fill" style={{ clipPath: ph != null ? `inset(0 ${(100 - ph * 100).toFixed(1)}% 0 0)` : 'inset(0 100% 0 0)' }}><Wave className="" peaks={pk} /></div>
-                          {ph != null && <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${(ph * 100).toFixed(1)}%`, width: 1, background: color, opacity: 0.95, pointerEvents: 'none' }} />}
-                        </div>
+                        <SampleWave engine={e} id={inst.id} peaks={pk} color={color} playing={playing} />
                       ))}
                     <button className="launch" disabled={isBuilding} onMouseDown={() => { dragOK.current = false; }} onClick={(ev) => { ev.stopPropagation(); if (!isBuilding) toggleInst(inst.id); }} title={isBuilding ? 'Loading…' : 'Toggle playback'}
                       style={{ position: 'relative', overflow: 'hidden', background: `color-mix(in srgb, ${color} ${inst.enabled ? 20 : 12}%, transparent)`, fontSize: 10, cursor: isBuilding ? 'default' : 'pointer' }}>
-                      <span style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: `${Math.round(level * 100)}%`, background: `color-mix(in srgb, ${color} 60%, #fff)`, opacity: 0.6, pointerEvents: 'none' }} />
-                      <span style={{ position: 'relative', zIndex: 1, color: inst.enabled ? `color-mix(in srgb, ${color} 72%, #fff)` : `color-mix(in srgb, ${color} 52%, #39352f)` }}>{inst.enabled ? '▶' : '■'}</span>
+                      <LaunchLevel engine={e} id={inst.id} color={color} playing={playing} />
+                      <span style={{ position: 'relative', zIndex: 1, display: 'inline-flex', color: inst.enabled ? `color-mix(in srgb, ${color} 72%, #fff)` : `color-mix(in srgb, ${color} 52%, #39352f)` }}><TransportIcon stop={!inst.enabled} size={11} /></span>
                     </button>
                     <div className="cbody">
                       <div className="cname" style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
@@ -852,6 +954,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
             return (
               <div className="ed-wrap">
                 <ClipEditor key={'snd-' + libSel} clip={soundToClip(s)} sound={s} targetBpm={ctx.bpm}
+                  initGridBars={gridRef.current.warp} initSnap={gridRef.current.snap} onGridChange={(warp, snap) => saveGrid({ warp, snap })}
                   onChange={(c) => editSoundRegion(libSel, c)}
                   onDragOut={(ev) => { ev.dataTransfer.setData('text/plain', libSel); ev.dataTransfer.effectAllowed = 'copy'; setDragImage(ev, s.name); setDragSoundId(libSel); }}
                   preview={{ previewing: auditioning === libSel, warming: warming === libSel, queued: !!e?.auditionQueuedFor(libSel), getPhase: () => e?.auditionPhase(libSel) ?? null, toggle: () => auditionSound(libSel) }} />
@@ -888,8 +991,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
             );
             return (
               <ClipEditor key={sel.id} clip={clip} sound={s} targetBpm={ctx.bpm} canPreview={!playing}
+                initGridBars={gridRef.current.warp} initSnap={gridRef.current.snap} onGridChange={(warp, snap) => saveGrid({ warp, snap })}
                 onChange={(c) => writeSampleClip(sel.id, c)} header={header}
-                mixer={<MixerStrip mixer={sel.mixer} level={playing ? (e?.voiceLevel(sel.id) ?? 0) : 0} onMixer={(patch, history) => changeMixer(sel.id, patch, !!history)} />}
+                mixer={<MixerStrip mixer={sel.mixer} engine={e} voiceId={sel.id} playing={playing} onMixer={(patch, history) => changeMixer(sel.id, patch, !!history)} sends={sel.sends} onSends={(patch, history) => changeSends(sel.id, patch, !!history)} />}
                 preview={{ previewing: sounding, getPhase: () => aud ? (e?.auditionPhase(sel.id) ?? null) : (e?.voicePhase(sel.id) ?? null), toggle: () => previewInst(sel.id) }} />
             );
           }
@@ -903,7 +1007,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                 <div className="ed-wrap">
                   <div className="ed-toplab"><span className="sec-l">Slice edit ({arrangeInst.label})</span><span className="muted small">{psSound.name}</span></div>
                   <ClipEditor key={selPiece.id} clip={selPiece} sound={psSound} targetBpm={ctx.bpm} canPreview={!playing}
-                    mixer={<MixerStrip mixer={clipMixer(selPiece)} level={0} onMixer={(patch, history) => setCollagePieceMixer(arrangeInst.id, selPiece.id, patch, !!history)} />}
+                    initGridBars={gridRef.current.warp} initSnap={gridRef.current.snap} onGridChange={(warp, snap) => saveGrid({ warp, snap })}
+                    maxBars={roomAt(collageDocView(cp), selPiece.startStep, selPiece.id) / cp.stepsPerBar}
+                    mixer={<MixerStrip mixer={clipMixer(selPiece)} onMixer={(patch, history) => setCollagePieceMixer(arrangeInst.id, selPiece.id, patch, !!history)} />}
                     onChange={(c) => writeCollageClip(arrangeInst.id, { ...(c as CollageClip), id: selPiece.id, startStep: selPiece.startStep })}
                     preview={{ previewing: e?.auditioningId() === selPiece.id, getPhase: () => (e?.auditioningId() === selPiece.id ? (e?.auditionPhase(selPiece.id) ?? null) : null), toggle: () => previewCollagePiece(selPiece) }} />
                 </div>
@@ -923,7 +1029,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         const collageAud = e?.auditioningId() === inst.id;
         const close = () => { eng.current?.stopAudition(); setSelId(null); setSelClipId(null); };
         return (
-          <ArrangePopover onClose={close}>
+          <ArrangePopover onClose={close} onHeight={setArrangeH}>
             <div className="we we-compact">
               <div className="we-ctrl">
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 38, padding: '0 12px', borderBottom: '1px solid var(--line)' }}>
@@ -941,10 +1047,10 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                   </span>
                 </div>
                 <div className="we-ctrl-body">
-                  <MixerStrip mixer={inst.mixer} level={playing ? (e?.voiceLevel(inst.id) ?? 0) : 0} onMixer={(patch, history) => changeMixer(inst.id, patch, !!history)} />
+                  <MixerStrip mixer={inst.mixer} engine={e} voiceId={inst.id} playing={playing} onMixer={(patch, history) => changeMixer(inst.id, patch, !!history)} sends={inst.sends} onSends={(patch, history) => changeSends(inst.id, patch, !!history)} />
                   <div className="we-rail" style={{ padding: '10px' }}>
                     <span className="we-lab">Grid</span>
-                    <div className="seg we-gseg">{COLLAGE_GRID.map((g) => (<button key={g.label} className={Math.abs(collageGrid - g.bars) < 1e-6 ? 'on' : ''} onClick={() => setCollageGrid(g.bars)}>{g.label}</button>))}</div>
+                    <div className="seg we-gseg">{COLLAGE_GRID.map((g) => (<button key={g.label} className={Math.abs(collageGrid - g.bars) < 1e-6 ? 'on' : ''} onClick={() => setArrangeGrid(g.bars)}>{g.label}</button>))}</div>
                     <span className="muted small" style={{ marginTop: 8, display: 'block', lineHeight: 1.5 }}>Drag slices · click a slice → edit below · drag samples into empty slots</span>
                   </div>
                 </div>
@@ -952,6 +1058,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
               <div className="we-main" style={{ position: 'relative' }}>
                 <CollageEditor inst={inst} gridBars={collageGrid} selClipId={selClipId} onSelectClip={selectPiece} dragBars={dragBars}
                   onMoveStart={beginCollageEdit} onMove={(cid, st) => moveCollagePiece(inst.id, cid, st)} onMoveEnd={() => rebakeCollage(inst.id)}
+                  onAltDuplicate={(sid, st) => altDuplicateForDrag(inst.id, sid, st)}
                   onDropSound={(sid, st) => dropOnCollageLane(inst.id, sid, st)} onLoop={(ls, bars) => setCollageLoop(inst.id, ls, bars)}
                   previewing={(e?.voiceState(inst.id) === 'on') || collageAud} getPhase={() => (collageAud ? (e?.auditionPhase(inst.id) ?? null) : (e?.voicePhase(inst.id) ?? null))}
                   onPreviewToggle={() => previewInst(inst.id)} canPreview={!playing} />
@@ -1057,6 +1164,33 @@ function Metronome({ on, vol, iv, onToggle, onVol, onIv }: { on: boolean; vol: n
   );
 }
 
+/** 顶栏工程名:点击改名;Enter/失焦提交,Esc 取消,空名回弹。提交走 commitProjName(乐观写 Project.name)。 */
+function ProjectNameInput({ name, onCommit }: { name: string; onCommit: (v: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(name);
+  const ref = useRef<HTMLInputElement | null>(null);
+  const escRef = useRef(false); // Esc 退出时跳过 blur 的提交
+  useEffect(() => { if (!editing) setVal(name); }, [name, editing]); // 非编辑态跟随真值
+  useEffect(() => { if (editing) { ref.current?.focus(); ref.current?.select(); } }, [editing]);
+  const commit = () => {
+    setEditing(false);
+    if (escRef.current) { escRef.current = false; setVal(name); return; }
+    const t = val.trim();
+    if (t && t !== name) onCommit(t); else setVal(name);
+  };
+  if (!editing) return (
+    <span className="tb-proj" title={`${name} — click to rename`} role="button" tabIndex={0}
+      onClick={() => setEditing(true)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(true); } }}>{name}</span>
+  );
+  return (
+    <input ref={ref} className="tb-proj-in" value={val} maxLength={80} aria-label="Project name"
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); else if (e.key === 'Escape') { escRef.current = true; e.currentTarget.blur(); } }} />
+  );
+}
+
 /** 顶栏主 BPM:可编辑;Enter/失焦提交,Esc 取消,↑↓ 微调(±1)。提交后真正的 clamp/re-warp/undo 在 commitBpm 里。 */
 function TempoInput({ bpm, onCommit }: { bpm: number; onCommit: (v: number) => void }) {
   const [editing, setEditing] = useState(false);
@@ -1080,9 +1214,10 @@ function TempoInput({ bpm, onCommit }: { bpm: number; onCommit: (v: number) => v
 const COLLAGE_GRID = [{ label: '1/1', bars: 1 }, { label: '1/2', bars: 0.5 }, { label: '1/4', bars: 0.25 }, { label: '1/8', bars: 0.125 }, { label: '1/16', bars: 0.0625 }];
 // arrange 轨(占单 sample 壳的 main 位):网格吸附拖移(夹邻不重叠、可留白)、拖库素材进网格位、尾部 headroom 供延长。
 // 选中片不在这里改 —— 点片弹出浮层 ClipEditor(在 footer 分支里渲染);片带 data-clip-id 供浮层锚定。
-function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, onMove, onMoveEnd, onDropSound, onLoop, previewing, getPhase, onPreviewToggle, canPreview, dragBars }: {
+function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, onMove, onMoveEnd, onAltDuplicate, onDropSound, onLoop, previewing, getPhase, onPreviewToggle, canPreview, dragBars }: {
   inst: Instrument; gridBars: number; selClipId: string | null; onSelectClip: (id: string) => void;
   onMoveStart: () => void; onMove: (clipId: string, startStep: number) => void; onMoveEnd: () => void;
+  onAltDuplicate?: (srcId: string, desiredStart: number) => string | null; // Alt 拖 = 复制一份再拖副本
   onDropSound: (soundId: string, startStep: number) => void;
   onLoop: (loopStartStep: number, bars: number) => void;
   previewing: boolean; getPhase: () => number | null; onPreviewToggle: () => void; canPreview: boolean;
@@ -1171,8 +1306,16 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
   const stepFromX = (clientX: number) => { const r = contentRef.current?.getBoundingClientRect(); if (!r) return 0; return Math.max(0, Math.round((clientX - r.left) / stepPx / snapSteps) * snapSteps); };
   const startDrag = (e: React.PointerEvent, id: string, origStart: number) => {
     e.stopPropagation(); onSelectClip(id);
-    const x0 = e.clientX; let moved = false;
-    const mv = (ev: PointerEvent) => { const want = origStart + Math.round((ev.clientX - x0) / stepPx); const snapped = Math.max(0, Math.round(want / snapSteps) * snapSteps); if (!moved) { onMoveStart(); moved = true; } onMove(id, snapped); };
+    const alt = e.altKey && !!onAltDuplicate; // 按住 Alt 拖 = 拖出一个副本(原片留位)
+    const x0 = e.clientX; let moved = false; let dragId = id;
+    const mv = (ev: PointerEvent) => {
+      const want = origStart + Math.round((ev.clientX - x0) / stepPx); const snapped = Math.max(0, Math.round(want / snapSteps) * snapSteps);
+      if (!moved) {
+        onMoveStart(); moved = true;
+        if (alt) { const nid = onAltDuplicate!(id, snapped); if (nid) { dragId = nid; return; } } // 副本已落在 snapped;本帧别再 onMove(此刻 ref 还没含副本,会覆盖掉)
+      }
+      onMove(dragId, snapped);
+    };
     const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); if (moved) onMoveEnd(); };
     window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
   };
@@ -1211,12 +1354,11 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
           <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: loopStart * stepPx, background: 'rgba(0,0,0,0.34)', pointerEvents: 'none', zIndex: 3 }} />
           <div style={{ position: 'absolute', top: 0, bottom: 0, left: loopEnd * stepPx, right: 0, background: 'rgba(0,0,0,0.34)', pointerEvents: 'none', zIndex: 3 }} />
           {Array.from({ length: Math.ceil(laneSteps / spb) }, (_, b) => (<span key={b} className="muted" style={{ position: 'absolute', top: 3, left: b * spb * stepPx + 4, fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--tx-3)', pointerEvents: 'none' }}>{b + 1}</span>))}
-          {cp.clips.map((c, i) => {
-            const isSel = c.id === selClipId; const pk = lanePeaksCache.get(peakKey(c)); const pcol = sliceColor(i); // 每片一色
+          {cp.clips.map((c) => {
+            const isSel = c.id === selClipId; const pk = lanePeaksCache.get(peakKey(c)); const pcol = sliceColorFor(c.id); // 每片一色(按 id 稳定,移动不变色)
             return (
-              <div key={c.id} data-clip-id={c.id} onPointerDown={(e) => startDrag(e, c.id, c.startStep)} title={c.soundId}
-                style={{ position: 'absolute', top: 20, bottom: 10, left: c.startStep * stepPx, width: Math.max(3, Math.round(c.bars * spb) * stepPx), cursor: 'grab', boxSizing: 'border-box', overflow: 'hidden',
-                  background: `color-mix(in srgb, ${pcol} ${isSel ? 52 : 30}%, var(--bg-1))`, border: `1px solid ${isSel ? `color-mix(in srgb, ${pcol} 85%, #fff)` : `color-mix(in srgb, ${pcol} 60%, var(--line))`}` }}>
+              <div key={c.id} data-clip-id={c.id} className={'lane-clip' + (isSel ? ' sel' : '')} onPointerDown={(e) => startDrag(e, c.id, c.startStep)} title={c.soundId}
+                style={{ ...cvar(pcol), left: c.startStep * stepPx, width: Math.max(3, Math.round(c.bars * spb) * stepPx) }}>
                 {pk && pk.length > 1 && <div style={{ position: 'absolute', inset: 0, color: `color-mix(in srgb, ${pcol} 82%, #fff)`, opacity: isSel ? 0.95 : 0.7, pointerEvents: 'none' }}><Wave className="lanewave" peaks={pk} /></div>}
                 {c.semitones !== 0 && <em style={{ position: 'absolute', top: 2, right: 3, fontStyle: 'normal', fontSize: 9, color: 'var(--tx)', background: 'color-mix(in srgb, var(--bg-0) 65%, transparent)', borderRadius: 3, padding: '0 3px', zIndex: 1, pointerEvents: 'none' }}>{c.semitones > 0 ? `+${c.semitones}` : c.semitones}</em>}
               </div>
@@ -1245,7 +1387,7 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
       </div>
       <button onClick={() => canPreview && onPreviewToggle()} disabled={!canPreview} title={canPreview ? 'Preview collage' : 'Transport is running — no preview needed'}
         style={{ position: 'absolute', right: 8, bottom: 8, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, lineHeight: 1, border: 'none', borderRadius: 'var(--r)', zIndex: 7,
-          cursor: canPreview ? 'pointer' : 'default', opacity: canPreview ? 1 : 0.35, background: previewing ? 'var(--play)' : 'var(--acc)', color: previewing ? '#23201d' : 'var(--acc-ink)' }}>{previewing ? '■' : '▶'}</button>
+          cursor: canPreview ? 'pointer' : 'default', opacity: canPreview ? 1 : 0.35, background: previewing ? 'var(--play)' : 'var(--acc)', color: previewing ? '#23201d' : 'var(--acc-ink)' }}><TransportIcon stop={previewing} size={11} /></button>
       </div>
       <div className="we-scroll" onPointerDown={thumbDown}><div className="we-thumb" style={{ left: thumb.left + '%', width: thumb.width + '%' }} /></div>
     </div>
@@ -1253,7 +1395,7 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
 }
 
 /** arrange 轨浮层:portal 挂 body,落在底部编辑器(footer)之上、左缘让开素材列表(aside.br),近满主区宽;Esc 收起;resize/scroll 跟随。 */
-function ArrangePopover({ onClose, children }: { onClose: () => void; children: ReactNode }) {
+function ArrangePopover({ onClose, onHeight, children }: { onClose: () => void; onHeight?: (h: number) => void; children: ReactNode }) {
   const [box, setBox] = useState<{ left: number; width: number; top: number } | null>(null);
   const [h, setH] = useState(0);
   const popRef = useRef<HTMLDivElement>(null);
@@ -1272,7 +1414,7 @@ function ArrangePopover({ onClose, children }: { onClose: () => void; children: 
     const ro = footer ? new ResizeObserver(place) : null; if (footer && ro) ro.observe(footer); // 底部编辑器高度变(空↔片)→ 重新贴
     return () => { window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); ro?.disconnect(); };
   }, []);
-  useEffect(() => { if (popRef.current) { const oh = popRef.current.offsetHeight; if (oh && oh !== h) setH(oh); } });
+  useEffect(() => { if (popRef.current) { const oh = popRef.current.offsetHeight; if (oh && oh !== h) { setH(oh); onHeight?.(oh); } } });
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);

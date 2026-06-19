@@ -84,7 +84,7 @@
 - **工程**:`←` + **工程名**(`name` prop,`page.tsx` 传 `project.name`)。
 - **走带**:`▶/■` + **节拍器**(`Metronome` 组件:toggle 开=橙 + `▾` 弹面板=音量推子 + **响一次** `每拍/每小节/2小节/4小节`) + **位置**`小节·拍 1.1.1`(加标注、16分变暗)。
 - **音乐**:`Tempo` BPM(可编辑,沿用 `TempoInput`) + **Quantize 真选择器**(`<select>` `1bar/½/¼/off`,改即 `eng.setQuantize` + 乐观持久化 `Project.quantize`)。
-- **主输出**(靠右):**主音量推子**(横向 console fader = 样式化 range → `Tone.getDestination().volume`) + **L/R 电平表**(两条横条;引擎挂 `Tone.Split`+两 `Tone.Meter` 并联抽各乐器 panner,不改主路径;render 每帧 `e.masterLevel()` 取值,靠 rAF 重渲) + `↩↪` undo/redo(钩形,30px) + 保存态。
+- **主输出**(靠右):**主音量推子**(横向 console fader = 样式化 range → `master.volume`,master=主总线 `Tone.Volume`,在软削波天花板之前;见 §17 信号链) + **L/R 电平表**(两条横条;`Tone.Split`+两 `Tone.Meter` 抽在 `master`=真实总线,绿/琥珀/红上色;由 `<MasterMeter>` **自驱动叶子**每帧取 `e.masterLevel()`,不再让整个 StudioApp 每帧 rAF 重渲) + `↩↪` undo/redo(钩形,30px) + 保存态。
 
 **引擎(StudioEngine)新增**:`setQuantize`(`nextBar`→`nextBoundary`:1bar/½/¼/off 量化 launch·stop·audition) · `setMasterVolume`/`masterLevel` · 节拍器(`clickSynth`+`clickVol`,`scheduleRepeat('4n')` 内按 interval/重音决定响不响;下拍 C6 重音、其余 C5)。
 - ⚠ **节拍器静音 bug(已修)**:`scheduleRepeat` 原本只在 `init` 注册一次,但 `stopTransport()` 的 `t.cancel()` 会清掉 Transport 上**全部**已排事件(含节拍器)→ 停一次后节拍器永久失效。改为 `scheduleMetro()` 在**每次 `startTransport` 重注册**(存 `metroRepeatId`,先 `t.clear` 再排)。**教训**:任何要长期存活的 transport 事件,别只在 init 注册——`stopTransport` 会 `cancel()` 全清。
@@ -316,14 +316,14 @@ model Instrument {
 - **逃生口**:每张表留一个 `extra Json?`,放还在试验、形状未定的参数;稳定了再"毕业"成正式列。
 
 ### B. 逐实体落法(已判定)
-**StudioInstrument**:`slot/type/label/color/icon/enabled` = **列**;`mixer{gainDb,pan,eq}` = **拍平成 4 列** `gainDb,pan,eqLowDb,eqHighDb`(不留 JSON、不开表);`sends` = **暂 JSON 占位,总线落地再开 `InstrumentSend` 表**;collage 的 `bars/stepsPerBar` = **列**、`bakedAssetId` = **列+FK→Asset**;`clips` = **开 Clip 表**。→ **`payload Json` 与 `mixer Json` 都消失**。
+**StudioInstrument**:`slot/type/label/color/icon/enabled` = **列**;`mixer{gainDb,pan,eq}` = **拍平成 4 列** `gainDb,pan,eqLowDb,eqHighDb`(不留 JSON、不开表);`sends` = **JSON 列**(§17 落地:固定三效果 `{dist,delay,reverb}` 0..1,整体读写、形状固定小 → 留 JSON 不开表;原 `Send[]` 占位已定型);collage 的 `bars/stepsPerBar` = **列**、`bakedAssetId` = **列+FK→Asset**;`clips` = **开 Clip 表**。→ **`payload Json` 与 `mixer Json` 都消失**。
 
 **Clip(新表,单原子 —— 全列、无内嵌 JSON)**:`id(PK,客户端生成稳定 id) · instrumentId(FK) · soundId(FK,可空 SetNull) · assetId(FK) · startSample · endSample · bars · timeMul · semitones · gainDb · startStep(可空) · orderIndex`。**`startStep`=null 即 sample 的唯一片;有值即 collage 里的位置** —— 一张表表达 §14 的"sample 竖排 1 / collage 横排 N",比判别联合 JSON 更准。`soundId/assetId` 变真 FK。
 
 **Sound(有个故意的不对称)**:标量/状态/FK 全 **列**(含 stem 三字段、trashed);`analysis{…,onsets[]}` = **JSON**(一次性快照、含同质数组);`warp`(默认 warp)= **JSON**(整体 PATCH 回来的默认种子);`tags` = **暂字符串**,要按 tag 筛库再升 `SoundTag` join 表。
 > **关键洞察**:`startSample/endSample/bars/semitones` 这些**同样的数**,在 **Clip 上是列**、在 **Sound.warp 里是 JSON** —— 这个不对称是对的:Clip 是被引擎播放、被 FK 引用、要 query 的**活实体**;Sound.warp 只是个整体写入的**默认种子 blob**。**同样的数字,身份不同,落法就不同。**
 
-**Gen**:标量全 **列**(status 要 filter);`sunoClipIds:string[]` = **JSON**(一小撮外部 id,整批取)。**Project**:masterBpm/masterKey/quantize/beatsPerBar 全 **列**(banks 早已规范化成 PadClip 表;⚠ `masterKey` 契约/本节已当列,但 Prisma schema 至今没落,生成窗口重做时补 db push,见 §4.1);生成偏好 `genPrefs{mode,loop,bpm}` = **JSON 逃生口**(形状演进中,稳定再毕业)。**Asset/WarpRender/User**:全标量列,**无 JSON**。
+**Gen**:标量全 **列**(status 要 filter);`sunoClipIds:string[]` = **JSON**(一小撮外部 id,整批取)。**Project**:masterBpm/masterKey/quantize/beatsPerBar 全 **列**(banks 早已规范化成 PadClip 表;⚠ `masterKey` 契约/本节已当列,但 Prisma schema 至今没落,生成窗口重做时补 db push,见 §4.1);生成偏好 `genPrefs{mode,loop,bpm}` = **JSON 逃生口**(形状演进中,稳定再毕业);编辑器网格偏好 `gridPrefs{arrange,warp,snap}` = **JSON 逃生口**(per-project UI 偏好:`arrange`=chop 拼贴轨吸附格、`warp`/`snap`=clip warp 编辑器网格/吸附;选片/刷新不再重置,改即乐观写 `Project.gridPrefs`,跟 `genPrefs` 同套路,2026-06-20)。主总线效果器 `fx{distortion,delay,reverb}` = **JSON 逃生口**(固定小配置、整体读写、形状演进中 → 同 `gridPrefs` 套路;详见 §17,2026-06-20)。**Asset/WarpRender/User**:全标量列,**无 JSON**。
 
 ### C. 乐观更新 + 发件箱 + 缓存
 **写路径**:`mutation → 按 id 寻址的细粒度 op → 发件箱队列 → 合并 → flush(PATCH/POST/DELETE)`。
@@ -364,15 +364,17 @@ model Instrument {
 
 ## 16. 撤销/重做(Undo/Redo)宪法 —— ⚠️ 加任何新交互前必读
 
-**模型(`web/src/studio/StudioApp.tsx`)= 快照栈。快照口径 = `{ sessions 整树 , 各库声音的 warp , 主 bpm }`。** `past`/`future: HistEntry[]`,`HistEntry = { sessions: Session[]; warps: Map<soundId, warp>; bpm: number }`。**口径会随需要扩展,改前先看本节列的口径。**
-- `snapshot()`:抓 `sessionsRef.current`(引用即可,树是不可变更新)+ 遍历 `ctx.soundsById` 抓每条声音的 `warp`(预调改的就是它,而它**不在 sessions 里**,故单列进口径)+ 抓 `ctx.bpm`(主 BPM,项目级标量,亦在 sessions 外)。
+**模型(`web/src/studio/StudioApp.tsx`)= 快照栈。快照口径 = `{ ① sessions 整树 , ② 各库声音的 warp , ③ 主 bpm , ④ 主总线 fx , ⑤ 活动 sessionId , ⑥ 量化 quantize , ⑦ 库存活集(声音/生成组 id) }`。** `past`/`future: HistEntry[]`,`HistEntry = { sessions; warps: Map<soundId, warp>; bpm; fx; sessionId; quantize; liveSounds: Set; liveGens: Set }`。**口径会随需要扩展,改前先看本节列的口径。**
+- `snapshot(sessionId?)`:抓 `sessionsRef.current`(引用即可,树是不可变更新)+ 遍历 `ctx.soundsById` 抓每条声音的 `warp`(预调改的就是它,而它**不在 sessions 里**)+ `ctx.bpm` + `fxRef` + `quantizeRef` + **活动 session id**(默认当前;undo/redo 显式传"改动归属 session")+ **存活的库声音/生成组 id 集**(= `soundsById.keys()` / `gens.map(id)`,用于软删可撤)。
 - `pushHistory()`:把 `snapshot()` 压入 `past`(上限 50),清空 `future`(标准 redo 失效)。**必须在 mutation 之前调**。
 - `mutate(fn)` = `pushHistory()` + `updateSession(fn(...))`,最常用入口。
-- `undo()`/`redo()` → `applyEntry(entry)`:`setSessions(entry.sessions)` + **只把 warp 与当前不同的库声音改回**(并反向 `api.sounds.patch`;其余声音不碰 → 不误删之后生成的)+ **bpm 不同则还原**(`ctx.bpm` 置回 + `engine.setBpm` + 反向 `api.projects.update(masterBpm)`;**在 `reconcile` 之前置好** `ctxRef.current.bpm`,reconcile 重灌时自然按还原后的 bpm re-warp)+ **校验选中**(乐器/片还在就保留,看见 snap back;没了才清)+ `reconcile()` 整树重灌引擎。快捷键 ⌘Z / ⌘⇧Z(输入框/textarea 聚焦时不拦)。
+- `undo()`/`redo()` → `applyEntry(entry)`:`setSessions` + **⑤ 跳回 `entry.sessionId` 对应的 session**(`setSessionIdx` + reconcile 那一格 —— 否则改动在别的 session 时 ⌘Z 看似毫无反应)+ **② 只把 warp 不同的库声音改回**(反向 `api.sounds.patch`;其余不碰 → 不误删之后生成的)+ **③ bpm 还原**(置回 + `engine.setBpm` + 反向 PATCH;`reconcile` 前置好 `ctxRef.bpm`)+ **④ fx 还原** + **⑥ quantize 还原**(`setQuantize` + 引擎 + 反向 PATCH)+ **⑦ 库存活集对齐**(见下"软删可撤")+ **校验选中**(还在就留,看见 snap back)+ `reconcile()` 重灌引擎。`undo`/`redo` 给对侧压栈的 snapshot **携带 `entry.sessionId`**,保证两个方向都跳回改动现场。快捷键 ⌘Z / ⌘⇧Z(输入框/textarea 聚焦时不拦)。
+
+**库删除全软删 + 可撤(⑦,2026-06-20)**:声音 `DELETE` 早就软删(`Sound.trashed`);生成组 `DELETE` 改为**软删整组**(`Gen.trashed=true` + 连带软删变体/stem,不再 `db.gen.delete` 硬删);两处列表路由都按 `trashed:false` 过滤,`PATCH` 可置回 `trashed:false` 恢复。`onDeleteSound`/`onDeleteGen` 删前(或删成功后、重载库前)`pushHistory`。`applyEntry` 的库对齐用 **restore-only + 白名单**,绝不做对称差集:**恢复** = 快照里存活、现在没了 → un-trash;**重删** = 现在存活、快照里没有、**且该 id 曾真删过**(`trashableSounds`/`trashableGens` ref 白名单)→ re-trash。这样撤回到很早的快照时,之后生成的声音既不在快照也不在白名单 → **绝不误删**(延续"不误删之后生成的"原则)。库有增删时,等 `trashed` 落定 → `reloadLibrary()` → 再 `reconcile` 一次(恢复的声音回到 `soundsById` 后,引用它的乐器才能重建出声)。
 
 ### 两条铁律(同时满足才进 undo)
 1. **改动前 `pushHistory()`**(直接调,或走 `mutate()`)。漏了 → 改动生效但没有撤销步。
-2. **改动的数据必须落在快照口径里**——当前口径 = ① `sessions` 整树,② 库声音 `Sound.warp`,③ 主 `bpm`。**口径外的状态 `applyEntry` 一概还原不了**,哪怕 pushHistory 了也白搭。要纳入新的状态域 → **显式扩口径**:`snapshot()` 多抓一份、`applyEntry()` 多还原一份(+ 反向持久化),并回本节登记。
+2. **改动的数据必须落在快照口径里**——当前口径 = ① `sessions` 整树,② 库声音 `Sound.warp`,③ 主 `bpm`,④ 主总线 `fx`,⑤ 活动 `sessionId`,⑥ `quantize`,⑦ 库存活集(`Sound.trashed` / `Gen.trashed`,经存活 id 集 + 白名单)。**口径外的状态 `applyEntry` 一概还原不了**,哪怕 pushHistory 了也白搭。要纳入新的状态域 → **显式扩口径**:`snapshot()` 多抓一份、`applyEntry()` 多还原一份(+ 反向持久化),并回本节登记。
 
 **派生态不入栈**:引擎/音频 buffer、peaks 都从 sessions 重算(undo 走 `reconcile` 重灌)。永远别把权威状态只存在引擎里。
 
@@ -385,10 +387,53 @@ model Instrument {
 
 ### 判断标准(什么该进、什么不该)
 **Litmus:用户期望 ⌘Z 能撤回这一步 ＆ 我改的东西在快照口径(sessions 树 / Sound.warp)里 —— 两个都 yes 才进。**
-- **该进**:乐器增删/移位/改名/激活;clip warp/trim/起播/长度/变调/timeMul/gain;collage 片增删移、片 mixer、loop 区;**库预调 warp(含拖起始线)**(已纳入口径②);**改主 BPM**(已纳入口径③ —— 它确实改了产出、像改 warp 而非播放瞬态,故可撤)。
-- **不该进**:走带/播放(play/stop、预览试听)= 瞬态;选中/聚焦/缩放/滚动 = 视图态(撤它反而突兀);生成新 Sound = 异步库生命周期。
-- **灰区 = 口径外但用户期望能撤**:Sound 的非 warp 字段(label、分离出的 stem 等)、跨 project/session 的东西。要纳入 → 按铁律②**显式扩口径**(snapshot+applyEntry 各加一份 + 持久化),**别默默埋一半;拿不准先找人拍板**。
+- **该进**:乐器增删/移位/改名/激活;clip warp/trim/起播/长度/变调/timeMul/gain;collage 片增删移、片 mixer、loop 区;**库预调 warp(含拖起始线)**(口径②);**改主 BPM**(口径③);**主总线 fx**(口径④);**量化 quantize**(口径⑥ —— 同 bpm 是项目级音乐设置,口径对称);**删库素材 / 删整组生成**(口径⑦ —— 全软删,可撤、可 redo 重删)。
+- **不该进**:走带/播放(play/stop、预览试听)= 瞬态;选中/聚焦/缩放/滚动 = 视图态(撤它反而突兀);**生成**新 Sound = 异步库生命周期(且生成的声音必须挺过早期快照的 undo,见⑦白名单);主音量 master/节拍器/生成偏好 = 设置/演奏态。
+- **灰区 = 口径外但用户期望能撤**:Sound 的非 warp 字段(label、tags 等)。要纳入 → 按铁律②**显式扩口径**(snapshot+applyEntry 各加一份 + 持久化),**别默默埋一半;拿不准先找人拍板**。
 
 ### 沿革
 - 起初口径只有 `sessions` 整树,且 undo 清空选中 → 库预调 warp(拖起始线)撤不了、clip 级撤销看不到回弹。已扩口径纳入 `Sound.warp` + 改成校验选中(保留 snap back)。
 - 2026-06-19:主 BPM 改成可编辑(§12),按本节铁律②**显式扩口径**纳入 `bpm`(snapshot 抓 / applyEntry 还原 + 反向 `api.projects.update`)。
+- 2026-06-20:效果器(§17)。① 全局 return 设置 `Project.fx`(口径外标量集)按铁律②**显式扩口径**纳入 —— `HistEntry` 加 `fx`,snapshot 抓 `fxRef.current`,applyEntry 比 JSON 不同则 `setFx` 回引擎 + setFx 回 state(浮层跟随)+ 反向 `api.projects.update({fx})`;FxRack 旋钮拖动**开始**(及 chip/电源点击前)调一次 `pushHistory`(经 `onStart` prop),连续拖只压一帧。② per-乐器 send 在 `sessions` 树里(`Instrument.sends`)→ 本就在口径,`changeSends` 同 `changeMixer` 走 `pushHistory`+树更新,免费可撤。③ **顺带修了 undo/redo 机制隐患**:`pushHistory`/`undo`/`redo` 原把 `snapshot()`/`applyEntry()` 等副作用写在 `setState` updater **内部** → React StrictMode(dev,Next15 默认开)双调 updater 时副作用重复跑、把 past/future 栈搞乱(表现:redo 还原不出来,bpm/warps/fx 同病)。改为 `pastRef`/`futureRef` 读最新栈、副作用在 updater **外**只跑一次 → undo+redo 都正常(DB 实测 fx 切换 → 撤销 → 重做 往返正确)。
+- 2026-06-20(undo 整体 review 补缺):①**跨 session 静默 bug** —— 改动在 A、切到 B 再 ⌘Z 时,旧实现用当前 `sessionIdx` reconcile,Verse 的还原看不到。扩口径⑤ `sessionId`:snapshot 抓活动 session id,applyEntry 跳回该 session,`undo`/`redo` 给对侧 snapshot 携带改动归属 id(否则切过 session 后 redo 跳错)。②**quantize 口径不对称** —— bpm 可撤、同级的 quantize 不可撤。扩口径⑥(照 bpm 模板:snapshot 抓 / applyEntry `setQuantize`+引擎+反向 PATCH;`commitQuantize` 改前 pushHistory)。③**库删除不可撤** —— 生成组 `DELETE` 原**硬删** gen 行(无法恢复)。改为全软删(`Gen.trashed` 新列 + db push)+ 扩口径⑦(restore-only + trashable 白名单,绝不误删之后生成的)。验证:tsc 0 错;gen 软删/恢复 API 往返实测(删 → 列表消失、行仍在且 trashed、PATCH 恢复 → 回列表);quantize 改 → ⌘Z → ⌘⇧Z 往返 UI 实测正确,无 console/server 报错。**未端到端 UI 实测**(库为空、无 Suno 插件):库删除→undo 的整链、跨 session undo(项目仅一个 session)—— 但其服务端原语已测、客户端接线 tsc 通过。
+
+## 17. 主总线效果器(Master FX 总线 / insert 效果器)—— 2026-06-20
+
+浏览器 AI loop 机的"成品感"靠效果器。三个效果器 **失真 Distortion · 延迟 Delay · 混响 Reverb**,做成 **send/return(aux 返送)** —— 每件乐器经各自的 send 量旁路进 3 个共享效果 return,return 出湿声回主输出。**只有乐器能 send**(不是片、不是主总线),正是 §14 早定的 `Clip → 乐器 mixer → [sends] → 总线`。
+
+> 沿革:最初(2026-06-20 上午)先做成**主总线 insert**(全体串 dist→delay→reverb)当过渡(那时"先不管 send");同日下午按 §14 定稿改为 send/return —— insert 行为退场,效果器只由乐器 send 喂。
+
+**信号链落点**(`audio/studioEngine.ts` + `audio/fxBus.ts`):
+```
+各乐器 (Player→EQ→Panner) ──┬─────────────────────────────────────┐ [干声]
+                            ├─ sendDist  ─► [Distortion return] ─┐ │
+                            ├─ sendDelay ─► [Delay return]       ├─┤ [湿声]
+                            └─ sendReverb─► [Reverb return]      ─┘ │
+节拍器 click ──────────────────────────────────────────────────────┤ [干声, 不进 return]
+                                                                    ▼
+                                  master(Tone.Volume=主音量) ─► 软削波天花板(WaveShaper, memoryless) ─► Tone.Destination
+                                          │
+                                          └─► Split → MeterL/R (真实总线电平: post-FX/post 主音量/pre-软削波)
+```
+- 每个 voice:`panner → master`(干声)+ `panner → sendGain[i] → return[i].input`(3 条 aux 旁路,**post-fader/post-eq/post-pan**,接在 panner 之后)。3 个 return 各 `input → 效果核心(全湿) → returnLevel → master`。**并联**,互不串联。
+- 3 个 send 量 = **per-乐器**(`Instrument.sends{dist,delay,reverb}`,0..1);效果核心参数 + return 电平/开关 = **全局**(`Project.fx`,见下持久化)。
+- **主总线兜底(电平标准)**:所有声源(干声 + 湿声 return + 节拍器)先汇入 `master`(主音量推子的作用点,`Tone.Volume`)→ **软削波天花板(`Tone.WaveShaper`,4× 过采样)** → `Destination`。理由:Suno loop 多是成品母带级、单条已贴近 0dBFS,数条 unity 叠加会越过 0dBFS,无兜底则终点节点硬削顶(方波失真);软削波把峰值平滑饱和到天花板内(~-0.35dBFS),0dBFS 永不硬削。主音量从"`Destination.volume`"移到 `master.volume`(在天花板之前,推子动作能被表和天花板看见)。
+  - ⚠ **为什么不用压缩器型限制器**(`Tone.Limiter`/`Compressor`):它有 attack/release 时间常数,会对鼓点/loop 接缝的瞬态做"压下→弹回"的增益起伏 = **抽吸 click**(走带满混音电平触发、单条预览不触发 → 表现为"单放干净、走带每圈咔")。软削波是 **memoryless**(纯波形映射、无时间常数),物理上不可能抽吸/咔;代价是峰值处轻微谐波饱和(暖色,适合 lofi/hiphop)。曲线 `softClipCurve(T=0.72, ceil=0.96)`:|x|≤T(~-2.9dBFS)纯净直通,超阈 tanh 平滑趋近 ceil。
+- **L/R 总电平表抽头改在 `master`**(= post-FX/post 主音量/pre-软削波 的**真实总线电平**,能反映 return 尾巴/主音量/逼近天花板的过载;旧实现抽各 voice panner=pre-FX、测不到这些,已退场)。归一窗口 `[-54,0]dBFS`,UI 据此上色(≥-3 红 / ≥-6 琥珀 / 其余绿)。节拍器进 master(随主音量+软削波),但不进任何 return。
+- 默认所有乐器 send=0 → 效果器静默(标准 aux 行为);return 的 `on`/`level` 在 FX 浮层控全局。delay 的 ping-pong 切换重建子图,其余都是 param set。
+
+**三个效果器的算法(web 端最优解)+ 参数**:
+| 效果 | 算法 | 参数 |
+|---|---|---|
+| **Distortion** | `WaveShaper`(自定义曲线/字符)+ **4× 过采样**抗混叠;drive = 前级增益喂入固定非线性 | `on` · `drive`(0..1) · `tone`(0..1 后置低通 400Hz–18kHz) · `character`(soft=tanh 管味 / hard=hard-clip / fuzz=非对称重谐波) · `mix`(0..1,直/湿线性交叉) |
+| **Delay** | **自建反馈延迟 + 反馈环内低通阻尼**(回声逐次变暗=模拟/磁带味,优于无阻尼的内置 FeedbackDelay)+ ping-pong 交叉耦合左右两条延迟线 | `on` · `sync`(1/4·1/8·1/8.附点·1/16·ms;同步分割跟工程 BPM,ms=自由毫秒) · `timeMs`(ms 档用) · `feedback`(0..0.95) · `tone`(0..1 反馈阻尼) · `pingpong` · `mix` |
+| **Reverb** | **卷积混响**(`Tone.Reverb` = ConvolverNode,衰减噪声离线生成 IR;web 金标准,比 Schroeder/Freeverb 真实)+ 湿声后置低通实现 `damp` | `on` · `decay`(0.3–12s,IR 长度=房间大小) · `preDelay`(0–150ms) · `damp`(0..1 高频阻尼,越大越暗) · `mix` |
+- 每个效果块 = `{input,output}` 两个 Gain 包一段**直/湿并联**:`on=false` 或 `mix=0` → wet 增益 0 = 直通。改 `decay/preDelay` 触发 IR 重生成(`Tone.Reverb.generate()`,**防抖**,异步=最终一致,见 §15.D);改 wet/feedback/cutoff/gain 都是即时的 param set。`sync`/工程 BPM 变 → 重算 delayTime。
+
+**UI 两处**:
+- **全局 return 设置(顶栏最右 · `studio/ui/FxRack.tsx`)**:撤销键左边一个 `FX` 按钮(任一 return 开着=陶土高亮),点开**下拉浮层**(右对齐、`right:0` 向左展开,沿用 `.metro-pop` 范式 + 点外/Esc 关闭)。顶部面包屑 `SENDS ▸ DIST · DELAY · REVERB ▸ OUT`,下面**三栏并排**,每栏:标题 + 右上 `⏻` 电源(=bypass return) + 陶土弧形旋钮(沿用 MixerStrip 画法:竖拖/双击复位) + 选择器 chip(失真字符 / 延迟同步分割) + ping-pong 开关。末位旋钮 `LVL` = 该 return 输出电平(原 `mix`,send/return 下 return 全湿,故是电平不是干湿)。
+- **per-乐器 send(`studio/ui/MixerStrip.tsx`)**:乐器 mixer 条在推子 + EQ 旋钮列**右边**加一个 block,竖排 3 个 send 旋钮(DIST / DLY / REV,0..1)。**只在乐器级 mixer 显示**(单 sample 乐器 + collage 乐器);collage **片**级 mixer 不显示(`sends` prop 可选,不传即不画)。
+
+**持久化(§15.A/B)**:① 全局 = `Project.fx` JSON 逃生口(同 `gridPrefs` 套路;改参即 `eng.setFx()` + 防抖乐观 PATCH;load 走 `page.tsx`→`StudioApp`→建引擎后 `setFx`)。② per-乐器 send = `Instrument.sends{dist,delay,reverb}`,走**已有的 `sends` JSON 列**(schema/sync `NInstrument.sends`/`/api/studio` GET+ops 全程已带,原是 `Send[]` 占位,现定型为固定三效果对象);在 sessions 树里 → 走细粒度发件箱 diff,改即存。
+
+**undo**:① 全局 `Project.fx` 按 §16 铁律②**显式扩口径**纳入(snapshot 抓 `fx` + applyEntry 还原 + 引擎 `setFx` + 反向 PATCH;FxRack 旋钮拖动**开始**压一次 `pushHistory`,不是每帧)。② per-乐器 send 在 sessions 树里 → **天然在快照口径**,`changeSends` 走 `pushHistory`+树更新,自动可撤。

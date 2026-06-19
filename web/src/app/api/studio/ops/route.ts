@@ -25,7 +25,7 @@ function clipData(row: Partial<NClip>, ownedSounds: Set<string>): Record<string,
 }
 function instData(row: Partial<NInstrument>): Record<string, unknown> {
   const d = pick(row as NInstrument, INST_COLS);
-  if ('sends' in d) d.sends = (d.sends ?? []) as object;
+  if ('sends' in d) d.sends = (d.sends ?? { dist: 0, delay: 0, reverb: 0 }) as object;
   return d;
 }
 

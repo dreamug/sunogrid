@@ -52,6 +52,8 @@ model Project {
   quantize    String   @default("1bar") // 1bar | 1/2 | 1/4 | off
   beatsPerBar Int      @default(4)
   genPrefs    Json?    // 生成窗口偏好 {mode,loop,bpmLinked,bpmManual} —— 形状演进中,JSON 逃生口(PRODUCT §15.A)
+  gridPrefs   Json?    // 编辑器网格偏好 {arrange,warp,snap} —— UI 偏好,JSON 逃生口(PRODUCT §15.A),记住不重置
+  fx          Json?    // 主总线效果器 {distortion,delay,reverb} —— 固定小配置,JSON 逃生口(PRODUCT §15.A/§17)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -95,6 +97,7 @@ model Gen {
   error        String?  @db.Text
   sunoBatchId  String?
   sunoClipIds  Json? // string[]
+  trashed      Boolean  @default(false) // 软删:删整组生成 = 标记 trashed(连带软删其下变体/stem),可被 undo 恢复(§16 口径⑦)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -103,6 +106,7 @@ model Gen {
   @@index([userId])
   @@index([projectId])
   @@index([status])
+  @@index([trashed])
 }
 
 model Sound {

@@ -2,7 +2,9 @@
 // 单 sample 乐器的 mixer 外壳 —— 最左竖排:满高推子(+实时电平表) + 一列竖排旋钮(PAN / EQ HI / EQ LO)。
 // 旋钮/推子都可拖(竖向拖改值,双击复位)。onStart 在拖动开始压一次撤销快照,onChange 实时改。配色走 app 暗色主题。
 import { useRef } from 'react';
-import type { Mixer } from '@/contracts';
+import type { InstrumentSends, Mixer } from '@/contracts';
+import type { StudioEngine } from '@/audio/studioEngine';
+import { useVoiceLevel } from './live';
 
 const CLAY = '#c2724f';
 const TRACK = '#39352f';
@@ -38,8 +40,9 @@ function Knob({ label, value, min, max, def = 0, fmt, onStart, onChange }: { lab
   );
 }
 
-function Fader({ value, min, max, def = 0, level, onStart, onChange }: { value: number; min: number; max: number; def?: number; level: number; onStart: () => void; onChange: (v: number) => void }) {
+function Fader({ value, min, max, def = 0, getLevel, live, onStart, onChange }: { value: number; min: number; max: number; def?: number; getLevel?: () => number; live: boolean; onStart: () => void; onChange: (v: number) => void }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const level = useVoiceLevel(getLevel, live); // 实时电平条:自驱动 rAF,不靠父树每帧重渲
   const norm = (value - min) / (max - min);
   const setFromY = (clientY: number) => { const el = trackRef.current; if (!el) return; const r = el.getBoundingClientRect(); const n = 1 - Math.max(0, Math.min(1, (clientY - r.top) / r.height)); onChange(min + n * (max - min)); };
   const down = (e: React.PointerEvent) => {
@@ -66,13 +69,19 @@ function Fader({ value, min, max, def = 0, level, onStart, onChange }: { value: 
   );
 }
 
-export function MixerStrip({ mixer, level, onMixer }: { mixer: Mixer; level: number; onMixer: (patch: Partial<Mixer>, history?: boolean) => void }) {
+// sends/onSends 给定 → 多画一个 SEND block(右侧,竖排 3 个 send 旋钮 DIST/DLY/REV);只在乐器级 mixer 传(collage 片级不传)。
+// engine+voiceId+playing 给定 → 推子电平条自驱动取该 voice 实时电平(collage 片级不传 = 不画电平)。
+export function MixerStrip({ mixer, onMixer, sends, onSends, engine, voiceId, playing }: { mixer: Mixer; onMixer: (patch: Partial<Mixer>, history?: boolean) => void; sends?: InstrumentSends; onSends?: (patch: Partial<InstrumentSends>, history?: boolean) => void; engine?: StudioEngine | null; voiceId?: string; playing?: boolean }) {
+  const getLevel = engine && voiceId ? () => engine.voiceLevel(voiceId) : undefined;
   const begin = () => onMixer({}, true);
+  const beginS = () => onSends?.({}, true);
+  const pctFmt = (v: number) => `${Math.round(v * 100)}`;
+  const s2 = (v: number) => Math.round(v * 100) / 100; // send 量 0..1,保两位
   return (
     <div style={{ flex: 'none', borderRight: '1px solid var(--line)', padding: '12px', display: 'flex', flexDirection: 'column', gap: 9, background: 'var(--bg-1)' }}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-          <Fader value={mixer.gainDb} min={-24} max={6} def={0} level={level} onStart={begin} onChange={(v) => onMixer({ gainDb: Math.round(v) })} />
+          <Fader value={mixer.gainDb} min={-24} max={6} def={0} getLevel={getLevel} live={!!playing} onStart={begin} onChange={(v) => onMixer({ gainDb: Math.round(v) })} />
           <span style={{ fontSize: 8.5, letterSpacing: '.05em', color: '#6f6a60' }}>GAIN</span>
           <span style={{ fontSize: 9.5, color: 'var(--tx)', fontFamily: 'var(--mono)' }}>{Math.round(mixer.gainDb)}dB</span>
         </div>
@@ -81,6 +90,13 @@ export function MixerStrip({ mixer, level, onMixer }: { mixer: Mixer; level: num
           <Knob label="EQ HI" value={mixer.eq.highDb} min={-12} max={12} def={0} fmt={(v) => `${Math.round(v)}`} onStart={begin} onChange={(v) => onMixer({ eq: { ...mixer.eq, highDb: Math.round(v) } })} />
           <Knob label="EQ LO" value={mixer.eq.lowDb} min={-12} max={12} def={0} fmt={(v) => `${Math.round(v)}`} onStart={begin} onChange={(v) => onMixer({ eq: { ...mixer.eq, lowDb: Math.round(v) } })} />
         </div>
+        {sends && onSends && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7, paddingLeft: 11, borderLeft: '1px solid var(--line)' }} title="Aux sends to the master effects (FX rack)">
+            <Knob label="DIST" value={sends.dist} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ dist: s2(v) })} />
+            <Knob label="DLY" value={sends.delay} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ delay: s2(v) })} />
+            <Knob label="REV" value={sends.reverb} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ reverb: s2(v) })} />
+          </div>
+        )}
       </div>
     </div>
   );

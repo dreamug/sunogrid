@@ -2,7 +2,7 @@ import { redirect, notFound } from 'next/navigation';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { StudioApp } from '@/studio/StudioApp';
-import type { GenPrefs, Quantize } from '@/contracts/models';
+import type { FxConfig, GenPrefs, GridPrefs, Quantize } from '@/contracts/models';
 
 type P = { params: Promise<{ id: string }> };
 
@@ -19,6 +19,8 @@ export default async function ProjectStudioPage({ params }: P) {
       masterBpm={project.masterBpm}
       masterKey={project.masterKey}
       genPrefs={(project.genPrefs as unknown as GenPrefs | null) ?? null}
+      gridPrefs={(project.gridPrefs as unknown as GridPrefs | null) ?? null}
+      fx={(project.fx as unknown as FxConfig | null) ?? null}
       quantize={project.quantize as Quantize}
       beatsPerBar={project.beatsPerBar}
     />

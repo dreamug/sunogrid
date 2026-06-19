@@ -4,6 +4,7 @@
 import { db } from '@/lib/db';
 import { getCurrentUser, unauthorized } from '@/lib/auth';
 import type { Clip, CollageClip, Instrument, InstrumentPayload } from '@/contracts';
+import { defaultSends } from '@/contracts';
 
 // —— DB 行 → contract 形状 ——
 type DbClip = {
@@ -40,7 +41,7 @@ function instrumentFromDb(i: DbInstrument): Instrument {
   return {
     id: i.id, slot: i.slot, label: i.label, color: i.color, icon: i.icon,
     mixer: { gainDb: i.gainDb, pan: i.pan, eq: { lowDb: i.eqLowDb, highDb: i.eqHighDb } },
-    sends: Array.isArray(i.sends) ? (i.sends as Instrument['sends']) : [],
+    sends: i.sends && typeof i.sends === 'object' && !Array.isArray(i.sends) ? (i.sends as Instrument['sends']) : defaultSends(),
     enabled: i.enabled, payload: payloadFromDb(i),
   };
 }

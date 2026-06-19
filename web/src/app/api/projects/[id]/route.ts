@@ -26,7 +26,7 @@ export async function PATCH(req: Request, { params }: P) {
   if (!guard.ok) return guard.res;
   const b = await req.json();
   const data: Record<string, unknown> = {};
-  for (const k of ['name', 'masterBpm', 'masterKey', 'genPrefs', 'quantize', 'beatsPerBar'] as const) if (k in b) data[k] = b[k];
+  for (const k of ['name', 'masterBpm', 'masterKey', 'genPrefs', 'gridPrefs', 'fx', 'quantize', 'beatsPerBar'] as const) if (k in b) data[k] = b[k];
   const project = await db.project.update({ where: { id }, data });
   return Response.json(project);
 }

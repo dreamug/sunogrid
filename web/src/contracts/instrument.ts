@@ -41,11 +41,14 @@ export interface Mixer {
   eq: { lowDb: number; highDb: number };
 }
 
-/** 效果 send(未来;现在只占位,总线后做)。 */
-export interface Send {
-  busId: string;
-  amountDb: number;
+/** per-乐器 send 量(§17):各乐器旁路进 3 个共享效果 return 的量,0..1(0=不送)。
+ *  return 的核心参数 + 电平/开关是全局的(Project.fx),这里只存每件乐器送多少。 */
+export interface InstrumentSends {
+  dist: number;
+  delay: number;
+  reverb: number;
 }
+export const defaultSends = (): InstrumentSends => ({ dist: 0, delay: 0, reverb: 0 });
 
 /** Collage payload 里的一片 = Clip + 轨上位置 + 摆放 id。单轨有序、不重叠。 */
 export interface CollageClip extends Clip {
@@ -71,7 +74,8 @@ export interface Instrument {
   icon?: string | null;
   /** —— 通用外壳(所有乐器类型共有)—— */
   mixer: Mixer;
-  sends: Send[];
+  /** 旁路进 3 个共享效果 return 的 send 量(§17);0..1。 */
+  sends: InstrumentSends;
   /** 开关:开=随主走带量化播放(运行态;持久化默认态)。 */
   enabled: boolean;
   /** —— 类型相关 —— */

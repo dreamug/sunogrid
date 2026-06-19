@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { LoopAnalysis } from '@/audio/conditioning';
 import { decodeAsset } from '@/studio/realLibrary';
+import { TransportIcon } from '@/studio/ui/glyphs';
 import type { Clip } from '@/contracts';
 import type { ApiSound } from '@/studio/api';
 
@@ -42,10 +43,14 @@ interface ClipEditorProps {
   canPreview?: boolean;
   showTimeMul?: boolean; // 是否显示 ÷2/×2 倍速排(库预调 step1 暂不支持 → false)
   onDragOut?: (e: React.DragEvent) => void; // 给定 → 波形身体可拖出(宿主写 dataTransfer);trim 锚 / Shift 区不触发
+  maxBars?: number; // loop 长度上限(collage 片传 = 到下一片的空档);不传 = 无限
+  initGridBars?: number; // 载入网格(从持久化偏好);不传 = 1/4
+  initSnap?: boolean;    // 载入吸附开关
+  onGridChange?: (bars: number, snap: boolean) => void; // 改网格/吸附 → 上层持久化
 }
 
 /** studio 唯一的 clip 调整入口。解码 + region↔Clip 映射 + 预览接线都收在这,调用点只管喂 Clip、收 Clip。 */
-export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, preview, mixer, header, canPreview = true, showTimeMul = true, onDragOut }: ClipEditorProps) {
+export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, preview, mixer, header, canPreview = true, showTimeMul = true, onDragOut, maxBars, initGridBars, initSnap, onGridChange }: ClipEditorProps) {
   const [audio, setAudio] = useState<{ channels: Float32Array[]; sampleRate: number } | null>(null);
   useEffect(() => {
     let alive = true;
@@ -69,7 +74,8 @@ export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, 
       nativeBpm={sound.sourceBpm} targetBpm={targetBpm} beatsPerBar={beatsPerBar} initSemitones={clip.semitones}
       previewing={preview.previewing} queued={preview.queued} warming={preview.warming} getPhase={preview.getPhase} onPreviewToggle={() => preview.toggle()}
       onChange={(r) => onChange({ ...clip, startSample: r.startSample, endSample: r.endSample, bars: r.bars, semitones: r.semitones })}
-      hideHead compact compactHeader={header} compactMixer={mixer} canPreview={canPreview} onDragOut={onDragOut}
+      hideHead compact compactHeader={header} compactMixer={mixer} canPreview={canPreview} onDragOut={onDragOut} maxBars={maxBars}
+      initGridBars={initGridBars} initSnap={initSnap} onGridChange={onGridChange}
       timeMul={clip.timeMul ?? 1} onTimeMul={showTimeMul ? (m) => onChange({ ...clip, timeMul: m }) : undefined}
     />
   );
@@ -98,6 +104,10 @@ interface Props {
   queued?: boolean;                          // 量化预览等边界 → 波形背景呼吸
   warming?: boolean;                         // ⑥ build buffer 中(出声前)→ 播放键转圈
   onDragOut?: (e: React.DragEvent) => void;  // 波形身体拖出(宿主写 dataTransfer)
+  maxBars?: number;                          // loop 长度上限(collage 片 = 到下一片的空档,不可拖超);sample 不传 = 无限
+  initGridBars?: number;                     // 载入时的网格(从持久化偏好来),否则默认 1/4
+  initSnap?: boolean;                        // 载入时的吸附开关
+  onGridChange?: (bars: number, snap: boolean) => void; // 改网格/吸附 → 上层持久化(记住不重置)
 }
 
 const RULER_H = 22;
@@ -120,7 +130,7 @@ const GRID_OPTS: { label: string; bars: number; tip: string }[] = [
 type DragMode = 'trimStart' | 'trimEnd' | 'stretch';
 interface DragSnap { mode: DragMode; grabSrcSec: number; anchorSrcSec0: number; secPerBar0: number; grabBarOffset: number; loopLen0: number; }
 
-function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beatsPerBar = 4, initSemitones = 0, previewing, getPhase, onPreviewToggle, onChange, onReset, hideHead = false, compact = false, compactHeader, compactMixer, timeMul = 1, onTimeMul, canPreview = true, queued = false, warming = false, onDragOut }: Props) {
+function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beatsPerBar = 4, initSemitones = 0, previewing, getPhase, onPreviewToggle, onChange, onReset, hideHead = false, compact = false, compactHeader, compactMixer, timeMul = 1, onTimeMul, canPreview = true, queued = false, warming = false, onDragOut, maxBars, initGridBars, initSnap, onGridChange }: Props) {
   const total = channels[0].length;
   const srcDur = total / sampleRate;
   const beatsBar = beatsPerBar;
@@ -146,9 +156,11 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const [secPerBar, setSecPerBar] = useState(init.secPerBar);
   const [trimStartBar, setTrimStartBar] = useState(init.trimStartBar);
   const [trimEndBar, setTrimEndBar] = useState(init.trimEndBar);
-  const [gridBars, setGridBars] = useState(0.25); // 默认 1/4(拍)
+  const [gridBars, setGridBars] = useState(initGridBars ?? 0.25); // 默认 1/4(拍);载入时用持久化偏好,选片不再重置
+  const pickGrid = (bars: number) => { setSnap(true); setGridBars(bars); onGridChange?.(bars, true); }; // 改网格 → 持久化
+  const toggleSnapOff = () => { setSnap(false); onGridChange?.(gridBars, false); };
   const [semitones, setSemitones] = useState(init.semitones);
-  const [snap, setSnap] = useState(true);
+  const [snap, setSnap] = useState(initSnap ?? true);
   const [barsVisible, setBarsVisible] = useState(init.N + 2);
   const [vStart, setVStart] = useState(0);
   const [armed, setArmed] = useState(false); // 光标在波形身体(非 trim 锚 / 非 Shift)→ 波形可拖出乐器
@@ -370,7 +382,8 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
       setTrimEndBar(ns + d.loopLen0);
     } else if (d.mode === 'trimEnd') {
       const s = snapGrid(ob);
-      setTrimEndBar(Math.max(trimStartBar + gridBars, s)); // 吸附到相对起点的网格 → 长度=网格整数倍;可超出音频(补零)
+      const capped = maxBars != null ? Math.min(trimStartBar + maxBars, s) : s; // collage:loop 不得长过到下一片的空档
+      setTrimEndBar(Math.max(trimStartBar + gridBars, capped)); // 吸附到相对起点的网格 → 长度=网格整数倍;可超出音频(补零)
     } else if (d.mode === 'stretch') {
       // 支点 = trim 起点,抓住的源点跟随光标 → 改 secPerBar;锚定到源速 ±半个八度(超出走 ÷2/×2)
       const pivotSrc = srcSecAt(trimStartBar);
@@ -479,7 +492,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
             <span className="we-title">Clip / Warp</span>
             <div className="we-head-act">
               {onReset && <button className="we-reset" onClick={onReset} title="Reset trim / bars / pitch to auto-detected defaults">↺</button>}
-              <button className={'we-play' + (previewing ? ' on' : '')} onClick={() => onPreviewToggle(region)} title="Play / stop (quantises to bar boundary when transport is running)">{previewing ? '⏸ Stop' : '▶ Play'}</button>
+              <button className={'we-play' + (previewing ? ' on' : '')} onClick={() => onPreviewToggle(region)} title="Play / stop (quantises to bar boundary when transport is running)" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><TransportIcon stop={previewing} size={11} />{previewing ? 'Stop' : 'Play'}</button>
             </div>
           </div>
         )}
@@ -517,9 +530,9 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
         {!compact && <div className="we-subh"><span className="we-title" title="Controls both ruler line density and trim snap resolution">Grid / Snap</span></div>}
         <div className="we-gridrow">
           <div className="seg we-gseg">
-            {!compact && <button className={!snap ? 'on' : ''} onClick={() => setSnap(false)} title="Disable snap (free drag)">Off</button>}
+            {!compact && <button className={!snap ? 'on' : ''} onClick={toggleSnapOff} title="Disable snap (free drag)">Off</button>}
             {GRID_OPTS.map((g) => (
-              <button key={g.label} title={g.tip} className={snap && Math.abs(gridBars - g.bars) < 1e-6 ? 'on' : ''} onClick={() => { setSnap(true); setGridBars(g.bars); }}>{g.label}</button>
+              <button key={g.label} title={g.tip} className={snap && Math.abs(gridBars - g.bars) < 1e-6 ? 'on' : ''} onClick={() => pickGrid(g.bars)}>{g.label}</button>
             ))}
           </div>
         </div>
@@ -544,7 +557,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
               title={canPreview ? 'Preview this sample (only when transport is stopped)' : 'Transport is running — preview unavailable'}
               style={{ position: 'absolute', right: 8, bottom: 8, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, lineHeight: 1, border: 'none', borderRadius: 'var(--r)', zIndex: 5,
                 cursor: canPreview ? 'pointer' : 'default', opacity: canPreview ? 1 : 0.35,
-                background: warming ? 'var(--bg-3)' : previewing ? 'var(--play)' : 'var(--acc)', color: previewing ? '#23201d' : 'var(--acc-ink)' }}>{warming ? <span className="sg-spin sm" aria-hidden="true" /> : previewing ? '■' : '▶'}</button>
+                background: warming ? 'var(--bg-3)' : previewing ? 'var(--play)' : 'var(--acc)', color: previewing ? '#23201d' : 'var(--acc-ink)' }}>{warming ? <span className="sg-spin sm" aria-hidden="true" /> : <TransportIcon stop={previewing} size={11} />}</button>
           )}
         </div>
 
