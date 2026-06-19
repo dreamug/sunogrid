@@ -6,11 +6,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import Link from 'next/link';
-import type { Clip, CollageClip, Instrument, InstrumentPayload, Mixer, SampleWarp, Session } from '@/contracts';
+import type { Clip, CollageClip, GenPrefs, Instrument, InstrumentPayload, Mixer, Quantize, SampleWarp, Session } from '@/contracts';
 import { clipMixer, defaultMixer, instrumentBars, mixerToClipPatch, sessionBars, SLOTS_PER_SESSION } from '@/contracts';
 import { normalize, diff, type Snapshot } from '@/studio/sync';
 import { StudioEngine } from '@/audio/studioEngine';
-import { buildBuffer, decodeAsset, loadLibrary, regionFromClip, soundToClip, warpToBuffer } from '@/studio/realLibrary';
+import { buildBuffer, decodeAsset, loadLibrary, regionFromClip, regionFromSound, soundToClip, warpToBuffer } from '@/studio/realLibrary';
 import { loadGens, generateToLibrary, retryGen, conciseError, type GenHooks } from '@/studio/studioGens';
 import { findInst, patchCollageClip, patchMixer, removeInstrument as docRemove } from '@/studio/sessionDoc';
 import { moveItem, placeItem } from '@/studio/collageDoc';
@@ -28,7 +28,7 @@ const cvar = (c: string): CSSProperties => ({ ['--c']: c } as CSSProperties);
 // 拖拽时手里只攥一个小标签(默认会把整块波形当拖拽图,太大)。离屏渲染一个小 pill 当 setDragImage。
 function setDragImage(ev: React.DragEvent, label: string): void {
   const g = document.createElement('div');
-  g.textContent = '♪ ' + (label || '素材');
+  g.textContent = '♪ ' + (label || 'sample');
   Object.assign(g.style, { position: 'fixed', top: '-1000px', left: '-1000px', padding: '4px 9px', borderRadius: '6px',
     background: 'var(--acc)', color: 'var(--acc-ink)', font: '500 11px -apple-system,system-ui,sans-serif', whiteSpace: 'nowrap', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', boxShadow: '0 6px 18px rgba(0,0,0,0.45)' } as CSSStyleDeclaration);
   document.body.appendChild(g);
@@ -120,7 +120,7 @@ const emptySessions = (): Session[] => [
   { id: nid('sess'), name: 'Break', index: 1, instruments: [] },
 ];
 
-export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId: string; masterBpm: number; beatsPerBar?: number }) {
+export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = null, genPrefs = null, quantize: propQuantize = '1bar', beatsPerBar = 4 }: { projectId: string; name?: string; masterBpm: number; masterKey?: string | null; genPrefs?: GenPrefs | null; quantize?: Quantize; beatsPerBar?: number }) {
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionIdx, setSessionIdx] = useState(0);
@@ -131,14 +131,24 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
   const [confirmState, setConfirmState] = useState<(ConfirmOpts & { resolve: (v: boolean) => void }) | null>(null);
   const [gens, setGens] = useState<GenView[]>([]);
   const [gp, setGp] = useState('dusty jazz rhodes chords, lo-fi');
-  const [gmode, setGmode] = useState<'sound' | 'advanced'>('sound');
-  const [gloop, setGloop] = useState(true);
-  const [gbpm, setGbpm] = useState(90);
-  const [gkey, setGkey] = useState('');
+  const [gmode, setGmode] = useState<'sound' | 'advanced'>(genPrefs?.mode ?? 'sound');
+  const [gloop, setGloop] = useState(genPrefs?.loop ?? true);
+  // 生成 BPM(§4.1):持久化的独立值,可随时改;主 BPM 变化时单向透传一次覆盖(下方 effect)。
+  const [gbpm, setGbpm] = useState(genPrefs?.bpm ?? masterBpm);
+  const [gkey, setGkey] = useState(masterKey ?? ''); // 工程调;'' = Any
   const [stemUp, setStemUp] = useState<boolean | null>(null);
   const [peaks, setPeaks] = useState<Record<string, number[]>>({});
+  const [libPeaks, setLibPeaks] = useState<Record<string, number[]>>({}); // 库卡波形缩略图:sound/stem id → 峰值(懒解码 + lanePeaksCache 复用)
+  const [warming, setWarming] = useState<string | null>(null); // ⑥ 试听 warm-up:正在 build buffer 的 sound/clip id(命中缓存<120ms 不显)
+  const [building, setBuilding] = useState<Record<string, boolean>>({}); // ⑩ 新乐器入场:正在首建 buffer 的乐器 id(无 peaks 时 → 压暗 + 锁 ▶)
   const [playing, setPlaying] = useState(false);
-  type HistEntry = { sessions: Session[]; warps: Map<string, unknown> }; // 撤销快照口径(§16):sessions 整树 + 各库声音 warp
+  // 顶栏:量化粒度 / 节拍器(开关·音量·几小节响一次) / 主音量。引擎能力见 StudioEngine。
+  const [quantize, setQuantizeState] = useState<Quantize>(propQuantize);
+  const [metroOn, setMetroOn] = useState(false);
+  const [metroVol, setMetroVol] = useState(-8);
+  const [metroIv, setMetroIv] = useState<'beat' | 'bar' | '2bar' | '4bar'>('beat');
+  const [masterVol, setMasterVol] = useState(0);
+  type HistEntry = { sessions: Session[]; warps: Map<string, unknown>; bpm: number }; // 撤销快照口径(§16):sessions 整树 + 各库声音 warp + 主 bpm
   const [past, setPast] = useState<HistEntry[]>([]);
   const [future, setFuture] = useState<HistEntry[]>([]);
   const [over, setOver] = useState<number | null>(null);
@@ -146,7 +156,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
   const [dragSoundId, setDragSoundId] = useState<string | null>(null); // 正在拖的素材 id(波形/库共用)→ 轨内占位块按真实长度画、判重叠
   const [hoverSlot, setHoverSlot] = useState<number | null>(null);
   const [, setTick] = useState(0);
-  const [status, setStatus] = useState('加载真实库 + 生成记录…');
+  const [status, setStatus] = useState('Loading library + generation records…');
   const [sync, setSync] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle'); // 自动保存状态(替代 Save 按钮)
 
   const eng = useRef<StudioEngine | null>(null);
@@ -165,33 +175,38 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
 
   const loadInstrumentToEngine = useCallback(async (inst: Instrument, seamless = false) => {
     const c = ctxRef.current, e = eng.current; if (!c || !e) return;
-    const buf = await buildBuffer(inst, c.bpm, c.soundsById);
-    if (!buf) { e.clearInstrument(inst.id); setPeaks((p) => { const q = { ...p }; delete q[inst.id]; return q; }); return; }
-    if (seamless && e.hasVoice(inst.id)) {
-      e.swapBuffer(inst.id, buf, instrumentBars(inst)); // 在播时:下一个小节边界无缝接管,不断声
-    } else {
-      e.loadInstrument(inst.id, buf, instrumentBars(inst), inst.mixer);
-      e.setEnabled(inst.id, inst.enabled);
+    setBuilding((b) => ({ ...b, [inst.id]: true })); // ⑩ 入场/重建中;无缝重建(已有 peaks)不显遮罩,只锁全新乐器
+    try {
+      const buf = await buildBuffer(inst, c.bpm, c.soundsById);
+      if (!buf) { e.clearInstrument(inst.id); setPeaks((p) => { const q = { ...p }; delete q[inst.id]; return q; }); return; }
+      if (seamless && e.hasVoice(inst.id)) {
+        e.swapBuffer(inst.id, buf, instrumentBars(inst)); // 在播时:下一个小节边界无缝接管,不断声
+      } else {
+        e.loadInstrument(inst.id, buf, instrumentBars(inst), inst.mixer);
+        e.setEnabled(inst.id, inst.enabled);
+      }
+      // sample:pad 波形 = 源的 trim 区(与 ClipEditor 同一段,所见=所见);collage:乐器层 = 整条 baked loop。
+      let peaks: number[];
+      if (inst.payload.kind === 'sample') {
+        const cl = inst.payload.clip;
+        const d = await decodeAsset(cl.assetId).catch(() => null);
+        peaks = d ? peaksFromRegion(d.channels, cl.startSample, cl.endSample) : computePeaks(buf);
+      } else {
+        peaks = computePeaks(buf);
+        // 给每片预算 trim 波形(pad 多色分段渲染要;选中/未选中乐器的 pad 都能显示)。
+        for (const cc of inst.payload.clips) { const k = pieceKey(cc); if (cc.assetId && !lanePeaksCache.has(k)) { try { const d = await decodeAsset(cc.assetId); lanePeaksCache.set(k, peaksFromRegion(d.channels, cc.startSample, cc.endSample)); } catch { /* 源缺失 */ } } }
+      }
+      setPeaks((p) => ({ ...p, [inst.id]: peaks }));
+    } finally {
+      setBuilding((b) => { if (!b[inst.id]) return b; const q = { ...b }; delete q[inst.id]; return q; });
     }
-    // sample:pad 波形 = 源的 trim 区(与 ClipEditor 同一段,所见=所见);collage:乐器层 = 整条 baked loop。
-    let peaks: number[];
-    if (inst.payload.kind === 'sample') {
-      const cl = inst.payload.clip;
-      const d = await decodeAsset(cl.assetId).catch(() => null);
-      peaks = d ? peaksFromRegion(d.channels, cl.startSample, cl.endSample) : computePeaks(buf);
-    } else {
-      peaks = computePeaks(buf);
-      // 给每片预算 trim 波形(pad 多色分段渲染要;选中/未选中乐器的 pad 都能显示)。
-      for (const cc of inst.payload.clips) { const k = pieceKey(cc); if (cc.assetId && !lanePeaksCache.has(k)) { try { const d = await decodeAsset(cc.assetId); lanePeaksCache.set(k, peaksFromRegion(d.channels, cc.startSample, cc.endSample)); } catch { /* 源缺失 */ } } }
-    }
-    setPeaks((p) => ({ ...p, [inst.id]: peaks }));
   }, []);
   const loadSession = useCallback(async (s: Session) => {
     eng.current?.clearAll();
     // 单个乐器解码失败(如源文件缺失)不应拖垮整个 session 加载 —— 跳过它,其余照常。
     for (const inst of s.instruments) {
       try { await loadInstrumentToEngine(inst); }
-      catch (e) { console.warn('乐器加载失败,跳过:', inst.id, e); }
+      catch (e) { console.warn('Failed to load instrument, skipping:', inst.id, e); }
     }
   }, [loadInstrumentToEngine]);
 
@@ -215,13 +230,14 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
         const c: Ctx = { soundsById, bpm: masterBpm, beatsPerBar };
         eng.current = new StudioEngine();
         eng.current.init(c.bpm, c.beatsPerBar);
+        eng.current.setQuantize(propQuantize); // 初始量化粒度(顶栏 Quantize 选择器)
         ctxRef.current = c;
         setCtx(c); setGens(g); setSessions(sessions);
         await loadSession(sessions[0]);
         synced.current = normalize(sessions); // 记下加载态为 diff 基准,避免 load 后无谓重存
         loaded.current = true; // 之后任何 setSessions 才触发自动保存
-        setStatus(restored ? '已加载 · 拖左边素材到空格 / hover 空格＋加乐器 · ⌘Z · 改动自动保存' : '空操场 · 左边生成/选素材,拖到右边空格 = 单 sample 乐器 · hover 空格可＋切片乐器 · 改动自动保存');
-      } catch (err) { setStatus('加载失败:' + conciseError(err)); }
+        setStatus(restored ? 'Loaded · drag a sample into an empty slot / hover a slot to add an instrument · ⌘Z · changes auto-save' : 'Empty stage · generate or pick a sample on the left, drag it into a slot = sample instrument · hover a slot to add a slice instrument · changes auto-save');
+      } catch (err) { setStatus('Load failed: ' + conciseError(err)); }
     })();
     return () => { alive = false; if (raf.current != null) cancelAnimationFrame(raf.current); eng.current?.dispose(); };
   }, [loadSession, projectId, masterBpm, beatsPerBar]);
@@ -236,11 +252,11 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
   }, [startRaf, stopRaf]);
 
   const curSession = sessions[sessionIdx];
-  // §16 撤销宪法:快照口径 = sessions 整树 + 各库声音 warp(预调改 Sound.warp,不在 sessions 里)。
+  // §16 撤销宪法:快照口径 = sessions 整树 + 各库声音 warp(预调改 Sound.warp,不在 sessions 里)+ 主 bpm(项目级标量,亦在 sessions 外)。
   const snapshot = (): HistEntry => {
     const warps = new Map<string, unknown>();
     const sb = ctxRef.current?.soundsById; if (sb) for (const [id, snd] of sb) warps.set(id, snd.warp);
-    return { sessions: sessionsRef.current, warps };
+    return { sessions: sessionsRef.current, warps, bpm: ctxRef.current?.bpm ?? masterBpm };
   };
   const pushHistory = () => { setPast((p) => [...p.slice(-49), snapshot()]); setFuture([]); };
   const updateSession = (next: Session) => setSessions((ss) => ss.map((s, i) => (i === sessionIdx ? next : s)));
@@ -257,7 +273,10 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
         const cur = sounds.get(id);
         if (cur && JSON.stringify(cur.warp ?? null) !== JSON.stringify(warp ?? null)) { sounds.set(id, { ...cur, warp }); api.sounds.patch(id, { warp: warp ?? null }).catch(() => {}); changed = true; }
       }
-      if (changed) { ctxRef.current = { ...c, soundsById: sounds }; setCtx(ctxRef.current); }
+      // §16 口径③:bpm 不同则还原 —— transport 立即跟随 + 反向持久化;ctxRef.bpm 在 reconcile 前置好,重灌时按还原后的 bpm re-warp。
+      const bpmChanged = entry.bpm !== c.bpm;
+      if (bpmChanged) { eng.current?.setBpm(entry.bpm); api.projects.update(projectId, { masterBpm: entry.bpm }).catch(() => {}); }
+      if (changed || bpmChanged) { ctxRef.current = { ...c, soundsById: sounds, bpm: entry.bpm }; setCtx(ctxRef.current); }
     }
     const insts = entry.sessions[sessionIdx]?.instruments ?? [];
     setSelId((cur) => (cur && insts.some((i) => i.id === cur) ? cur : null));
@@ -271,9 +290,10 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
       if (confirmState) return; // 弹窗开着时,快捷键交给弹窗(Enter/Esc)
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); if (!e.repeat) togglePlay(); return; } // 空格 = 走带启停;挡掉列表/页面滚动 + 按钮的空格触发
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
       if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey) {
-        if (libSel) return; // 聚焦库素材时(底部预调)Delete 不删乐器/片
+        if (libSel) { e.preventDefault(); requestRemoveSound(libSel); return; } // 选中库素材 → 软删(弹确认)
         if (selClipId && selId) { e.preventDefault(); removeCollagePiece(selId, selClipId); } // 选中片 → 删该 collage 片
         else if (selId) { e.preventDefault(); requestRemoveInst(selId); } // 否则删选中乐器(弹确认)
       }
@@ -302,8 +322,39 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
   const removeInst = (id: string) => { eng.current?.stopAudition(); eng.current?.clearInstrument(id); mutate((s) => docRemove(s, id)); if (selId === id) { setSelId(null); setSelClipId(null); } setTick((t) => t + 1); };
   // 通用确认弹窗:const ok = await askConfirm({...}); if (ok) ...
   const askConfirm = (opts: ConfirmOpts) => new Promise<boolean>((resolve) => setConfirmState({ ...opts, resolve }));
-  const requestRemoveInst = async (id: string) => { const inst = findInst(curSession, id); if (!inst) return; if (await askConfirm({ title: '删除乐器', message: `确定删除「${inst.label}」?`, confirmLabel: '删除', danger: true })) removeInst(id); };
+  const requestRemoveInst = async (id: string) => { const inst = findInst(curSession, id); if (!inst) return; if (await askConfirm({ title: 'Delete instrument', message: `Delete "${inst.label}"?`, confirmLabel: 'Delete', danger: true })) removeInst(id); };
+  // 选中库素材按 Del/Backspace → 弹确认 → 软删(可在库里恢复)。
+  const requestRemoveSound = async (id: string) => { const name = ctxRef.current?.soundsById.get(id)?.name ?? 'this sample'; if (await askConfirm({ title: 'Delete sample', message: `Delete "${name}"? (soft delete, recoverable)`, confirmLabel: 'Delete', danger: true })) onDeleteSound(id); };
   const moveInstrument = (from: number, to: number) => { if (from === to) return; mutate((s) => ({ ...s, instruments: s.instruments.map((i) => (i.slot === from ? { ...i, slot: to } : i.slot === to ? { ...i, slot: from } : i)) })); setTick((t) => t + 1); };
+  // 改主 BPM(§6/§12/§15/§16):压栈 → 置 ctx.bpm + 主走带 transport 跟随 → 乐观持久化 Project 列 → 当前 session 逐乐器 re-warp 热替换(在播则下一小节边界无缝接管,停时就地换)。
+  // 元数据(数字)即时、音频(重渲 buffer)最终一致;别的 session 切过去时按新 bpm 自然重渲(warpToBuffer 以 bpm 为 cache key)。
+  const commitBpm = (raw: number) => {
+    const c = ctxRef.current, e = eng.current; if (!c || !e) return;
+    const next = Math.round(Math.max(40, Math.min(240, raw)));
+    if (!Number.isFinite(next) || next === c.bpm) return;
+    pushHistory();                                                        // §16 铁律①:改前压栈(口径已含 bpm)
+    const nc: Ctx = { ...c, bpm: next };
+    ctxRef.current = nc; setCtx(nc);                                      // ctx.bpm 即新值(re-warp 读它)
+    api.projects.update(projectId, { masterBpm: next }).catch(() => {});  // §15:Project 列乐观持久化
+    const insts = sessionsRef.current[sessionIdx]?.instruments ?? [];
+    if (e.isPlaying()) {
+      // 走带在跑:协调到下一小节边界无缝换速(§6 —— transport 翻速 + 各乐器同边界保相位换 buffer;未渲完者 playbackRate 顶速过渡,就绪即换)。
+      e.retempoPlaying(next, (id) => { const inst = insts.find((i) => i.id === id); return inst ? buildBuffer(inst, next, nc.soundsById) : Promise.resolve(null); });
+      setStatus(`Switched to ${next} BPM`);
+    } else {
+      // 停时:transport 直接跟随 + 逐乐器就地换 buffer(无声可断)。
+      e.setBpm(next);
+      setStatus(`Master BPM → ${next} · re-rendering instruments…`);
+      Promise.all(insts.map((inst) => loadInstrumentToEngine(inst, true).catch(() => {}))).then(() => { setStatus(`Switched to ${next} BPM`); setTick((t) => t + 1); });
+    }
+    setTick((t) => t + 1);
+  };
+  // 顶栏 handlers:量化(乐观持久化 Project 列)/ 节拍器 / 主音量。
+  const commitQuantize = (q: Quantize) => { setQuantizeState(q); eng.current?.setQuantize(q); api.projects.update(projectId, { quantize: q }).catch(() => {}); };
+  const toggleMetro = () => { const on = !metroOn; setMetroOn(on); eng.current?.setMetronome(on); };
+  const changeMetroVol = (db: number) => { setMetroVol(db); eng.current?.setMetronomeVolume(db); };
+  const changeMetroIv = (iv: 'beat' | 'bar' | '2bar' | '4bar') => { setMetroIv(iv); eng.current?.setMetronomeInterval(iv); };
+  const changeMaster = (db: number) => { setMasterVol(db); eng.current?.setMasterVolume(db); };
 
   // 解码 / analysis 拼装现在收在 ClipEditor 内部(吃 Clip + Sound 自解码),这里不再手搓 editor 状态。
 
@@ -314,38 +365,99 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
     if (en.auditioningId() === id) { en.stopAudition(); setTick((t) => t + 1); return; }
     const s = c.soundsById.get(id); if (!s) return;
     await en.resume();
-    const buf = await warpToBuffer(s, c.bpm, regionFromClip(soundToClip(s))); // 走种子 Clip(含 timeMul),与建乐器后一致
-    en.audition(id, buf, undefined, en.isPlaying()); setTick((t) => t + 1); // 走带在跑 → 量化跟随 bar(等待期波形呼吸)
+    const warmT = setTimeout(() => setWarming(id), 120); // ⑥ 命中缓存(<120ms)直接出声、不闪 spinner
+    try {
+      const buf = await warpToBuffer(s, c.bpm, regionFromClip(soundToClip(s))); // 走种子 Clip(含 timeMul),与建乐器后一致
+      en.audition(id, buf, undefined, en.isPlaying()); // 走带在跑 → 量化跟随 bar(等待期波形呼吸)
+    } finally {
+      clearTimeout(warmT); setWarming((w) => (w === id ? null : w));
+    }
+    setTick((t) => t + 1);
   };
+  // --- 生成参数:BPM 单向透传 + key/偏好记忆(§4.1)---
+  // 主 BPM 变化(commitBpm / undo 还原等任何来源)→ 单向覆盖生成 BPM 一次。
+  // 用 ref 跳过首帧 hydrate:load 时保留上次持久化的生成 BPM,不被首个 ctx.bpm 覆盖。
+  const prevBpmRef = useRef<number | null>(null);
+  useEffect(() => {
+    const b = ctx?.bpm;
+    if (b == null) return;
+    if (prevBpmRef.current != null && prevBpmRef.current !== b) setGbpm(b);
+    prevBpmRef.current = b;
+  }, [ctx?.bpm]);
+  // 偏好乐观持久化(跟 commitBpm 的 masterBpm 同套路:直写 Project 列,不进发件箱;失败静默)。
+  const prefsHydrated = useRef(false);
+  useEffect(() => {
+    if (!prefsHydrated.current) { prefsHydrated.current = true; return; } // 首帧是 load 进来的值,不回写
+    const prefs: GenPrefs = { mode: gmode, loop: gloop, bpm: gbpm };
+    api.projects.update(projectId, { genPrefs: prefs }).catch(() => {});
+  }, [projectId, gmode, gloop, gbpm]);
+  const onGenBpm = (n: number) => { if (Number.isFinite(n)) setGbpm(n); };
+  const onGenKey = (k: string) => { setGkey(k); api.projects.update(projectId, { masterKey: k || null }).catch(() => {}); }; // 即写工程调
+
+  // 库卡波形:gens 变化时,懒解码每条变体/分轨的 region 峰值(decodeAsset + lanePeaksCache 都已缓存,重跑廉价),非阻塞填进 libPeaks。
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const sb = ctxRef.current?.soundsById; if (!sb) return;
+      const ids: string[] = [];
+      for (const g of gens) for (const s of g.sounds) { ids.push(s.id); for (const st of s.stems ?? []) ids.push(st.id); }
+      for (const id of ids) {
+        const snd = sb.get(id); if (!snd?.assetId) continue;
+        const r = regionFromSound(snd);
+        const key = `${snd.assetId}:${Math.round(r.startSample)}:${Math.round(r.endSample)}`;
+        let pk = lanePeaksCache.get(key);
+        if (!pk) {
+          try { const d = await decodeAsset(snd.assetId); if (!alive) return; pk = peaksFromRegion(d.channels, r.startSample, r.endSample, 72); lanePeaksCache.set(key, pk); } catch { continue; }
+        }
+        if (!alive) return;
+        setLibPeaks((m) => (m[id] === pk ? m : { ...m, [id]: pk! }));
+      }
+    })();
+    return () => { alive = false; };
+  }, [gens]);
+
   const genHooks = useCallback((): GenHooks => ({
     appear: (g) => setGens((gs) => [g, ...gs]),
     patch: (gid, p) => setGens((gs) => gs.map((g) => (g.id === gid ? { ...g, ...p } : g))),
-    reload: async () => { const sb = await loadLibrary(); if (ctxRef.current) { ctxRef.current.soundsById = sb; setCtx({ ...ctxRef.current }); } await refreshGens(); setStatus('生成完成 → 进库'); },
+    reload: async () => { const sb = await loadLibrary(); if (ctxRef.current) { ctxRef.current.soundsById = sb; setCtx({ ...ctxRef.current }); } await refreshGens(); setStatus('Generated → library'); },
   }), [refreshGens]);
   const onGenerate = () => {
-    setStatus('生成中…(需 Suno 插件 + 登录的 suno.com 标签)');
+    setStatus('Generating… (needs the Suno plugin + a logged-in suno.com tab)');
     generateToLibrary(projectId, gp, { mode: gmode, loop: gloop, bpm: gbpm, key: gkey }, ctx?.bpm ?? masterBpm, genHooks())
-      .catch((e) => setStatus('生成失败:' + conciseError(e)));
+      .catch((e) => setStatus('Generate failed: ' + conciseError(e)));
   };
   const onRetryGen = (id: string) => {
     const g = gens.find((x) => x.id === id); if (!g) return;
-    setStatus('重试生成中…');
+    setStatus('Retrying…');
     retryGen(id, { projectId, mode: g.mode === 'advanced' ? 'advanced' : 'sound', prompt: g.prompt, bpm: g.bpm ?? ctx?.bpm ?? masterBpm, key: g.musicalKey ?? '', loop: g.loop ?? true }, genHooks())
-      .catch((e) => setStatus('重试失败:' + conciseError(e)));
+      .catch((e) => setStatus('Retry failed: ' + conciseError(e)));
   };
   const onDeleteGen = async (id: string) => {
     setGens((gs) => gs.filter((g) => g.id !== id)); // 乐观移除整组
-    try { await api.gens.remove(id); } catch (e) { setStatus('删除失败:' + conciseError(e)); }
+    try { await api.gens.remove(id); } catch (e) { setStatus('Delete failed: ' + conciseError(e)); }
     const sb = await loadLibrary(); if (ctxRef.current) { ctxRef.current.soundsById = sb; setCtx({ ...ctxRef.current }); }
     await refreshGens();
   };
   const onDeleteSound = async (id: string) => {
-    try { await api.sounds.remove(id); } catch (e) { setStatus('删除失败:' + conciseError(e)); return; }
+    try { await api.sounds.remove(id); } catch (e) { setStatus('Delete failed: ' + conciseError(e)); return; }
     if (libSel === id) setLibSel(null);
     const sb = await loadLibrary(); if (ctxRef.current) { ctxRef.current.soundsById = sb; setCtx({ ...ctxRef.current }); }
     await refreshGens();
   };
-  const separateSound = async (id: string) => { try { await api.sounds.separate(id); await refreshGens(); } catch (e) { setStatus('分离失败:' + conciseError(e)); } };
+  const setStemStatus = (id: string, st: string) => setGens((gs) => gs.map((g) => ({ ...g, sounds: g.sounds.map((s) => (s.id === id ? { ...s, stemStatus: st } : s)) })));
+  const separateSound = async (id: string) => {
+    setStemStatus(id, 'separating'); // 乐观:点了立刻显示「分离中」loading 态(路由同步,跑完才返回)
+    setStatus('Separating… (local Demucs)');
+    try {
+      const res = await api.sounds.separate(id);
+      if (!res.ok) throw new Error(res.error || 'Separate failed');
+      await refreshGens(); setStatus('Separated');
+    } catch (e) {
+      setStatus('Separate failed: ' + conciseError(e));
+      try { await refreshGens(); } catch { /* ignore */ } // DB 已标 failed → 卡上「分离失败 · 点重试」
+      setStemStatus(id, 'failed'); // 兜底:确保卡上出失败态(即使 refresh 没拿到)
+    }
+  };
 
   // --- 操场:加乐器 / 拖入 / hover ---
   const sampleInstFrom = (s: ApiSound, slot: number): Instrument => {
@@ -364,7 +476,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
     const payload: InstrumentPayload = kind === 'sample'
       ? { kind: 'sample', clip: { id: nid('clip'), soundId: '', assetId: '', startSample: 0, endSample: 0, bars: 1, semitones: 0, gainDb: 0 } }
       : { kind: 'collage', bars: 2, stepsPerBar: 16, loopStartStep: 0, bakedAssetId: null, clips: [] };
-    const inst: Instrument = { id: nid(kind), slot, label: kind === 'sample' ? '（空 sample）' : '切片乐器', color: kind === 'collage' ? '#9a7bc0' : '#6a86a0', mixer: defaultMixer(), sends: [], enabled: false, payload };
+    const inst: Instrument = { id: nid(kind), slot, label: kind === 'sample' ? '(empty sample)' : 'Slice instrument', color: kind === 'collage' ? '#9a7bc0' : '#6a86a0', mixer: defaultMixer(), sends: [], enabled: false, payload };
     mutate((s) => ({ ...s, instruments: [...s.instruments, inst] }));
     if (kind === 'collage') loadInstrumentToEngine(inst);
     setSelId(inst.id); setSelClipId(null); setLibSel(null);
@@ -377,7 +489,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
     if (inst.payload.kind === 'sample') { // 填充/替换 —— 复用同一 clip id → 一条 clip.upd
       const s = c.soundsById.get(soundId); if (!s) return;
       if (inst.payload.clip.soundId !== '' && inst.payload.clip.soundId !== soundId) { // 已有素材且换的是另一个 → 弹确认(空 sample 填充不问)
-        if (!(await askConfirm({ title: '替换素材', message: `用「${s.name}」替换乐器「${inst.label}」当前的素材?`, confirmLabel: '替换' }))) return;
+        if (!(await askConfirm({ title: 'Replace sample', message: `Replace the sample in instrument "${inst.label}" with "${s.name}"?`, confirmLabel: 'Replace' }))) return;
       }
       const live = findInst(sessionsRef.current[sessionIdx], inst.id); // 弹窗期间乐器可能被改/删 → 用最新的重建,别用确认前捕获的旧快照
       if (!live || live.payload.kind !== 'sample') return;
@@ -523,11 +635,43 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
 
   const e = eng.current;
   const pos = e && playing ? e.barBeat() : { bar: 1, beat: 1, sixteenth: 1 };
+  const meter: [number, number] = e && playing ? e.masterLevel() : [0, 0]; // 总输出 L/R 电平(rAF 每帧重渲时实时取)
   const sel = curSession ? findInst(curSession, selId) : null;
   const arrangeInst = sel && sel.payload.kind === 'collage' ? sel : null; // 选中切片乐器 → arrange 浮层(与下方 clip 聚焦解耦)
   const auditioning = e?.auditioningId() ?? null;
 
-  if (!ctx || !curSession) return <main className="daw" translate="no"><div className="ed-idle">{status}</div></main>;
+  if (!ctx || !curSession) {
+    // ① 启动:加载失败 → 文字;加载中 → 骨架屏(按真实三段布局,数据到位平滑替换)
+    if (status.startsWith('Load failed')) return <main className="daw" translate="no"><div className="ed-idle">{status}</div></main>;
+    return (
+      <main className="daw" translate="no" aria-busy="true">
+        <header className="tbar">
+          <div className="sg-skel" style={{ width: 28, height: 28 }} />
+          <div className="sg-skel" style={{ width: 34, height: 30 }} />
+          <div className="sg-skel" style={{ width: 116, height: 18, marginLeft: 4 }} />
+          <div className="tspace" style={{ flex: 1 }} />
+          <div className="sg-skel" style={{ width: 88, height: 16 }} />
+        </header>
+        <div className="daw-main">
+          <aside className="br">
+            <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div className="sg-skel" style={{ height: 30 }} />
+              <div className="sg-skel" style={{ height: 70 }} />
+              <div className="sg-skel" style={{ height: 46 }} />
+              <div className="sg-skel" style={{ height: 46, width: '82%' }} />
+              <div className="sg-skel" style={{ height: 46 }} />
+            </div>
+          </aside>
+          <section className="stage">
+            <div className="clipgrid" style={{ gridAutoRows: 120 }}>
+              {Array.from({ length: 8 }, (_, i) => <div key={i} className="sg-skel" style={{ height: 120 }} />)}
+            </div>
+          </section>
+        </div>
+        <footer className="daw-editor"><div className="ed-idle">{status}</div></footer>
+      </main>
+    );
+  }
 
   const slotCount = SLOTS_PER_SESSION;
   const dragSound = dragSoundId ? ctx.soundsById.get(dragSoundId) ?? null : null;
@@ -536,25 +680,50 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
   return (
     <main className="daw" translate="no">
       <header className="tbar">
-        <Link href="/projects" className="ic" title="返回项目工作台" style={{ textDecoration: 'none' }}>←</Link>
-        <button className="tp" data-on={playing} onClick={togglePlay} aria-label={playing ? '停止' : '播放'}>{playing ? '■' : '▶'}</button>
-        <div className="tg"><span className="tg-l">Tempo</span><input className="tg-bpm" value={ctx.bpm} readOnly title="项目主 BPM(改 BPM 需 re-warp 全部,后做)" /><span className="tg-u">BPM</span></div>
-        <div className="led" title="bar · beat · 16th"><b>{pos.bar}</b><i>.</i><b>{pos.beat}</b><i>.</i><b>{pos.sixteenth}</b></div>
-        <div className="tg"><span className="tg-l">Quantize</span><div className="seg sm"><button className="on">1 Bar</button></div></div>
-        <div className="thist"><button className="ic" disabled={!past.length} title="撤销 (⌘Z)" onClick={undo}>↶</button><button className="ic" disabled={!future.length} title="重做" onClick={redo}>↷</button></div>
-        <span className="svc-dot" style={{ marginLeft: 8 }} title="改动自动保存到库,刷新还原">
-          {sync === 'saving' ? '同步中…' : sync === 'saved' ? '已同步 ✓' : sync === 'error' ? '⚠ 保存失败' : '自动保存'}
-        </span>
+        {/* 工程 */}
+        <Link href="/projects" className="ic" title="Back to projects" style={{ textDecoration: 'none' }}>←</Link>
+        <span className="tb-proj" title={name}>{name}</span>
+
+        {/* 走带 */}
+        <span className="tb-sep" />
+        <button className="tp" data-on={playing} onClick={togglePlay} aria-label={playing ? 'Stop' : 'Play'}>{playing ? '■' : '▶'}</button>
+        <Metronome on={metroOn} vol={metroVol} iv={metroIv} onToggle={toggleMetro} onVol={changeMetroVol} onIv={changeMetroIv} />
+        <span className="tb-pos" title="bar · beat · 16th"><b>{pos.bar}</b><i>.</i><b>{pos.beat}</b><i>.</i><b className="dim">{pos.sixteenth}</b></span>
+
+        {/* 音乐设置 */}
+        <span className="tb-sep" />
+        <div className="tg"><TempoInput bpm={ctx.bpm} onCommit={commitBpm} /><span className="tg-u">BPM</span></div>
+        <div className="tg">
+          <select className="tb-qtz" value={quantize} onChange={(ev) => commitQuantize(ev.target.value as Quantize)} title="Launch quantize — the grid that starting/stopping an instrument snaps to">
+            <option value="1bar">1/1</option><option value="1/2">1/2</option><option value="1/4">1/4</option><option value="off">Off</option>
+          </select>
+        </div>
+
         <div className="tspace" style={{ flex: 1 }} />
-        <span className="muted small">Session › Instrument › Clip · 真实库</span>
+
+        {/* 主输出:推子 + L/R 电平表 */}
+        <span className="tb-master">
+          <svg className="tb-vico" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /></svg>
+          <input className="tb-fader" type="range" min={-40} max={6} step={1} value={masterVol} onChange={(ev) => changeMaster(Number(ev.target.value))} title={`Volume ${masterVol > 0 ? '+' : ''}${masterVol} dB`} />
+          <span className="tb-meter">
+            <span className="mrow"><i style={{ width: `${Math.round(meter[0] * 100)}%` }} /></span>
+            <span className="mrow"><i style={{ width: `${Math.round(meter[1] * 100)}%` }} /></span>
+          </span>
+        </span>
+
+        {/* 历史 + 保存 */}
+        <span className="tb-sep" />
+        <button className="ic" disabled={!past.length} title="Undo (⌘Z)" onClick={undo} aria-label="Undo">↩</button>
+        <button className="ic" disabled={!future.length} title="Redo (⌘⇧Z)" onClick={redo} aria-label="Redo">↪</button>
+        <span className={'svc-dot ' + sync} title="Changes auto-save to the library; restored on reload">{sync === 'saving' ? 'Saving' : sync === 'error' ? '⚠ Failed' : 'Saved'}</span>
       </header>
 
       <div className="daw-main">
         <aside className="br">
           <LoopManager
-            gens={gens} selectedLoopId={libSel} previewing={auditioning != null && auditioning === libSel} masterBpm={ctx.bpm}
+            gens={gens} selectedLoopId={libSel} previewing={auditioning != null && auditioning === libSel} warmingId={warming} peaks={libPeaks} masterBpm={ctx.bpm}
             genPrompt={gp} genMode={gmode} genLoop={gloop} genBpm={gbpm} genKey={gkey}
-            onGenPrompt={setGp} onGenMode={setGmode} onGenLoop={setGloop} onGenBpm={setGbpm} onGenKey={setGkey}
+            onGenPrompt={setGp} onGenMode={setGmode} onGenLoop={setGloop} onGenBpm={onGenBpm} onGenKey={onGenKey}
             onGenerate={onGenerate} onSelect={(id) => { eng.current?.stopAudition(); focusSound(id); }} onAudition={auditionSound} onDragSound={setDragSoundId}
             onAssignNext={(id) => { const slot = (() => { let s = 0; const used = new Set(curSession.instruments.map((i) => i.slot)); while (used.has(s)) s++; return s; })(); addSampleFromSound(id, slot); }}
             onSeparate={separateSound} onRetryGen={onRetryGen} onDeleteGen={onDeleteGen} onDeleteSound={onDeleteSound} stemServiceUp={stemUp}
@@ -565,7 +734,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
           <div className="banks">
             <span className="sec-l">Session</span>
             {sessions.map((s, i) => (<button key={s.id} className={'bank' + (i === sessionIdx ? ' on' : '')} style={{ width: 'auto', padding: '0 11px' }} onClick={() => switchSession(i)}>{s.name}</button>))}
-            <span className="hint">长度 = {sessionBars(curSession)} 小节 · 拖左边素材到空格 = sample 乐器 · hover 空格＋切片 · ▶ 开关</span>
+            <span className="hint">Length = {sessionBars(curSession)} bars · drag a sample into a slot = sample instrument · hover a slot + slice · ▶ toggle</span>
           </div>
           <div className="clipgrid" style={{ gridAutoRows: 120, flexShrink: 0, gap: 0, borderRadius: 'var(--r)', overflow: 'hidden', borderTop: `1px solid ${FAINT}`, borderLeft: `1px solid ${FAINT}` }}>
             {Array.from({ length: slotCount }, (_, slot) => {
@@ -587,12 +756,12 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
                     <span className="cidx">{slot + 1}</span>
                     {over === slot ? (
                         <div style={{ margin: 'auto', padding: '6px 12px', border: '1px dashed var(--acc)', borderRadius: 'var(--r)', color: 'var(--acc)', fontSize: 11, fontWeight: 500, background: 'var(--acc-dim)' }}>
-                          {overKind === 'inst' ? '移到这里' : '放这里 · 新建乐器'}
+                          {overKind === 'inst' ? 'Move here' : 'Drop here · new instrument'}
                         </div>
                       ) : hoverSlot === slot ? (
                         <div style={{ margin: 'auto', display: 'flex', gap: 5 }}>
-                          <button style={addBtn} onClick={() => addEmptyAt(slot, 'sample')} title="加一个空 sample 乐器,再拖素材进来填充">＋sample</button>
-                          <button style={addBtn} onClick={() => addEmptyAt(slot, 'collage')} title="加一个切片乐器,拖多个素材进来拼">＋切片</button>
+                          <button style={addBtn} onClick={() => addEmptyAt(slot, 'sample')} title="Add an empty sample instrument, then drag a sample in to fill it">＋sample</button>
+                          <button style={addBtn} onClick={() => addEmptyAt(slot, 'collage')} title="Add a slice instrument, drag multiple samples in to arrange">＋slice</button>
                         </div>
                       ) : null}
                   </div>
@@ -605,6 +774,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
               const pk = peaks[inst.id];
               const level = playing ? (e?.voiceLevel(inst.id) ?? 0) : 0; // 实时电平 0..1
               const isEmpty = inst.payload.kind === 'sample' && inst.payload.clip.soundId === '';
+              const isBuilding = !!building[inst.id] && !(pk && pk.length > 0); // ⑩ 全新乐器(从未就绪)首建中 → 压暗 + 锁 ▶;已有 peaks 的无缝重建不算
               return (
                 <div key={slot} draggable onMouseDownCapture={() => { dragOK.current = true; }} onDragStart={(ev) => { if (!dragOK.current) { ev.preventDefault(); return; } ev.dataTransfer.setData('application/x-inst-slot', String(slot)); ev.dataTransfer.effectAllowed = 'move'; }} style={{ position: 'relative', minHeight: 0, borderRadius: 0, borderWidth: '0 1px 1px 0', borderStyle: 'solid', borderColor: FAINT, background: over === slot ? 'var(--acc-dim)' : undefined }} {...dnd}>
                   <div className={`clip filled ${inst.enabled ? 'st-playing' : ''}${playing && (st === 'queued' || st === 'stopping') ? (st === 'queued' ? ' st-queued' : ' st-stopping') : ''}`} style={{ ...cvar(color), position: 'absolute', inset: 6, minHeight: 0, borderRadius: 'var(--r)', borderColor: isSel ? `color-mix(in srgb, ${color} 75%, #fff)` : undefined }} onClick={() => selectInst(inst.id)}>
@@ -617,8 +787,8 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
                           {ph != null && <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${(ph * 100).toFixed(1)}%`, width: 1, background: color, opacity: 0.95, pointerEvents: 'none' }} />}
                         </div>
                       ))}
-                    <button className="launch" onMouseDown={() => { dragOK.current = false; }} onClick={(ev) => { ev.stopPropagation(); toggleInst(inst.id); }} title="播放态开关"
-                      style={{ position: 'relative', overflow: 'hidden', background: `color-mix(in srgb, ${color} ${inst.enabled ? 20 : 12}%, transparent)`, fontSize: 10 }}>
+                    <button className="launch" disabled={isBuilding} onMouseDown={() => { dragOK.current = false; }} onClick={(ev) => { ev.stopPropagation(); if (!isBuilding) toggleInst(inst.id); }} title={isBuilding ? 'Loading…' : 'Toggle playback'}
+                      style={{ position: 'relative', overflow: 'hidden', background: `color-mix(in srgb, ${color} ${inst.enabled ? 20 : 12}%, transparent)`, fontSize: 10, cursor: isBuilding ? 'default' : 'pointer' }}>
                       <span style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: `${Math.round(level * 100)}%`, background: `color-mix(in srgb, ${color} 60%, #fff)`, opacity: 0.6, pointerEvents: 'none' }} />
                       <span style={{ position: 'relative', zIndex: 1, color: inst.enabled ? `color-mix(in srgb, ${color} 72%, #fff)` : `color-mix(in srgb, ${color} 52%, #39352f)` }}>{inst.enabled ? '▶' : '■'}</span>
                     </button>
@@ -627,7 +797,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
                         {!isEmpty && <InstrumentIcon icon={inst.icon} size={15} style={{ color, flex: 'none' }} />}
                         <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{inst.label}</span>
                       </div>
-                      <div className="cmeta">{isEmpty ? '拖素材进来' : `${inst.payload.kind} · ${instrumentBars(inst)}b`}</div>
+                      <div className="cmeta">{isEmpty ? 'Drag a sample in' : `${inst.payload.kind} · ${instrumentBars(inst)}b`}</div>
                     </div>
                     {isSel && !isEmpty && (() => {
                       // gain 线:选中乐器一条横线 + dB 读数(无圆点),颜色用本 pad 色(提亮)。只有抓到线那条带才调电平,空白处仍是拖拽移动;双击复位 0dB。
@@ -637,7 +807,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
                         <>
                           <div style={{ position: 'absolute', left: 24, right: 0, top: `${gy}%`, height: 1, background: ln, zIndex: 2, pointerEvents: 'none' }} />
                           <span style={{ position: 'absolute', right: 6, top: `calc(${gy}% - 15px)`, fontSize: 10, color: ln, fontFamily: 'var(--mono)', zIndex: 2, pointerEvents: 'none' }}>{inst.mixer.gainDb}dB</span>
-                          <div title="拖动调电平 · 双击复位 0dB" onMouseDown={() => { dragOK.current = false; }}
+                          <div title="Drag to adjust gain · double-click to reset to 0 dB" onMouseDown={() => { dragOK.current = false; }}
                             onPointerDown={(ev: React.PointerEvent) => {
                               ev.stopPropagation();
                               const el = ev.currentTarget; try { el.setPointerCapture(ev.pointerId); } catch { /* 合成事件 */ }
@@ -653,9 +823,15 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
                         </>
                       );
                     })()}
+                    {isBuilding && (
+                      <div className="clip-building" aria-busy="true">
+                        <span className="sg-spin" aria-hidden="true" />
+                        <span>{inst.payload.kind === 'collage' ? 'Baking slices…' : 'Loading…'}</span>
+                      </div>
+                    )}
                     {over === slot && (
                       <div style={{ position: 'absolute', inset: 0, zIndex: 5, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 'var(--r)', border: '1px dashed var(--acc)', background: 'color-mix(in srgb, var(--acc) 24%, transparent)', color: 'var(--acc)', fontSize: 11, fontWeight: 500, pointerEvents: 'none' }}>
-                        {overKind === 'inst' ? '↔ 互换位置' : inst.payload.kind === 'collage' ? '＋ 加到切片' : '替换素材'}
+                        {overKind === 'inst' ? '↔ Swap' : inst.payload.kind === 'collage' ? '＋ Add slice' : 'Replace sample'}
                       </div>
                     )}
                   </div>
@@ -672,24 +848,23 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
           // ① 聚焦库素材(预调)—— 最高优先;选中切片乐器时点素材也走这里(arrange 浮层不动,req5)
           if (libSel) {
             const s = ctx.soundsById.get(libSel);
-            if (!s) return <EmptyEditor hint="素材不存在" />;
+            if (!s) return <EmptyEditor hint="Sample not found" />;
             return (
               <div className="ed-wrap">
-                <div className="ed-toplab"><span className="sec-l">预调（库素材的 warp · 改这里会存回素材）</span><span className="muted small">{s.name}</span></div>
                 <ClipEditor key={'snd-' + libSel} clip={soundToClip(s)} sound={s} targetBpm={ctx.bpm}
                   onChange={(c) => editSoundRegion(libSel, c)}
                   onDragOut={(ev) => { ev.dataTransfer.setData('text/plain', libSel); ev.dataTransfer.effectAllowed = 'copy'; setDragImage(ev, s.name); setDragSoundId(libSel); }}
-                  preview={{ previewing: auditioning === libSel, queued: !!e?.auditionQueuedFor(libSel), getPhase: () => e?.auditionPhase(libSel) ?? null, toggle: () => auditionSound(libSel) }} />
+                  preview={{ previewing: auditioning === libSel, warming: warming === libSel, queued: !!e?.auditionQueuedFor(libSel), getPhase: () => e?.auditionPhase(libSel) ?? null, toggle: () => auditionSound(libSel) }} />
               </div>
             );
           }
           // ② 选中单 sample 乐器 → 它的 clip(空 sample 落到空状态)
           if (sel && sel.payload.kind === 'sample') {
             const p = sel.payload;
-            if (p.clip.soundId === '') return <EmptyEditor hint="空 sample · 从左边库拖一条素材到它的格子来填充" />;
+            if (p.clip.soundId === '') return <EmptyEditor hint="Empty sample · drag one from the library into its slot" />;
             const clip = p.clip;
             const s = ctx.soundsById.get(clip.soundId);
-            if (!s) return <EmptyEditor hint="源素材不存在" />;
+            if (!s) return <EmptyEditor hint="Sample not found" />;
             const hColor = sel.color ?? 'var(--acc)';
             const enabled = !!sel.enabled;
             const vst = e?.voiceState(sel.id);
@@ -702,7 +877,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
                   <InstrumentChip color={hColor} icon={sel.icon} onPick={(pp) => patchInst(sel.id, pp)} />
                   <InstrumentName label={sel.label} onCommit={(v) => patchInst(sel.id, { label: v })} />
                 </span>
-                <button onClick={() => toggleInst(sel.id)} title={enabled ? '已激活:主走带播放时参与 · 点击取消激活' : '未激活 · 点击激活'}
+                <button onClick={() => toggleInst(sel.id)} title={enabled ? 'Active — plays with the transport · click to deactivate' : 'Inactive · click to activate'}
                   style={{ flex: 'none', width: 38, height: 22, borderRadius: 6, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                     background: enabled ? `color-mix(in srgb, ${hColor} 55%, transparent)` : 'var(--bg-3)',
                     boxShadow: enabled ? `inset 0 0 0 1px color-mix(in srgb, ${hColor} 70%, transparent)` : 'inset 0 0 0 1px var(--line-2)',
@@ -726,7 +901,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
             if (selPiece && psSound) {
               return (
                 <div className="ed-wrap">
-                  <div className="ed-toplab"><span className="sec-l">片编辑（{arrangeInst.label}）</span><span className="muted small">{psSound.name}</span></div>
+                  <div className="ed-toplab"><span className="sec-l">Slice edit ({arrangeInst.label})</span><span className="muted small">{psSound.name}</span></div>
                   <ClipEditor key={selPiece.id} clip={selPiece} sound={psSound} targetBpm={ctx.bpm} canPreview={!playing}
                     mixer={<MixerStrip mixer={clipMixer(selPiece)} level={0} onMixer={(patch, history) => setCollagePieceMixer(arrangeInst.id, selPiece.id, patch, !!history)} />}
                     onChange={(c) => writeCollageClip(arrangeInst.id, { ...(c as CollageClip), id: selPiece.id, startStep: selPiece.startStep })}
@@ -734,7 +909,7 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
                 </div>
               );
             }
-            return <EmptyEditor hint="切片乐器 · 点上方轨里的片来编辑,或把素材拖进轨" />;
+            return <EmptyEditor hint="Slice instrument · click a slice in the track above to edit, or drag a sample into the track" />;
           }
           // ④ 空(沿用素材编辑 UI、数据为空)
           return <EmptyEditor />;
@@ -757,20 +932,20 @@ export function StudioApp({ projectId, masterBpm, beatsPerBar = 4 }: { projectId
                     <InstrumentName label={inst.label} onCommit={(v) => patchInst(inst.id, { label: v })} />
                   </span>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <button onClick={() => toggleInst(inst.id)} title={enabled ? '已激活 · 点击取消激活' : '未激活 · 点击激活'}
+                    <button onClick={() => toggleInst(inst.id)} title={enabled ? 'Active — plays with the transport · click to deactivate' : 'Inactive · click to activate'}
                       style={{ flex: 'none', width: 38, height: 22, borderRadius: 6, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                         background: enabled ? `color-mix(in srgb, ${hColor} 55%, transparent)` : 'var(--bg-3)', boxShadow: enabled ? `inset 0 0 0 1px color-mix(in srgb, ${hColor} 70%, transparent)` : 'inset 0 0 0 1px var(--line-2)' }}>
                       <span style={{ width: 9, height: 9, borderRadius: '50%', background: enabled ? '#fff' : '#6f6a60', boxShadow: enabled ? '0 0 5px rgba(255,255,255,0.9)' : 'none' }} />
                     </button>
-                    <button onClick={close} title="收起 (Esc)" style={{ flex: 'none', width: 24, height: 22, borderRadius: 6, border: '1px solid var(--line-2)', background: 'var(--bg-3)', color: 'var(--tx-2)', cursor: 'pointer', fontSize: 13, lineHeight: 1 }}>✕</button>
+                    <button onClick={close} title="Collapse (Esc)" style={{ flex: 'none', width: 24, height: 22, borderRadius: 6, border: '1px solid var(--line-2)', background: 'var(--bg-3)', color: 'var(--tx-2)', cursor: 'pointer', fontSize: 13, lineHeight: 1 }}>✕</button>
                   </span>
                 </div>
                 <div className="we-ctrl-body">
                   <MixerStrip mixer={inst.mixer} level={playing ? (e?.voiceLevel(inst.id) ?? 0) : 0} onMixer={(patch, history) => changeMixer(inst.id, patch, !!history)} />
                   <div className="we-rail" style={{ padding: '10px' }}>
-                    <span className="we-lab">网格</span>
+                    <span className="we-lab">Grid</span>
                     <div className="seg we-gseg">{COLLAGE_GRID.map((g) => (<button key={g.label} className={Math.abs(collageGrid - g.bars) < 1e-6 ? 'on' : ''} onClick={() => setCollageGrid(g.bars)}>{g.label}</button>))}</div>
-                    <span className="muted small" style={{ marginTop: 8, display: 'block', lineHeight: 1.5 }}>拖移片 · 点片 → 下方编辑 · 拖素材进空位</span>
+                    <span className="muted small" style={{ marginTop: 8, display: 'block', lineHeight: 1.5 }}>Drag slices · click a slice → edit below · drag samples into empty slots</span>
                   </div>
                 </div>
               </div>
@@ -817,7 +992,7 @@ function InstrumentChip({ color, icon, size = 26, onPick }: { color: string; ico
   const cur = icon || DEFAULT_ICON;
   return (
     <>
-      <button ref={btnRef} onClick={toggle} title="换图标 / 颜色" style={{ flex: 'none', width: size, height: size, borderRadius: 6, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${color} 30%, transparent)`, color: `color-mix(in srgb, ${color} 80%, #fff)` }}>
+      <button ref={btnRef} onClick={toggle} title="Change icon / color" style={{ flex: 'none', width: size, height: size, borderRadius: 6, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${color} 30%, transparent)`, color: `color-mix(in srgb, ${color} 80%, #fff)` }}>
         <InstrumentIcon icon={cur} size={Math.round(size * 0.7)} />
       </button>
       {open && pos && createPortal(
@@ -852,7 +1027,54 @@ function InstrumentName({ label, onCommit, style }: { label: string; onCommit: (
         style={{ font: 'inherit', fontSize: 13, color: 'var(--tx)', background: 'var(--bg-0)', border: '1px solid var(--line-2)', borderRadius: 4, padding: '1px 6px', minWidth: 0, width: Math.max(80, Math.min(220, val.length * 9 + 22)), ...style }} />
     );
   }
-  return <span onClick={() => setEditing(true)} title="点击改名" style={{ cursor: 'text', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', ...style }}>{label}</span>;
+  return <span onClick={() => setEditing(true)} title="Click to rename" style={{ cursor: 'text', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', ...style }}>{label}</span>;
+}
+
+/** 顶栏节拍器:按钮 toggle 开关(开=橙),▾ 弹设置面板(音量 + 几小节响一次)。点外面关。 */
+type MetroIv = 'beat' | 'bar' | '2bar' | '4bar';
+function Metronome({ on, vol, iv, onToggle, onVol, onIv }: { on: boolean; vol: number; iv: MetroIv; onToggle: () => void; onVol: (db: number) => void; onIv: (iv: MetroIv) => void }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (ev: MouseEvent) => { if (!wrapRef.current?.contains(ev.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const IVS: [string, MetroIv][] = [['Beat', 'beat'], ['Bar', 'bar'], ['2 bars', '2bar'], ['4 bars', '4bar']];
+  return (
+    <div className="tb-metro" ref={wrapRef}>
+      <button className={'metro-btn' + (on ? ' on' : '')} title={on ? 'Metronome: on (click to stop)' : 'Metronome: off (click to start)'} aria-pressed={on} onClick={onToggle}>♩</button>
+      <button className="metro-caret" title="Metronome settings" aria-label="Metronome settings" onClick={() => setOpen((o) => !o)}>▾</button>
+      {open && (
+        <div className="metro-pop" role="dialog">
+          <div className="mp-h">Metronome</div>
+          <div className="mp-row"><span className="mp-l">Volume</span><input type="range" min={-30} max={0} step={1} value={vol} onChange={(ev) => onVol(Number(ev.target.value))} /></div>
+          <div className="mp-row"><span className="mp-l">Interval</span><div className="seg sm mp-iv">{IVS.map(([lab, v]) => <button type="button" key={v} className={iv === v ? 'on' : ''} onClick={() => onIv(v)}>{lab}</button>)}</div></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 顶栏主 BPM:可编辑;Enter/失焦提交,Esc 取消,↑↓ 微调(±1)。提交后真正的 clamp/re-warp/undo 在 commitBpm 里。 */
+function TempoInput({ bpm, onCommit }: { bpm: number; onCommit: (v: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(String(bpm));
+  useEffect(() => { if (!editing) setVal(String(bpm)); }, [bpm, editing]); // 非编辑态跟随真值(含 undo/clamp 回弹)
+  const commit = () => { setEditing(false); const n = parseInt(val, 10); if (Number.isFinite(n) && n !== bpm) onCommit(n); else setVal(String(bpm)); };
+  return (
+    <input className="tg-bpm" inputMode="numeric" value={val} title="Project master BPM · instruments re-warp to the new tempo after committing (Enter to commit · ↑↓ to nudge)"
+      onFocus={() => setEditing(true)}
+      onChange={(e) => setVal(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        else if (e.key === 'Escape') { setVal(String(bpm)); setEditing(false); e.currentTarget.blur(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); setVal((v) => String((parseInt(v, 10) || bpm) + 1)); }
+        else if (e.key === 'ArrowDown') { e.preventDefault(); setVal((v) => String((parseInt(v, 10) || bpm) - 1)); }
+      }} />
+  );
 }
 
 const COLLAGE_GRID = [{ label: '1/1', bars: 1 }, { label: '1/2', bars: 0.5 }, { label: '1/4', bars: 0.25 }, { label: '1/8', bars: 0.125 }, { label: '1/16', bars: 0.0625 }];
@@ -1007,13 +1229,13 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
             return (
               <div style={{ position: 'absolute', top: 20, bottom: 10, left: dropStep * stepPx, width: gSteps * stepPx, zIndex: 4, pointerEvents: 'none', boxSizing: 'border-box',
                 border: `1px dashed ${col}`, background: `color-mix(in srgb, ${col} 16%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <span style={{ fontSize: 10, color: col, fontWeight: 500 }}>{occupied ? '位置被占' : '放这里'}</span>
+                <span style={{ fontSize: 10, color: col, fontWeight: 500 }}>{occupied ? 'Slot occupied' : 'Drop here'}</span>
               </div>
             );
           })()}
           <div ref={playheadRef} style={{ position: 'absolute', top: 0, bottom: 0, width: 1, background: '#fff', boxShadow: '0 0 4px rgba(255,255,255,0.7)', zIndex: 6, pointerEvents: 'none', display: 'none' }} />
           {([['start', loopStart, '#7cd17c'], ['end', loopEnd, '#e8a33d']] as const).map(([edge, step, hc]) => (
-            <div key={edge} onPointerDown={(e) => dragLoop(e, edge)} title={edge === 'start' ? 'loop 起点(拖)' : 'loop 尾部(拖)'}
+            <div key={edge} onPointerDown={(e) => dragLoop(e, edge)} title={edge === 'start' ? 'Loop start (drag)' : 'Loop end (drag)'}
               style={{ position: 'absolute', top: 0, bottom: 0, left: step * stepPx - 4, width: 8, zIndex: 5, cursor: 'ew-resize' }}>
               <div style={{ position: 'absolute', top: 0, bottom: 0, left: 3, width: 2, background: hc }} />
               <div style={{ position: 'absolute', top: 0, left: 0, width: 8, height: 8, background: hc, clipPath: 'polygon(0 0,100% 0,50% 100%)' }} />
@@ -1021,7 +1243,7 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
           ))}
         </div>
       </div>
-      <button onClick={() => canPreview && onPreviewToggle()} disabled={!canPreview} title={canPreview ? '预览整条 collage' : '主走带运行中,无需预览'}
+      <button onClick={() => canPreview && onPreviewToggle()} disabled={!canPreview} title={canPreview ? 'Preview collage' : 'Transport is running — no preview needed'}
         style={{ position: 'absolute', right: 8, bottom: 8, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, lineHeight: 1, border: 'none', borderRadius: 'var(--r)', zIndex: 7,
           cursor: canPreview ? 'pointer' : 'default', opacity: canPreview ? 1 : 0.35, background: previewing ? 'var(--play)' : 'var(--acc)', color: previewing ? '#23201d' : 'var(--acc-ink)' }}>{previewing ? '■' : '▶'}</button>
       </div>
@@ -1066,10 +1288,9 @@ function ArrangePopover({ onClose, children }: { onClose: () => void; children: 
 
 /** 空状态:沿用素材编辑器(ClipEditor compact)的外壳,数据为空、禁用。 */
 function EmptyEditor({ hint }: { hint?: string }) {
-  const cells: [string, string][] = [['速度', '—'], ['长度', '—'], ['变调', '—'], ['拉伸', '—']];
+  const cells: [string, string][] = [['Tempo', '—'], ['Length', '—'], ['Pitch', '—'], ['Stretch', '—']];
   return (
     <div className="ed-wrap">
-      <div className="ed-toplab"><span className="sec-l">编辑器</span><span className="muted small">未选择</span></div>
       <div className="we we-compact" style={{ opacity: 0.72 }}>
         <div className="we-ctrl">
           <div className="we-ctrl-body">
@@ -1083,7 +1304,7 @@ function EmptyEditor({ hint }: { hint?: string }) {
         </div>
         <div className="we-main">
           <div className="we-stage" style={{ cursor: 'default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <span className="muted small" style={{ textAlign: 'center', padding: '0 20px' }}>{hint ?? '点左侧素材预调 · 或点操场乐器编辑'}</span>
+            <span className="muted small" style={{ textAlign: 'center', padding: '0 20px' }}>{hint ?? 'Click a sample on the left to pre-adjust · or click a stage instrument'}</span>
           </div>
           <div className="we-scroll"><div className="we-thumb" style={{ left: 0, width: '100%' }} /></div>
         </div>

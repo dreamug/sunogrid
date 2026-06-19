@@ -8,7 +8,8 @@ const post = (p: string, b: unknown) => fetch(p, { method: 'POST', headers: { 'c
 const patch = (p: string, b: unknown) => fetch(p, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }).then(J);
 const del = (p: string) => fetch(p, { method: 'DELETE' }).then(J);
 
-export interface ApiProject { id: string; name: string; masterBpm: number; quantize: string; beatsPerBar: number }
+export interface ApiGenPrefs { mode: 'sound' | 'advanced'; loop: boolean; bpm: number }
+export interface ApiProject { id: string; name: string; masterBpm: number; masterKey: string | null; genPrefs: ApiGenPrefs | null; quantize: string; beatsPerBar: number }
 export interface ApiAsset { id: string; path: string; contentType: string }
 export interface ApiSound {
   id: string; name: string; mode: string; sourceBpm: number; musicalKey: string | null;

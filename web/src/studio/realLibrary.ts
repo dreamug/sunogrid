@@ -151,7 +151,7 @@ export async function collageSourcesFor(soundIds: string[], soundsById: Map<stri
 export async function buildRealStudio(bpm = 90): Promise<RealStudio> {
   const soundsById = await loadLibrary();
   const sounds = [...soundsById.values()].slice(0, 6);
-  if (sounds.length === 0) throw new Error('库里没有素材');
+  if (sounds.length === 0) throw new Error('No samples in the library');
 
   const sampleInst = (s: ApiSound, slot: number, idPrefix: string): Instrument => {
     const r = regionFromSound(s);
@@ -172,7 +172,7 @@ export async function buildRealStudio(bpm = 90): Promise<RealStudio> {
     const chopLen = Math.round(0.45 * s.sampleRate);
     clips.push({ id: `k${i}`, soundId: s.id, assetId: s.assetId, startSample: r.startSample, endSample: r.startSample + chopLen, bars: 0.5, semitones: i === 2 ? 5 : 0, gainDb: 0, startStep: i * 8 });
   }
-  const collage: Instrument = { id: 'a-chops', slot: verseSamples.length, label: 'Chops（库切片）', color: COLORS[5], mixer: defaultMixer(), sends: [], enabled: false, payload: { kind: 'collage', bars: 2, stepsPerBar: 16, loopStartStep: 0, bakedAssetId: null, clips } };
+  const collage: Instrument = { id: 'a-chops', slot: verseSamples.length, label: 'Chops (slices)', color: COLORS[5], mixer: defaultMixer(), sends: [], enabled: false, payload: { kind: 'collage', bars: 2, stepsPerBar: 16, loopStartStep: 0, bakedAssetId: null, clips } };
 
   const breakSamples = sounds.slice(1, Math.min(3, sounds.length)).map((s, i) => sampleInst(s, i, 'b'));
 

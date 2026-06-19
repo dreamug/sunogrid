@@ -27,6 +27,7 @@ export interface ClipPreview {
   getPhase: () => number | null;
   toggle: () => void;
   queued?: boolean; // 量化预览正等小节边界(还没出声)→ 波形背景呼吸
+  warming?: boolean; // ⑥ 正在 build buffer(出声前)→ 播放键转圈;命中缓存不传
 }
 
 interface ClipEditorProps {
@@ -53,7 +54,12 @@ export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, 
     return () => { alive = false; };
   }, [clip.assetId]);
 
-  if (!audio) return <div className="ed-idle">解码…</div>;
+  if (!audio) return (
+    <div className="ed-decode" aria-busy="true" aria-label="Decoding waveform">
+      <div className="sg-skel ed-decode-wave" aria-hidden="true" />
+      <span className="ed-decode-lab">Decoding waveform…</span>
+    </div>
+  );
 
   // analysis = 源瞬态 + 这条 clip 的 warp 区(startSample/endSample/bars);不用 sound 原始检测区,否则把整段当 trim。
   const analysis = { ...(sound.analysis as object), startSample: clip.startSample, endSample: clip.endSample, bars: clip.bars } as LoopAnalysis;
@@ -61,7 +67,7 @@ export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, 
     <WarpCanvas
       channels={audio.channels} sampleRate={audio.sampleRate} analysis={analysis}
       nativeBpm={sound.sourceBpm} targetBpm={targetBpm} beatsPerBar={beatsPerBar} initSemitones={clip.semitones}
-      previewing={preview.previewing} queued={preview.queued} getPhase={preview.getPhase} onPreviewToggle={() => preview.toggle()}
+      previewing={preview.previewing} queued={preview.queued} warming={preview.warming} getPhase={preview.getPhase} onPreviewToggle={() => preview.toggle()}
       onChange={(r) => onChange({ ...clip, startSample: r.startSample, endSample: r.endSample, bars: r.bars, semitones: r.semitones })}
       hideHead compact compactHeader={header} compactMixer={mixer} canPreview={canPreview} onDragOut={onDragOut}
       timeMul={clip.timeMul ?? 1} onTimeMul={showTimeMul ? (m) => onChange({ ...clip, timeMul: m }) : undefined}
@@ -90,6 +96,7 @@ interface Props {
   onTimeMul?: (m: number) => void;          // compact:点 1/2·1·2 → 设半/倍速(网格下面那排)
   canPreview?: boolean;                      // compact:预览键是否可用(主走带停=可用;运行时置灰)
   queued?: boolean;                          // 量化预览等边界 → 波形背景呼吸
+  warming?: boolean;                         // ⑥ build buffer 中(出声前)→ 播放键转圈
   onDragOut?: (e: React.DragEvent) => void;  // 波形身体拖出(宿主写 dataTransfer)
 }
 
@@ -98,22 +105,22 @@ const ANCHOR_HIT = 8; // px
 const MIN_BARS = 0.5; // 缩放下限:半小节铺满舞台(深放大)
 const MAX_BARS = 256; // 缩放上限
 const TIME_OPTS: { label: string; m: number; tip: string }[] = [
-  { label: '1/2', m: 0.5, tip: '倍速:铺到一半小节(双倍速度)' },
-  { label: '1', m: 1, tip: '原速:跟随主 BPM' },
-  { label: '2', m: 2, tip: '半速:铺到 2× 小节(如 170 里跑 85)' },
+  { label: '1/2', m: 0.5, tip: 'Rate ×2: fills half a bar (double speed)' },
+  { label: '1', m: 1, tip: 'Native: follows master BPM' },
+  { label: '2', m: 2, tip: 'Rate ÷2: fills 2× bars (e.g. 85 in a 170 session)' },
 ];
 const GRID_OPTS: { label: string; bars: number; tip: string }[] = [
-  { label: '1/1', bars: 1, tip: '整小节' },
-  { label: '1/2', bars: 0.5, tip: '半小节 · 2 拍' },
-  { label: '1/4', bars: 0.25, tip: '1 拍' },
-  { label: '1/8', bars: 0.125, tip: '½ 拍' },
-  { label: '1/16', bars: 0.0625, tip: '¼ 拍' },
+  { label: '1/1', bars: 1, tip: 'Whole bar' },
+  { label: '1/2', bars: 0.5, tip: 'Half bar · 2 beats' },
+  { label: '1/4', bars: 0.25, tip: '1 beat' },
+  { label: '1/8', bars: 0.125, tip: '½ beat' },
+  { label: '1/16', bars: 0.0625, tip: '¼ beat' },
 ];
 
 type DragMode = 'trimStart' | 'trimEnd' | 'stretch';
 interface DragSnap { mode: DragMode; grabSrcSec: number; anchorSrcSec0: number; secPerBar0: number; grabBarOffset: number; loopLen0: number; }
 
-function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beatsPerBar = 4, initSemitones = 0, previewing, getPhase, onPreviewToggle, onChange, onReset, hideHead = false, compact = false, compactHeader, compactMixer, timeMul = 1, onTimeMul, canPreview = true, queued = false, onDragOut }: Props) {
+function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beatsPerBar = 4, initSemitones = 0, previewing, getPhase, onPreviewToggle, onChange, onReset, hideHead = false, compact = false, compactHeader, compactMixer, timeMul = 1, onTimeMul, canPreview = true, queued = false, warming = false, onDragOut }: Props) {
   const total = channels[0].length;
   const srcDur = total / sampleRate;
   const beatsBar = beatsPerBar;
@@ -463,42 +470,42 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const lenBars = Math.round(loopLen * 1000) / 1000;
   const barsStr = Number.isInteger(lenBars) ? `${lenBars}` : lenBars.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
   const beatsN = Math.round(loopLen * beatsBar);
-  const lenTxt = compact ? `${barsStr} : ${beatsN}` : `${barsStr} 小节 · ${beatsN} 拍`;
+  const lenTxt = compact ? `${barsStr} : ${beatsN}` : `${barsStr} bar(s) · ${beatsN} beat(s)`;
 
   const rail = (
       <div className="we-rail">
         {!hideHead && (
           <div className="we-head">
-            <span className="we-title">片段 / Warp</span>
+            <span className="we-title">Clip / Warp</span>
             <div className="we-head-act">
-              {onReset && <button className="we-reset" onClick={onReset} title="把 trim / 小节 / 变调退回自动检测的默认">↺</button>}
-              <button className={'we-play' + (previewing ? ' on' : '')} onClick={() => onPreviewToggle(region)} title="播放/停(主走带在跑时按整小节进入)">{previewing ? '⏸ 停' : '▶ 播放'}</button>
+              {onReset && <button className="we-reset" onClick={onReset} title="Reset trim / bars / pitch to auto-detected defaults">↺</button>}
+              <button className={'we-play' + (previewing ? ' on' : '')} onClick={() => onPreviewToggle(region)} title="Play / stop (quantises to bar boundary when transport is running)">{previewing ? '⏸ Stop' : '▶ Play'}</button>
             </div>
           </div>
         )}
 
         <div className="we-grid">
           <div className="we-cell">
-            <span className="we-lab">速度</span>
-            <div className="we-box" title="源 BPM → 主 BPM">{Math.round(trimBpm)}<i>→</i>{targetBpm}</div>
+            <span className="we-lab">Speed</span>
+            <div className="we-box" title="Source BPM → master BPM">{Math.round(trimBpm)}<i>→</i>{targetBpm}</div>
           </div>
           <div className="we-cell">
-            <span className="we-lab">长度</span>
-            <div className="we-box" title="loop 长度">{lenTxt}</div>
+            <span className="we-lab">Length</span>
+            <div className="we-box" title="Loop length">{lenTxt}</div>
           </div>
           <div className="we-cell">
-            <span className="we-lab">变调</span>
-            <div className="we-box drag" onPointerDown={onSemiDown} onPointerMove={onSemiMove} onPointerUp={onSemiUp} onWheel={onSemiWheel} title="上下拖 / 滚轮 改变调(半音)">{semitones > 0 ? '+' : ''}{semitones} st</div>
+            <span className="we-lab">Pitch</span>
+            <div className="we-box drag" onPointerDown={onSemiDown} onPointerMove={onSemiMove} onPointerUp={onSemiUp} onWheel={onSemiWheel} title="Drag up/down or scroll to change pitch (semitones)">{semitones > 0 ? '+' : ''}{semitones} st</div>
           </div>
           <div className="we-cell">
-            <span className="we-lab">拉伸</span>
-            <div className="we-box" title="贴回主 BPM 的伸缩比率">{slow || fast ? `×${rate.toFixed(2)}` : '原速'}</div>
+            <span className="we-lab">Stretch</span>
+            <div className="we-box" title="Stretch ratio to match master BPM">{slow || fast ? `×${rate.toFixed(2)}` : 'Native'}</div>
           </div>
         </div>
 
         {compact && onTimeMul && (
           <div className="we-tmrow">
-            <span className="we-lab">倍速</span>
+            <span className="we-lab">Rate</span>
             <div className="seg we-gseg">
               {TIME_OPTS.map((o) => (
                 <button key={o.m} title={o.tip} className={Math.abs((timeMul || 1) - o.m) < 1e-6 ? 'on' : ''} onClick={() => onTimeMul(o.m)}>{o.label}</button>
@@ -507,10 +514,10 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
           </div>
         )}
 
-        {!compact && <div className="we-subh"><span className="we-title" title="同时控制标尺画线密度和 trim 吸附粒度">网格 / 吸附</span></div>}
+        {!compact && <div className="we-subh"><span className="we-title" title="Controls both ruler line density and trim snap resolution">Grid / Snap</span></div>}
         <div className="we-gridrow">
           <div className="seg we-gseg">
-            {!compact && <button className={!snap ? 'on' : ''} onClick={() => setSnap(false)} title="关闭吸附(自由拖)">关</button>}
+            {!compact && <button className={!snap ? 'on' : ''} onClick={() => setSnap(false)} title="Disable snap (free drag)">Off</button>}
             {GRID_OPTS.map((g) => (
               <button key={g.label} title={g.tip} className={snap && Math.abs(gridBars - g.bars) < 1e-6 ? 'on' : ''} onClick={() => { setSnap(true); setGridBars(g.bars); }}>{g.label}</button>
             ))}
@@ -529,15 +536,15 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
           {onDragOut && (
             <div style={{ position: 'absolute', left: 8, top: 8, zIndex: 5, pointerEvents: 'none', display: 'flex', alignItems: 'center', gap: 4, padding: '2px 7px', borderRadius: 'var(--r)', fontSize: 10,
               background: 'color-mix(in srgb, var(--acc) 20%, var(--bg-1))', border: '1px solid color-mix(in srgb, var(--acc) 40%, var(--line))', color: 'var(--acc)', opacity: armed ? 1 : 0.55, transition: 'opacity .1s' }}>
-              <span style={{ fontSize: 11, lineHeight: 1 }}>⠿</span>拖波形 → 乐器 / 轨
+              <span style={{ fontSize: 11, lineHeight: 1 }}>⠿</span>Drag waveform → instrument / track
             </div>
           )}
           {compact && (
             <button draggable={false} onPointerDown={(e) => e.stopPropagation()} onClick={() => canPreview && onPreviewToggle(region)} disabled={!canPreview}
-              title={canPreview ? '预览这个 sample(只在主走带停止时)' : '主走带运行中,无需预览'}
+              title={canPreview ? 'Preview this sample (only when transport is stopped)' : 'Transport is running — preview unavailable'}
               style={{ position: 'absolute', right: 8, bottom: 8, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, lineHeight: 1, border: 'none', borderRadius: 'var(--r)', zIndex: 5,
                 cursor: canPreview ? 'pointer' : 'default', opacity: canPreview ? 1 : 0.35,
-                background: previewing ? 'var(--play)' : 'var(--acc)', color: previewing ? '#23201d' : 'var(--acc-ink)' }}>{previewing ? '■' : '▶'}</button>
+                background: warming ? 'var(--bg-3)' : previewing ? 'var(--play)' : 'var(--acc)', color: previewing ? '#23201d' : 'var(--acc-ink)' }}>{warming ? <span className="sg-spin sm" aria-hidden="true" /> : previewing ? '■' : '▶'}</button>
           )}
         </div>
 
@@ -545,7 +552,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
           <div className="we-thumb" style={{ left: thumbLeft + '%', width: thumbW + '%' }} />
         </div>
 
-        <div className="we-hint">点波形=试听 · 拖绿线=移起播(无极) · 拖橙锚=改长度 · Shift+拖=变速 · 滚轮 / Alt+滚轮=平移 / 缩放</div>
+        <div className="we-hint">Click waveform = preview · drag green line = move start (free) · drag orange anchor = change length · Shift+drag = stretch · scroll / Alt+scroll = pan / zoom</div>
       </div>
   );
 

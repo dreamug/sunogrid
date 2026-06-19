@@ -12,15 +12,15 @@ const gctx = () => (_gctx ??= new AudioContext());
 /** 把任意报错压成一句话短提示(去栈/去 HTML/映射常见原因/截断),给卡片和状态栏用。 */
 export function conciseError(e: unknown): string {
   let msg = (e instanceof Error ? e.message : String(e ?? '')).trim();
-  if (/^<|<!doctype|<html/i.test(msg)) return '服务器错误'; // Next/代理 的 HTML 错误页
+  if (/^<|<!doctype|<html/i.test(msg)) return 'Server error'; // Next/代理 的 HTML 错误页
   msg = msg.split('\n')[0].trim(); // 只取首行,丢掉堆栈
-  if (/桥接超时|插件没响应|没响应/.test(msg)) return '插件没响应（确认已装插件、suno.com 已登录）';
-  if (/生成超时|渲染未完成/.test(msg)) return '生成超时,请重试';
-  if (/ECONNREFUSED|fetch failed|Failed to fetch|NetworkError|网络/i.test(msg)) return '网络/服务未连接';
-  if (/没在跑|未启动|502/.test(msg)) return '服务未启动';
-  if (/HTTP 5\d\d|\b5\d\d\b/.test(msg)) return '服务器错误';
-  if (/HTTP 4\d\d|\b4\d\d\b/.test(msg)) return '请求被拒绝';
-  return msg.length > 80 ? msg.slice(0, 80) + '…' : (msg || '失败');
+  if (/桥接超时|插件没响应|没响应/.test(msg)) return 'Plugin not responding (check it\'s installed and suno.com is logged in)';
+  if (/生成超时|渲染未完成/.test(msg)) return 'Generation timed out — try again';
+  if (/ECONNREFUSED|fetch failed|Failed to fetch|NetworkError|网络/i.test(msg)) return 'Network/service not connected';
+  if (/没在跑|未启动|502/.test(msg)) return 'Service not running';
+  if (/HTTP 5\d\d|\b5\d\d\b/.test(msg)) return 'Server error';
+  if (/HTTP 4\d\d|\b4\d\d\b/.test(msg)) return 'Request rejected';
+  return msg.length > 80 ? msg.slice(0, 80) + '…' : (msg || 'Failed');
 }
 
 export const soundToLoop = (s: ApiSound): LoopView => {
@@ -30,6 +30,7 @@ export const soundToLoop = (s: ApiSound): LoopView => {
   return {
     id: s.id, label: s.name, status,
     srcBpm: Math.round((a.bpm as number) ?? s.sourceBpm), bars: (w.bars as number) ?? (a.bars ?? 1),
+    durationSec: s.durationSec, musicalKey: s.musicalKey,
     color: clipColor({ stemKind: s.stemKind, id: s.id }),
     stemKind: s.stemKind ?? undefined, stemStatus: s.stemStatus ?? undefined,
     stems: (s.stems ?? []).map(soundToLoop),

@@ -16,7 +16,7 @@ export function Workbench({ username }: { username: string }) {
 
   const create = async () => {
     if (busy) return;
-    const name = (window.prompt('项目名称', '未命名项目') ?? '').trim();
+    const name = (window.prompt('Project name', 'Untitled project') ?? '').trim();
     if (name === '') return; // 取消
     setBusy(true);
     try {
@@ -26,14 +26,14 @@ export function Workbench({ username }: { username: string }) {
   };
 
   const rename = async (p: ApiProject) => {
-    const name = (window.prompt('重命名项目', p.name) ?? '').trim();
+    const name = (window.prompt('Rename project', p.name) ?? '').trim();
     if (name === '' || name === p.name) return;
     setProjects((ps) => ps?.map((x) => (x.id === p.id ? { ...x, name } : x)) ?? ps);
     try { await api.projects.update(p.id, { name }); } catch { reload(); }
   };
 
   const remove = async (p: ApiProject) => {
-    if (!window.confirm(`删除项目「${p.name}」?其操场与生成记录都会删除(素材库保留)。`)) return;
+    if (!window.confirm(`Delete project "${p.name}"? Its sessions and generation history will be removed (your sound library is kept).`)) return;
     setProjects((ps) => ps?.filter((x) => x.id !== p.id) ?? ps);
     try { await fetch(`/api/projects/${p.id}`, { method: 'DELETE' }); } catch { reload(); }
   };
@@ -47,29 +47,29 @@ export function Workbench({ username }: { username: string }) {
   return (
     <main className="wb">
       <div className="wb-top">
-        <h1>我的项目</h1>
+        <h1>My projects</h1>
         <div className="who">
           <span>{username}</span>
-          <button className="btn" style={{ padding: '6px 14px' }} onClick={logout}>退出</button>
+          <button className="btn" style={{ padding: '6px 14px' }} onClick={logout}>Log out</button>
         </div>
       </div>
 
       {projects === null ? (
-        <p className="muted">加载中…</p>
+        <p className="muted">Loading…</p>
       ) : (
         <div className="wb-grid">
-          <button className="proj new" onClick={create} disabled={busy}>＋ 新建项目</button>
+          <button className="proj new" onClick={create} disabled={busy}>＋ New project</button>
           {projects.map((p) => (
             <div key={p.id} className="proj" onClick={() => router.push(`/projects/${p.id}`)}>
               <div className="pn">{p.name}</div>
               <div className="pm">{p.masterBpm} BPM · {p.quantize}</div>
               <div className="pr" onClick={(e) => e.stopPropagation()}>
-                <button onClick={() => rename(p)}>重命名</button>
-                <button className="del" onClick={() => remove(p)}>删除</button>
+                <button onClick={() => rename(p)}>Rename</button>
+                <button className="del" onClick={() => remove(p)}>Delete</button>
               </div>
             </div>
           ))}
-          {projects.length === 0 && <p className="muted" style={{ gridColumn: '1 / -1', marginTop: 4 }}>还没有项目,点「＋ 新建项目」开始。</p>}
+          {projects.length === 0 && <p className="muted" style={{ gridColumn: '1 / -1', marginTop: 4 }}>No projects yet. Click "＋ New project" to get started.</p>}
         </div>
       )}
     </main>

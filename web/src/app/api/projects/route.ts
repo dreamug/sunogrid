@@ -16,7 +16,7 @@ export async function POST(req: Request) {
   const project = await db.project.create({
     data: {
       userId: user.id,
-      name: b.name || '未命名项目',
+      name: b.name || 'Untitled project',
       masterBpm: b.masterBpm ?? 90,
       quantize: b.quantize ?? '1bar',
       beatsPerBar: b.beatsPerBar ?? 4,

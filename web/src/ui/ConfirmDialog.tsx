@@ -12,7 +12,7 @@ export interface ConfirmOpts {
   danger?: boolean;      // 破坏性操作 → 红色确定键
 }
 
-export function ConfirmDialog({ title, message, confirmLabel = '确定', cancelLabel = '取消', danger, onConfirm, onCancel }: ConfirmOpts & { onConfirm: () => void; onCancel: () => void }) {
+export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger, onConfirm, onCancel }: ConfirmOpts & { onConfirm: () => void; onCancel: () => void }) {
   const confirmRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     confirmRef.current?.focus();

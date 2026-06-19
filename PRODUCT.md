@@ -33,6 +33,64 @@
 3. **pad 控制**:Web MIDI,映射格子,启动/停止。
 4. **编曲 / arrange**(后期):记录场景启动、时间线编排。
 
+### 4.1 生成窗口重做(2026-06-19 ✅ 已实现 ①②⑥)
+
+收口原状:生成参数与主走带**解耦**(`StudioApp` 里 `gbpm` 写死 90、`gkey` 本地 state、刷新即丢),改成"跟工程走 + 记得住"。本期只做 ①②⑥(已落,`tsc` 通过 · db push 已建 `Project.masterKey/genPrefs` 列;改完需重启 next 让 Prisma client 生效)。
+
+**① BPM 单向透传(口径:持久化独立值 + 主速变覆盖一次)**
+- 生成 BPM(`gbpm`)是个**持久化的独立值**,可随时改,落 `genPrefs.bpm`。**无链接态、无链子按钮**(早期的 link 模型已废)。
+- **主走带改速(`commitBpm` / undo 还原 BPM 等任何来源)→ 单向把 `gbpm` 覆盖成新主速一次**(effect 监听 `ctx.bpm`,`prevBpmRef` 跳过首帧 hydrate 以保住上次持久化值)。覆盖后用户仍可改。
+- 输入框:无 label,宽 50px(对齐顶栏主走带 `.tg-bpm`),去原生上下 spinner(`appearance:textfield` + 隐藏 `::-webkit-*-spin-button`)。
+
+**①.5 顶部一排**
+- `[Sound | Song]` 模式段在左;`Loop`(toggle 按钮,开=橙 `--acc`,仅 Sound 模式显示)+ `BPM` 输入一组 `margin-left:auto` 靠右,与模式段同排。三者统一 26px 高、严格对齐。Loop 不再是 checkbox。
+- **文案**:`Advanced` 显示为 **`Song`**(内部枚举值仍是 `advanced`)。
+
+**② Key 八度键盘 + GO**
+- 替代 `LoopManager` 里 24 项 `<select>`。深色八度迷你键盘(7 白 + 5 黑 = 12 根音)选**根音** + `大/小` segment 决定后缀 → 合成 `MusicalKey`(`C`…`B` / 加 `m`)。
+- **布局 = 一张表 + 右侧 GO(整行高 50px)**:Key 表一个外框,内部全靠共享 1px 细线分隔(**无嵌套盒**)。左列两行 = `KEY 读数`(同排,不选显示 `Any`)/ `大｜小`(两单元格);右列 = 跨满高的键盘(定宽 154px、白键 22px,黑键按缝绝对定位)。键盘右侧是方块**生成按钮 `GO`**(50×50,`--acc`)—— 取代原来的整宽"生成 → 进库"。左列/键盘/GO **严格等高对齐**。字号统一 10px。**无独立 Any 按钮 —— 再点已选中的键即清回 Any**(= 字段省略,见 §8/§9)。
+- ⚠ 选中键"变宽"的真因 = 选中类名 `sel` **撞了全局 `.sel`**(顶栏项目选择器,带 `padding:5px 8px`/`max-width:170px`)→ 选中键被撑宽到 25.6px(浏览器实测)。改用**独立类名 `ksel`** 修掉(并把点击聚焦的 UA 外圈描边内嵌化)。教训:键盘/网格这类细控件别用 `sel`/`on` 等大众类名。
+- Suno key 共 24,纯键盘只表 12 根音,故必须配大/小调切换。
+
+**⑥ 记忆(落 Project,不放 localStorage)**
+- 契约早留挂点:`models.ts` 的 `Project.masterKey: MusicalKey|null`(注释"生成时默认跟它")、`bridge.ts` 的 `bpm/key:'project'` 枚举 —— 这次接上(注:Prisma schema 当前**没有** `masterKey` 列,§15.B 文档却已把它当列,本期 db push 补齐)。
+- 落法(§15.A/B):`Project.masterKey` = **列**(Prisma 加 + db push);生成偏好 `genPrefs{mode,loop,bpm}` 形状还在演进、整体读写 → 先走 **`Project.genPrefs Json?` 逃生口**,稳定再毕业成列。
+- key 选择即写 `masterKey`(乐观,§15.C 走发件箱 ops);打开工程时生成窗口读 `masterKey` 回填。BPM 链接态变更进 `genPrefs`。
+
+**③ Suno 连接状态灯(已实现)** —— `SunoStatus.tsx`,放在 BPM 旁(顶部一排最右)。26px 方块内一颗圆 LED:**绿=就绪**(`status().hasAuth`,**只看登录**)、**红=有问题**(8s 超时无响应 / 未登录)、灰闪=检测中。点开 popover 给具体状态 + 修复提示 + 重新检测;挂载时探一次、点开再探。
+  - ⚠ **`hasTemplate` 不作硬条件**:模板首次生成时自动捕获,缺模板照样能生成 —— 早期把它当绿灯条件 → 误报红(已修)。绿灯 detail 里软提示一下即可。
+  - ⚠ **类名两次撞车教训**:状态灯内圆点最初用 `.led` → 撞顶栏走带位置显示的 `.led`(被压成 9px 灰圆);改用 **`.sled`**。键盘选中态最初用 `.sel` → 撞顶栏项目选择器 `.sel`。**细控件一律用带前缀的私有类名(`sled`/`ksel`/`gk-*`…),别用 `led`/`sel`/`on` 这类大众名。**
+
+**不在本期(已评估,后续按需)**:④ 变体数 ×2/×4(`GenerateCommand.count` 现成) · ⑤ 风格快捷词 + 最近 prompt 召回。
+
+### 4.2 素材库重做(2026-06-19 ✅ 已实现)
+
+把原来扁平、操作多、分组弱的库改成**清晰三层 + 专业卡片**(`LoopManager.tsx` 库区 + globals.css):
+
+- **分组结构(2026-06-19 定稿)**:一次生成 = **透明分组 `.gencard`**(`prompt` + `genParams()` 当标题,上方统领,**无外框**)→ 每个变体 = **独立卡 `.vcard`**(变体行 + 它自己的分轨**同框**)→ 卡间留缝。口径:**变体↔它的分轨**黏在一起(同卡),**变体#1↔#2**分得开(两卡 + gap),一眼是"两个素材"。
+- **主次**:变体行 `.vrow` = **亮底 `--bg-3` + 大波形(`.vwave` 62×26)+ 24px 实心 ▶** = 主角;分轨 `.stemblk` = **暗底 `--bg-2`(同卡内)+ 18px 透明 ▶ + 行加高(padding 8px)+ muted 文字** = 配角。`.lib-list` gap 16px 分隔各次生成,`.gencard` 内 gap 8px。**教训**:分轨别用亮底/等大控件喧宾夺主——生成的变体才是主角;但分轨仍保留"框 + 标题条"的 block 感(只是压暗、收进变体卡内)。
+- **生成中 / 失败**:也包成卡(`.gen-busy`/`.gb-fail` 带框,和变体卡同级);生成中一条阶段进度 `生成›渲染›到达` + bar + `n/2 变体已到`,两变体当整体。
+- **删除(无按钮)**:**删掉所有 × 删除按钮**;选中库素材按 **Del/Backspace → `requestRemoveSound` 弹 `ConfirmDialog` → 软删**(`onDeleteSound`,可恢复;Esc 取消)。键删处理器已挡输入框/弹窗。失败态卡保留 `↻重试 / 删除`(失败 gen 无可选 sound)。`✂分离` 改 hover 出(变体行 `can-sep` 时 `.vmeta`↔`.va.vsep` 互换)。
+- **元数据**:`LoopView` 加 `durationSec` + `musicalKey`(`ApiSound` 已有,两处 `soundToLoop` 映射);变体行显示 `秒数 · 小节`,调/BPM 在标题。
+- **波形**:`StudioApp.libPeaks` —— gens 变化时按 `regionFromSound` 懒解码每条变体/分轨的 region 峰值,复用 `lanePeaksCache`(decodeAsset 也缓存),非阻塞填入;`MiniWave` 复用 `Wave` 的镜像路径,峰值未到画基线。
+- **精简**:删 `→pad`(纯拖拽)。保留:点选进编辑器、▶试听、拖放、撤销口径。
+- **分离反馈(separateSound)**:`✂` 不清楚 → 改文字 chip **「分离」**(hover 出)。分离路由是**同步**的(Demucs 跑完才返回),所以:点击**乐观立刻标 `stemStatus='separating'`** → 出 `.vc-sepbusy`(分离中 + 进度条);成功 `refreshGens` 出分轨;失败(502 抛错)→ 顶栏提示 + `refreshGens` 拉回 DB 的 `failed` + 兜底乐观标 `failed` → 卡上「分离失败 · 点重试」。`lib/stems` 在 DB 标 `separating/done/failed`(line 33/80/83),但同步路由下客户端只在返回后 refresh,故 loading 必须靠**客户端乐观态**。
+
+### 4.3 顶栏(transport bar)重做(2026-06-19 ✅ 已实现)
+
+原顶栏:`← · ▶ · Tempo · LED(1.1.1 无标) · Quantize"1 Bar"(写死假按钮) · ↶↷ · 自动保存 · Session›Instrument›Clip 静态标签`。问题:Quantize 不可点、位置无标注、无工程名、缺节拍器/主音量、右侧静态标签无用、控件高低不齐。
+
+重做成 **4 个带分隔线(`.tb-sep`)的组**,全控件统一 **30px 高**:
+- **工程**:`←` + **工程名**(`name` prop,`page.tsx` 传 `project.name`)。
+- **走带**:`▶/■` + **节拍器**(`Metronome` 组件:toggle 开=橙 + `▾` 弹面板=音量推子 + **响一次** `每拍/每小节/2小节/4小节`) + **位置**`小节·拍 1.1.1`(加标注、16分变暗)。
+- **音乐**:`Tempo` BPM(可编辑,沿用 `TempoInput`) + **Quantize 真选择器**(`<select>` `1bar/½/¼/off`,改即 `eng.setQuantize` + 乐观持久化 `Project.quantize`)。
+- **主输出**(靠右):**主音量推子**(横向 console fader = 样式化 range → `Tone.getDestination().volume`) + **L/R 电平表**(两条横条;引擎挂 `Tone.Split`+两 `Tone.Meter` 并联抽各乐器 panner,不改主路径;render 每帧 `e.masterLevel()` 取值,靠 rAF 重渲) + `↩↪` undo/redo(钩形,30px) + 保存态。
+
+**引擎(StudioEngine)新增**:`setQuantize`(`nextBar`→`nextBoundary`:1bar/½/¼/off 量化 launch·stop·audition) · `setMasterVolume`/`masterLevel` · 节拍器(`clickSynth`+`clickVol`,`scheduleRepeat('4n')` 内按 interval/重音决定响不响;下拍 C6 重音、其余 C5)。
+- ⚠ **节拍器静音 bug(已修)**:`scheduleRepeat` 原本只在 `init` 注册一次,但 `stopTransport()` 的 `t.cancel()` 会清掉 Transport 上**全部**已排事件(含节拍器)→ 停一次后节拍器永久失效。改为 `scheduleMetro()` 在**每次 `startTransport` 重注册**(存 `metroRepeatId`,先 `t.clear` 再排)。**教训**:任何要长期存活的 transport 事件,别只在 init 注册——`stopTransport` 会 `cancel()` 全清。
+- ⚠ **节拍器/电平/走带前进依赖 AudioContext 真激活** —— 自动化(合成点击)下 context 常 suspended(Tone 会 warn),故这些音频态没在无头验过(代码路径接好、无报错,真机点击验);UI/对齐/Quantize 改值/节拍器面板均已实测。
+- ⚠ 类名沿用私有前缀(`tb-*`/`metro-*`/`mp-*`),避开历史 `.led/.sel/.on` 撞名坑。
+
 ## 5. clip 生命周期状态机
 
 ```
@@ -55,7 +113,7 @@ warping 失败 ──▶ error(不可启动)
 - **WASM 只在 worker,不进音频渲染线程** → 再慢也只是格子转圈,绝不爆音。
 - **先做 loop conditioning(Suno loop 必需,见 §10)**:Suno 的 loop 不是整小节。流水线先确定真实循环区——v1 简单做法:以 `user_tempo` 为已知拍速、从 t=0(内容基本对齐下拍,lead≈0)取整数小节区(1/2/4 选能放下的最大值);更稳做法:对音频做自相关找真实循环周期,再四舍五入到整小节。裁出 region 后再 warp。
 - 目标长度 = **整数小节的精确采样数** = `小节数 × (60/主BPM) × 4 × 48000`;钉死 `loopStart/loopEnd`。
-- 改主 BPM = 重跑预加载流水线(可选:`playbackRate` 顶着过渡,下个循环边界无缝换高质量 buffer)。
+- 改主 BPM = 重跑预加载流水线。**走带在跑时已实现无缝过渡**(`StudioEngine.retempoPlaying`,见 §12):保旧速播到下一小节边界 B → B 处 transport 翻速 + 各乐器同边界保相位换新 buffer(众声同时换、不错拍)→ B 时没渲完的乐器先 `playbackRate` 顶速(tape pitch)桥接、就绪后在循环边界换高质量 buffer 并复位 rate。
 
 ## 7. 架构 / 技术栈
 
@@ -234,7 +292,9 @@ model Instrument {
 
 ✅ **Studio UX 重做(贴近真 loop 机)**:左栏换成真正的 `LoopManager`(生成表单 + 真实素材库 + ▶试听 + ✂分离;**删掉调色板**);生成走 `playground/studioGens.ts`(复用 sunoBridge/api.gens/detectLoop,需插件)。**进 session 两条路**:① 点库素材→底部**预调**(真 WarpEditor 改 warp,PATCH 存回素材)→拖到空格=单 sample 乐器;② 空格 **hover→＋sample/＋切片**(空乐器,再拖素材进去填/加片);库卡 →pad 也行。session **clip 画波形**(复用 `Wave`/`.cwave`,播放=波形进度条)。`playgroundEngine` 加 audition 试听。已实测:库渲染、拖素材→slot=sample、hover＋切片、→pad、预调编辑器、波形,均通过无报错;**生成**因需本地 Suno 插件未在无头验。
 
-待定:① master BPM 现固定(改 BPM 要 re-warp 全部,后加)· ② collage 现从库切片自动拼,真正"从库挑 clip 拼 collage"的编辑流后做 · ③ 与生产 loop-machine 合流(共用一个 Project)。
+✅ **可改主 BPM(2026-06-19)**:顶栏 Tempo 输入框可编辑(Enter/失焦提交,clamp 40–240,↑↓ 微调)。提交即:① `ctx.bpm` 置新值、`StudioEngine.setBpm` 让主走带 transport 立即跟随 · ② `api.projects.update(masterBpm)` **乐观持久化**(§15:Project 列,刷新读新值)· ③ **re-warp 到新速度并热替换**:**停时**逐乐器 `loadInstrumentToEngine(_, seamless)` 就地换 buffer;**走带在跑时**走 `StudioEngine.retempoPlaying` 的**协调无缝换速**(§6 的"可选"项,已实现)—— 保旧 buffer 旧速播到下一小节边界 B(其间无 drift)+ 后台离线渲全部,到 B 时 transport 翻新速 + **各乐器同一边界保相位换 buffer**(众声同时换→不错拍),B 时还没渲完的乐器先 `playbackRate` 顶速(tape pitch、即时跟拍)、其 HQ buffer 就绪后在循环边界补换并复位 rate。buffer 按 §6 的 `warpToBuffer/buildCollageBuffer` 以 bpm 为 cache key,别的 session 切过去时自然按新 bpm 渲染 · ④ **进 undo 口径**(见 §16:HistEntry 加 `bpm`;undo 走 reconcile 整树重灌,非无缝)。元数据(数字)即时、音频(重渲 buffer)最终一致,顶栏 status 给提示(§15.D)。
+
+待定:① collage 现从库切片自动拼,真正"从库挑 clip 拼 collage"的编辑流后做 · ② 与生产 loop-machine 合流(共用一个 Project)。
 
 **待定(留给你拍)**:① 移动语义 block vs ripple(同 §13);② EQ 是两段 shelf 够,还是要全参数;③ sends 总线放 session 级还是 project 级。
 
@@ -263,7 +323,7 @@ model Instrument {
 **Sound(有个故意的不对称)**:标量/状态/FK 全 **列**(含 stem 三字段、trashed);`analysis{…,onsets[]}` = **JSON**(一次性快照、含同质数组);`warp`(默认 warp)= **JSON**(整体 PATCH 回来的默认种子);`tags` = **暂字符串**,要按 tag 筛库再升 `SoundTag` join 表。
 > **关键洞察**:`startSample/endSample/bars/semitones` 这些**同样的数**,在 **Clip 上是列**、在 **Sound.warp 里是 JSON** —— 这个不对称是对的:Clip 是被引擎播放、被 FK 引用、要 query 的**活实体**;Sound.warp 只是个整体写入的**默认种子 blob**。**同样的数字,身份不同,落法就不同。**
 
-**Gen**:标量全 **列**(status 要 filter);`sunoClipIds:string[]` = **JSON**(一小撮外部 id,整批取)。**Project**:masterBpm/masterKey/quantize/beatsPerBar 全 **列**(banks 早已规范化成 PadClip 表)。**Asset/WarpRender/User**:全标量列,**无 JSON**。
+**Gen**:标量全 **列**(status 要 filter);`sunoClipIds:string[]` = **JSON**(一小撮外部 id,整批取)。**Project**:masterBpm/masterKey/quantize/beatsPerBar 全 **列**(banks 早已规范化成 PadClip 表;⚠ `masterKey` 契约/本节已当列,但 Prisma schema 至今没落,生成窗口重做时补 db push,见 §4.1);生成偏好 `genPrefs{mode,loop,bpm}` = **JSON 逃生口**(形状演进中,稳定再毕业)。**Asset/WarpRender/User**:全标量列,**无 JSON**。
 
 ### C. 乐观更新 + 发件箱 + 缓存
 **写路径**:`mutation → 按 id 寻址的细粒度 op → 发件箱队列 → 合并 → flush(PATCH/POST/DELETE)`。
@@ -300,19 +360,19 @@ model Instrument {
 - **健壮性**:单个乐器/collage 源解码失败不再拖垮整个操场加载(跳过该乐器)。
 - **code review 已修**:注册并发撞唯一约束 → 干净 409(不抛 500);写入路径(原 PUT、现 ops)把不属于当前用户的 `clip.soundId` 置空(跨租户引用防护);load 后不产生无谓写。
 
-**TBD(非阻塞)**:① 注册是否邮箱验证;② sends 表等总线落地;③ 本地 `storage/` 模拟 CDN → 上线换对象存储(`Asset.path` 已抽象,不动数据模型);④ `/api/cdn` 目前任意登录用户可按 id 取任意 Asset 字节(内容寻址、不可枚举),如需严格隔离再按 Sound 归属校验;⑤ 音频"重渲中"提示(§15.C 的最终一致 UX)尚未做。
+**TBD(非阻塞)**:① 注册是否邮箱验证;② sends 表等总线落地;③ 本地 `storage/` 模拟 CDN → 上线换对象存储(`Asset.path` 已抽象,不动数据模型);④ `/api/cdn` 目前任意登录用户可按 id 取任意 Asset 字节(内容寻址、不可枚举),如需严格隔离再按 Sound 归属校验;⑤ 音频"重渲中"提示(§15.C 的最终一致 UX):改主 BPM 已在顶栏 status 给"重渲乐器…→已切到 N BPM",其余改参数路径(变调/trim 等)的细粒度"重渲中"角标仍待补。
 
 ## 16. 撤销/重做(Undo/Redo)宪法 —— ⚠️ 加任何新交互前必读
 
-**模型(`web/src/studio/StudioApp.tsx`)= 快照栈。快照口径 = `{ sessions 整树 , 各库声音的 warp }`。** `past`/`future: HistEntry[]`,`HistEntry = { sessions: Session[]; warps: Map<soundId, warp> }`。**口径会随需要扩展,改前先看本节列的口径。**
-- `snapshot()`:抓 `sessionsRef.current`(引用即可,树是不可变更新)+ 遍历 `ctx.soundsById` 抓每条声音的 `warp`(预调改的就是它,而它**不在 sessions 里**,故单列进口径)。
+**模型(`web/src/studio/StudioApp.tsx`)= 快照栈。快照口径 = `{ sessions 整树 , 各库声音的 warp , 主 bpm }`。** `past`/`future: HistEntry[]`,`HistEntry = { sessions: Session[]; warps: Map<soundId, warp>; bpm: number }`。**口径会随需要扩展,改前先看本节列的口径。**
+- `snapshot()`:抓 `sessionsRef.current`(引用即可,树是不可变更新)+ 遍历 `ctx.soundsById` 抓每条声音的 `warp`(预调改的就是它,而它**不在 sessions 里**,故单列进口径)+ 抓 `ctx.bpm`(主 BPM,项目级标量,亦在 sessions 外)。
 - `pushHistory()`:把 `snapshot()` 压入 `past`(上限 50),清空 `future`(标准 redo 失效)。**必须在 mutation 之前调**。
 - `mutate(fn)` = `pushHistory()` + `updateSession(fn(...))`,最常用入口。
-- `undo()`/`redo()` → `applyEntry(entry)`:`setSessions(entry.sessions)` + **只把 warp 与当前不同的库声音改回**(并反向 `api.sounds.patch`;其余声音不碰 → 不误删之后生成的)+ **校验选中**(乐器/片还在就保留,看见 snap back;没了才清)+ `reconcile()` 整树重灌引擎。快捷键 ⌘Z / ⌘⇧Z(输入框/textarea 聚焦时不拦)。
+- `undo()`/`redo()` → `applyEntry(entry)`:`setSessions(entry.sessions)` + **只把 warp 与当前不同的库声音改回**(并反向 `api.sounds.patch`;其余声音不碰 → 不误删之后生成的)+ **bpm 不同则还原**(`ctx.bpm` 置回 + `engine.setBpm` + 反向 `api.projects.update(masterBpm)`;**在 `reconcile` 之前置好** `ctxRef.current.bpm`,reconcile 重灌时自然按还原后的 bpm re-warp)+ **校验选中**(乐器/片还在就保留,看见 snap back;没了才清)+ `reconcile()` 整树重灌引擎。快捷键 ⌘Z / ⌘⇧Z(输入框/textarea 聚焦时不拦)。
 
 ### 两条铁律(同时满足才进 undo)
 1. **改动前 `pushHistory()`**(直接调,或走 `mutate()`)。漏了 → 改动生效但没有撤销步。
-2. **改动的数据必须落在快照口径里**——当前口径 = ① `sessions` 整树,② 库声音 `Sound.warp`。**口径外的状态 `applyEntry` 一概还原不了**,哪怕 pushHistory 了也白搭。要纳入新的状态域 → **显式扩口径**:`snapshot()` 多抓一份、`applyEntry()` 多还原一份(+ 反向持久化),并回本节登记。
+2. **改动的数据必须落在快照口径里**——当前口径 = ① `sessions` 整树,② 库声音 `Sound.warp`,③ 主 `bpm`。**口径外的状态 `applyEntry` 一概还原不了**,哪怕 pushHistory 了也白搭。要纳入新的状态域 → **显式扩口径**:`snapshot()` 多抓一份、`applyEntry()` 多还原一份(+ 反向持久化),并回本节登记。
 
 **派生态不入栈**:引擎/音频 buffer、peaks 都从 sessions 重算(undo 走 `reconcile` 重灌)。永远别把权威状态只存在引擎里。
 
@@ -325,9 +385,10 @@ model Instrument {
 
 ### 判断标准(什么该进、什么不该)
 **Litmus:用户期望 ⌘Z 能撤回这一步 ＆ 我改的东西在快照口径(sessions 树 / Sound.warp)里 —— 两个都 yes 才进。**
-- **该进**:乐器增删/移位/改名/激活;clip warp/trim/起播/长度/变调/timeMul/gain;collage 片增删移、片 mixer、loop 区;**库预调 warp(含拖起始线)**(已纳入口径②)。
+- **该进**:乐器增删/移位/改名/激活;clip warp/trim/起播/长度/变调/timeMul/gain;collage 片增删移、片 mixer、loop 区;**库预调 warp(含拖起始线)**(已纳入口径②);**改主 BPM**(已纳入口径③ —— 它确实改了产出、像改 warp 而非播放瞬态,故可撤)。
 - **不该进**:走带/播放(play/stop、预览试听)= 瞬态;选中/聚焦/缩放/滚动 = 视图态(撤它反而突兀);生成新 Sound = 异步库生命周期。
 - **灰区 = 口径外但用户期望能撤**:Sound 的非 warp 字段(label、分离出的 stem 等)、跨 project/session 的东西。要纳入 → 按铁律②**显式扩口径**(snapshot+applyEntry 各加一份 + 持久化),**别默默埋一半;拿不准先找人拍板**。
 
 ### 沿革
 - 起初口径只有 `sessions` 整树,且 undo 清空选中 → 库预调 warp(拖起始线)撤不了、clip 级撤销看不到回弹。已扩口径纳入 `Sound.warp` + 改成校验选中(保留 snap back)。
+- 2026-06-19:主 BPM 改成可编辑(§12),按本节铁律②**显式扩口径**纳入 `bpm`(snapshot 抓 / applyEntry 还原 + 反向 `api.projects.update`)。

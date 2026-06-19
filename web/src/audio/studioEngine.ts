@@ -4,7 +4,7 @@
 // 主走带 = Tone.Transport(全局唯一时钟);乐器"开关"= 量化到下一个小节边界的 launch/stop。
 // 假设:每件乐器的 buffer 已是整小节、可无缝循环(sample=warp 产物 / collage=bake 产物)。
 import * as Tone from 'tone';
-import type { Mixer } from '@/contracts';
+import type { Mixer, Quantize } from '@/contracts';
 
 type VoiceState = 'off' | 'queued' | 'on' | 'stopping';
 
@@ -27,17 +27,64 @@ export class StudioEngine {
   private beatsPerBar = 4;
   private inited = false;
   private disposeTimers = new Set<ReturnType<typeof setTimeout>>(); // 无缝换 buffer 后延迟销毁旧 player 的墙钟定时器
+  private retempoSchedId?: number; // 改速:排在下一小节边界的"翻速+换 buffer"协调点
+  private retempoTarget?: number;  // 改速目标 BPM(边界前停走带也要把 transport 落到它,免重启后 buffer 与 transport 不匹配)
+  private retempoBuilds?: Map<string, Promise<AudioBuffer | null>>; // 改速在渲的新 buffer;边界前停走带 → 由 stopTransport 就地兜底应用(否则只剩旧长度 buffer 配新速度 = drift)
+  private quantize: Quantize = '1bar';                              // 启停量化粒度(顶栏 Quantize 选择器);launch/stop/audition 用 nextBoundary 读它
+  private split?: Tone.Split; private meterL?: Tone.Meter; private meterR?: Tone.Meter; // 总输出 L/R 电平表(并联抽各乐器 panner,不改主信号路径)
+  private clickSynth?: Tone.Synth; private clickVol?: Tone.Volume;  // 节拍器:click synth → 音量节点 → dest(+并联进总表)
+  private metroOn = false;
+  private metroInterval: 'beat' | 'bar' | '2bar' | '4bar' = 'beat'; // 几小节响一次:每拍/每小节/每2小节/每4小节
+  private metroRepeatId?: number; // 节拍器的 scheduleRepeat id —— 每次 startTransport 重注册(stopTransport 的 t.cancel() 会清掉它)
 
   init(bpm: number, beatsPerBar = 4): void {
     this.beatsPerBar = beatsPerBar;
+    Tone.getTransport().bpm.value = bpm;
     if (!this.inited) {
-      Tone.getTransport().bpm.value = bpm;
+      // 总输出 L/R 电平表(并联抽头)
+      this.split = new Tone.Split();
+      this.meterL = new Tone.Meter(); this.meterR = new Tone.Meter();
+      this.split.connect(this.meterL, 0, 0);
+      this.split.connect(this.meterR, 1, 0);
+      // 节拍器:click → 音量 → 主输出(并联进总表,让总电平也含 click)
+      this.clickVol = new Tone.Volume(-8).toDestination();
+      this.clickVol.connect(this.split);
+      this.clickSynth = new Tone.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.001, decay: 0.045, sustain: 0, release: 0.02 } }).connect(this.clickVol);
       this.inited = true;
-    } else {
-      Tone.getTransport().bpm.value = bpm;
     }
   }
+
+  // --- 主输出:音量(dest 上的 Volume) + L/R 电平 ---
+  setMasterVolume(db: number): void { Tone.getDestination().volume.value = db; }
+  masterLevel(): [number, number] {
+    const norm = (m?: Tone.Meter): number => { const v = m?.getValue(); const db = typeof v === 'number' ? v : Array.isArray(v) ? v[0] : -Infinity; return isFinite(db) ? Math.max(0, Math.min(1, (db + 48) / 48)) : 0; };
+    return [norm(this.meterL), norm(this.meterR)];
+  }
+
+  // --- 节拍器 ---
+  setQuantize(q: Quantize): void { this.quantize = q; }
+  setMetronome(on: boolean): void { this.metroOn = on; }
+  // 每次起播重挂节拍器节拍回调(stopTransport 的 t.cancel() 会把它清掉,故不能只在 init 注册一次)。
+  private scheduleMetro(): void {
+    const t = Tone.getTransport();
+    if (this.metroRepeatId != null) { try { t.clear(this.metroRepeatId); } catch { /* */ } }
+    this.metroRepeatId = t.scheduleRepeat((time) => this.onClick(time), '4n', 0);
+  }
+  setMetronomeVolume(db: number): void { if (this.clickVol) this.clickVol.volume.value = db; }
+  setMetronomeInterval(iv: 'beat' | 'bar' | '2bar' | '4bar'): void { this.metroInterval = iv; }
+  private onClick(time: number): void {
+    if (!this.metroOn || !this.clickSynth) return;
+    const t = Tone.getTransport();
+    const beats = Math.round(t.getTicksAtTime(time) / t.PPQ);
+    const beatInBar = ((beats % this.beatsPerBar) + this.beatsPerBar) % this.beatsPerBar;
+    const barIdx = Math.floor(beats / this.beatsPerBar);
+    const down = beatInBar === 0;
+    const play = this.metroInterval === 'beat' ? true : this.metroInterval === 'bar' ? down : this.metroInterval === '2bar' ? down && barIdx % 2 === 0 : down && barIdx % 4 === 0;
+    if (play) this.clickSynth.triggerAttackRelease(down ? 'C6' : 'C5', '32n', time);
+  }
   async resume(): Promise<void> { await Tone.start(); }
+  /** 改主 BPM:主走带 transport 立即跟随(buffer 的 re-warp/热替换由上层逐乐器做)。 */
+  setBpm(bpm: number): void { Tone.getTransport().bpm.value = bpm; }
 
   isPlaying(): boolean { return Tone.getTransport().state === 'started'; }
   transportBeats(): number { const t = Tone.getTransport(); return t.ticks / t.PPQ; }
@@ -65,6 +112,7 @@ export class StudioEngine {
     player.chain(eq, panner, Tone.getDestination());
     const meter = new Tone.Meter();
     panner.connect(meter); // 旁路抽头,给 mixer 电平表
+    if (this.split) panner.connect(this.split); // 再并联进总输出 L/R 表
     const v: Voice = { player, eq, panner, meter, bars, wantOn: false, state: 'off' };
     this.voices.set(id, v);
     this.applyMixer(v, mixer);
@@ -108,16 +156,85 @@ export class StudioEngine {
         const delayMs = Math.max(0, (time - Tone.now()) * 1000) + XF * 1000 + 300; // 淡出走完再销毁
         const tid = setTimeout(() => { this.disposeTimers.delete(tid); try { old.dispose(); } catch { /* */ } }, delayMs);
         this.disposeTimers.add(tid);
-      }, this.nextBar());
+      }, this.nextBoundary());
       return;
     }
-    // 没在出声:就地换(排队中的 fire 会自然用到新 buffer)
+    // 没在出声:就地换(排队中的 fire 会自然用到新 buffer;顺带复位可能残留的顶速)
+    this.replaceBufferInPlace(v, buffer);
+  }
+  private cancelPending(v: Voice): void {
+    if (v.pending) { try { v.pending.dispose(); } catch { /* */ } v.pending = undefined; }
+  }
+
+  /** 改主 BPM(走带在跑)—— §6 的"可选无缝过渡":
+   *  ① 保持旧 buffer + 旧速度播到**下一个小节边界 B**(其间不动 transport,旧声与旧网格仍对齐、无 drift),同时后台离线 re-warp 全部乐器;
+   *  ② 到 B:transport 翻新速 + 各乐器**同一边界**保相位换上新 buffer(众声同时换→不错拍);
+   *  ③ B 时某乐器的 HQ buffer 还没渲完 → 先用 `playbackRate` 顶速(tape pitch、即时跟拍、保持与别的声对齐),其 HQ buffer 就绪后在循环边界补换、复位 rate。
+   *  没在出声的 voice 在边界后就地换 buffer(被启用时即正确长度)。getBuffer(id) 由上层按新 bpm 离线渲染该乐器。 */
+  retempoPlaying(newBpm: number, getBuffer: (id: string) => Promise<AudioBuffer | null>): void {
+    const t = Tone.getTransport();
+    const oldBpm = t.bpm.value;
+    if (oldBpm === newBpm) return;
+    // 立刻启动所有 re-warp;记录就绪结果(到边界时已渲完的直接换、没渲完的顶速桥接)。
+    const builds = new Map<string, Promise<AudioBuffer | null>>();
+    const ready = new Map<string, AudioBuffer | null>();
+    this.voices.forEach((_, id) => { const p = getBuffer(id).catch(() => null); builds.set(id, p); p.then((b) => ready.set(id, b ?? null)); });
+    this.retempoBuilds = builds; // 边界前停走带的兜底应用句柄(边界真正触发时清掉,改由边界回调负责应用)
+    if (t.state !== 'started') { // 没在跑:直接翻速 + 渲好就地换(防御;正常由上层 isPlaying 分流)
+      t.bpm.value = newBpm;
+      this.retempoBuilds = undefined; // 本分支自行应用,不留给 stopTransport
+      this.voices.forEach((v, id) => builds.get(id)?.then((b) => b && this.replaceBufferInPlace(v, b)));
+      return;
+    }
+    const ratio = newBpm / oldBpm;
+    const XF = 0.012;
+    if (this.retempoSchedId != null) { t.clear(this.retempoSchedId); this.retempoSchedId = undefined; } // 作废上一次还没到的改速
+    this.retempoTarget = newBpm;
+    this.retempoSchedId = t.scheduleOnce((time) => {
+      this.retempoSchedId = undefined; this.retempoTarget = undefined; this.retempoBuilds = undefined; // 边界已触发,应用归本回调
+      t.bpm.value = newBpm; // B 处翻新速(此前老 buffer 老速正常播,无 drift)
+      for (const [id, v] of this.voices) {
+        if (v.state !== 'on' || v.player.disposed) continue;
+        const oldDur = (v.loopDur && v.loopDur > 0) ? v.loopDur : v.player.buffer.duration;
+        const elapsed = v.startTime != null ? (((time - v.startTime) % oldDur) + oldDur) % oldDur : 0;
+        const phase = oldDur > 0 ? elapsed / oldDur : 0; // 该乐器循环内相位(B 是小节边界→相位对齐网格)
+        const buf = ready.get(id);
+        if (buf) {
+          this.crossfadeAt(v, buf, time, phase * buf.duration, XF); // 已渲完:B 处保相位无缝换(不顶速、不变调)
+        } else {
+          v.player.playbackRate = ratio; // 没渲完:顶速跟拍(tape pitch);相位时钟改用有效周期
+          const effDur = oldDur / ratio;
+          v.startTime = time - phase * effDur;
+          v.loopDur = effDur;
+          builds.get(id)?.then((b) => { if (b) this.swapBuffer(id, b, v.bars); }); // 就绪后在循环边界补换(swapBuffer 建新 player→自动复位 rate)
+        }
+      }
+      this.voices.forEach((v, id) => { if (v.state !== 'on') builds.get(id)?.then((b) => b && this.replaceBufferInPlace(v, b)); }); // 没出声的:就地换
+    }, this.nextBoundary());
+  }
+  /** 就地把 voice 的 buffer 换成新的(没在出声时用):复位顶速、对齐 loop 点。 */
+  private replaceBufferInPlace(v: Voice, buffer: AudioBuffer): void {
+    if (v.player.disposed) return;
+    try { v.player.playbackRate = 1; } catch { /* */ }
     try { v.player.buffer.set(buffer); } catch { /* */ }
     v.player.loopEnd = buffer.duration;
     v.loopDur = buffer.duration;
   }
-  private cancelPending(v: Voice): void {
-    if (v.pending) { try { v.pending.dispose(); } catch { /* */ } v.pending = undefined; }
+  /** 在给定上下文时刻 time 保相位无缝换 buffer(交叉淡化防爆音);更新相位参考、延迟销毁旧 player。 */
+  private crossfadeAt(v: Voice, buffer: AudioBuffer, time: number, offset: number, XF: number): void {
+    const np = new Tone.Player(buffer);
+    np.loop = true; np.loopStart = 0; np.loopEnd = buffer.duration; np.fadeIn = XF;
+    np.connect(v.eq);
+    np.volume.value = v.player.volume.value;
+    const old = v.player;
+    old.fadeOut = XF;
+    np.start(time, Math.max(0, Math.min(buffer.duration - 1e-4, offset)));
+    try { old.stop(time); } catch { /* */ }
+    v.player = np; v.pending = undefined;
+    v.startTime = time - offset; v.loopDur = buffer.duration;
+    const delayMs = Math.max(0, (time - Tone.now()) * 1000) + XF * 1000 + 300;
+    const tid = setTimeout(() => { this.disposeTimers.delete(tid); try { old.dispose(); } catch { /* */ } }, delayMs);
+    this.disposeTimers.add(tid);
   }
   /** voice 输出电平 0..1(-48dB..0dB 归一);没在响→0。 */
   voiceLevel(id: string): number {
@@ -175,18 +292,19 @@ export class StudioEngine {
     if (on) {
       if (v.state === 'on') return;
       v.state = 'queued';
-      v.scheduledId = t.scheduleOnce((time) => { v.scheduledId = undefined; this.fire(v, time); v.state = 'on'; }, this.nextBar());
+      v.scheduledId = t.scheduleOnce((time) => { v.scheduledId = undefined; this.fire(v, time); v.state = 'on'; }, this.nextBoundary());
     } else {
       if (v.state === 'queued') { v.state = 'off'; return; }
       if (v.state !== 'on') return;
       v.state = 'stopping';
-      v.scheduledId = t.scheduleOnce((time) => { v.scheduledId = undefined; v.player.stop(time); v.state = 'off'; }, this.nextBar());
+      v.scheduledId = t.scheduleOnce((time) => { v.scheduledId = undefined; v.player.stop(time); v.state = 'off'; }, this.nextBoundary());
     }
   }
 
   startTransport(): void {
     this.stopAudition(); // 走带一开就停掉预览(预览只在走带停时用)
     const t = Tone.getTransport();
+    this.scheduleMetro(); // 重挂节拍器(上次 stop 的 t.cancel() 清掉了)
     t.start();
     this.voices.forEach((v) => {
       if (v.wantOn) { this.fire(v, Tone.now()); v.state = 'on'; } else v.state = 'off';
@@ -194,11 +312,16 @@ export class StudioEngine {
   }
   stopTransport(): void {
     const t = Tone.getTransport();
+    // 改速边界前就停 → 仍把 transport 落到目标速 + 把在渲的新 buffer 就地兜底换上(否则重启后旧长度 buffer 配新速度 = drift);scheduleOnce 由下面 t.cancel() 清掉。
+    if (this.retempoTarget != null) t.bpm.value = this.retempoTarget;
+    if (this.retempoBuilds) { for (const [id, p] of this.retempoBuilds) p.then((b) => { const v = this.voices.get(id); if (v && b) this.replaceBufferInPlace(v, b); }); }
+    this.retempoSchedId = undefined; this.retempoTarget = undefined; this.retempoBuilds = undefined;
     t.stop();
     t.cancel();
     this.voices.forEach((v) => {
       this.cancelPending(v);
       v.scheduledId = undefined;
+      try { v.player.playbackRate = 1; } catch { /* */ } // 清掉可能残留的顶速桥接
       v.player.stop();
       v.state = 'off'; // 停走带=都不出声(state 只管出声);播放态保留在 wantOn,UI 仍显示激活
       v.startTime = undefined;
@@ -234,7 +357,7 @@ export class StudioEngine {
         p.start(time);
         this.auditionStart = time;
         this.auditionQueued = false;
-      }, this.nextBar());
+      }, this.nextBoundary());
     } else {
       p.start();
       this.auditionStart = Tone.now();
@@ -305,9 +428,16 @@ export class StudioEngine {
   private clearScheduled(v: Voice): void {
     if (v.scheduledId != null) { Tone.getTransport().clear(v.scheduledId); v.scheduledId = undefined; }
   }
-  /** 下一个小节边界(量化固定 1 bar)。 */
-  private nextBar(): string {
-    const bar = parseInt(String(Tone.getTransport().position).split(':')[0], 10);
-    return `${bar + 1}:0:0`;
+  /** 下一个量化边界(按当前 quantize):1bar=下一小节 · 1/2=下一半小节 · 1/4=下一拍 · off=立即(下个音频块)。 */
+  private nextBoundary(): string {
+    const t = Tone.getTransport();
+    const [bs, bes] = String(t.position).split(':');
+    const bar = parseInt(bs, 10), beat = parseFloat(bes), bpb = this.beatsPerBar;
+    switch (this.quantize) {
+      case 'off': return '+0.02'; // 不量化:立即起
+      case '1/4': { const nb = Math.floor(beat) + 1; return nb >= bpb ? `${bar + 1}:0:0` : `${bar}:${nb}:0`; }
+      case '1/2': { const h = bpb / 2; const nb = (Math.floor(beat / h) + 1) * h; return nb >= bpb ? `${bar + 1}:0:0` : `${bar}:${nb}:0`; }
+      default: return `${bar + 1}:0:0`; // 1bar
+    }
   }
 }

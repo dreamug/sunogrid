@@ -73,6 +73,14 @@ export interface Bank {
 
 export type Quantize = 'off' | '1bar' | '1/2' | '1/4';
 
+/** 生成窗口偏好(整体读写、形状演进中 → Project.genPrefs JSON,见 PRODUCT §4.1/§15.A)。 */
+export interface GenPrefs {
+  mode: 'sound' | 'advanced';
+  loop: boolean;
+  /** 持久化的生成 BPM;主 BPM 变化时单向覆盖一次(见 §4.1)。 */
+  bpm: number;
+}
+
 /** 一个工程(整套设置)。 */
 export interface Project {
   id: string;
@@ -80,6 +88,8 @@ export interface Project {
   masterBpm: number;
   /** 工程调;生成时默认跟它。null=不限。 */
   masterKey: MusicalKey | null;
+  /** 生成窗口偏好;null=用默认。 */
+  genPrefs: GenPrefs | null;
   beatsPerBar: number;   // 目前固定 4
   quantize: Quantize;    // 默认 '1bar'
   banks: Bank[];

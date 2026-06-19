@@ -25,7 +25,7 @@ export async function stemServiceHealth(): Promise<StemHealth | null> {
 export async function separateSound(soundId: string) {
   const parent = await db.sound.findUnique({ where: { id: soundId }, include: { asset: true } });
   if (!parent) throw new Error('sound not found');
-  if (parent.parentSoundId) throw new Error('这已经是一个 stem,不能再分');
+  if (parent.parentSoundId) throw new Error("This is already a stem — can't separate it further");
 
   const health = await stemServiceHealth();
   if (!health) throw new Error('分离服务没在跑:到 stem-service/ 执行 ./run.sh');

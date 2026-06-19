@@ -48,8 +48,10 @@ model Project {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   name        String
   masterBpm   Int      @default(90)
+  masterKey   String?  // 工程调(生成默认跟它);C..B / 加 m 小调;null=Any。见 PRODUCT §4.1
   quantize    String   @default("1bar") // 1bar | 1/2 | 1/4 | off
   beatsPerBar Int      @default(4)
+  genPrefs    Json?    // 生成窗口偏好 {mode,loop,bpmLinked,bpmManual} —— 形状演进中,JSON 逃生口(PRODUCT §15.A)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

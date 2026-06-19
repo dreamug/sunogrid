@@ -8,12 +8,12 @@ export async function POST(req: Request) {
   const password = b.password ?? '';
   const confirm = b.confirm ?? '';
 
-  if (username.length < 2) return Response.json({ error: '用户名至少 2 个字符' }, { status: 400 });
-  if (password.length < 6) return Response.json({ error: '密码至少 6 个字符' }, { status: 400 });
-  if (password !== confirm) return Response.json({ error: '两次密码不一致' }, { status: 400 });
+  if (username.length < 2) return Response.json({ error: 'Username must be at least 2 characters' }, { status: 400 });
+  if (password.length < 6) return Response.json({ error: 'Password must be at least 6 characters' }, { status: 400 });
+  if (password !== confirm) return Response.json({ error: "Passwords don't match" }, { status: 400 });
 
   const exists = await db.user.findUnique({ where: { username } });
-  if (exists) return Response.json({ error: '用户名已被占用' }, { status: 409 });
+  if (exists) return Response.json({ error: 'Username taken' }, { status: 409 });
 
   const passwordHash = await hashPassword(password);
   let user;
@@ -22,7 +22,7 @@ export async function POST(req: Request) {
   } catch (e) {
     // 并发注册撞唯一约束(check-then-create 的 TOCTOU)→ 干净 409,不抛 500。
     if (e && typeof e === 'object' && 'code' in e && (e as { code?: string }).code === 'P2002') {
-      return Response.json({ error: '用户名已被占用' }, { status: 409 });
+      return Response.json({ error: 'Username taken' }, { status: 409 });
     }
     throw e;
   }

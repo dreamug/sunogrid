@@ -30,7 +30,7 @@ export async function POST(req: Request) {
       userId: user.id,
       originProjectId: b.originProjectId || null,
       genId: b.genId || null,
-      name: b.name ?? '未命名',
+      name: b.name ?? 'Untitled',
       mode: b.mode ?? 'sound',
       sourceBpm: b.sourceBpm ?? 90,
       musicalKey: b.key || null,
