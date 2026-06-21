@@ -85,9 +85,9 @@ const regionFromWarp = (warp: unknown, analysis: unknown): WarpRegion => {
   const w = (warp || {}) as Record<string, number>;
   const a = (analysis || {}) as Record<string, number>;
   if (typeof w.startSample === 'number' && typeof w.endSample === 'number') {
-    return { startSample: w.startSample, endSample: w.endSample, bars: w.bars ?? 1, semitones: w.semitones ?? 0 };
+    return { startSample: w.startSample, endSample: w.endSample, bars: w.bars ?? 1, semitones: w.semitones ?? 0, fadeOutBars: w.fadeOutBars ?? 0, fadeSilenceBars: w.fadeSilenceBars ?? 0 };
   }
-  return { startSample: a.startSample ?? 0, endSample: a.endSample ?? 0, bars: a.bars ?? 1, semitones: 0 };
+  return { startSample: a.startSample ?? 0, endSample: a.endSample ?? 0, bars: a.bars ?? 1, semitones: 0, fadeOutBars: 0, fadeSilenceBars: 0 };
 };
 
 /** 放置 pad 时的初始 warp:优先源 Sound 的默认 warp,否则按 analysis 兜底。 */

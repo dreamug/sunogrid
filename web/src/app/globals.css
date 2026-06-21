@@ -12,6 +12,9 @@
 html, body { margin:0; padding:0; height:100%; background:var(--bg-0); color:var(--tx);
   font-family:-apple-system,"SF Pro Text",system-ui,"Segoe UI",sans-serif; font-size:13px;
   -webkit-font-smoothing:antialiased; letter-spacing:.005em; }
+/* DAW 控制台:全局禁止拖拽误选文字/元素(含 portal 浮层);仅可编辑控件放开(打字/选词照常)。 */
+body { -webkit-user-select:none; user-select:none; }
+input, textarea, [contenteditable=""], [contenteditable="true"] { -webkit-user-select:text; user-select:text; }
 .muted { color:var(--tx-2); } .small { font-size:11px; }
 code { background:var(--bg-2); border:1px solid var(--line); border-radius:var(--r); padding:1px 6px; font-size:.88em; font-family:var(--mono); }
 a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underline; }
@@ -140,12 +143,72 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .br-h { display:flex; align-items:center; gap:6px; height:30px; padding:0 12px; border-bottom:1px solid var(--line); }
 .br-h .n { margin-left:auto; font-size:11px; color:var(--tx-3); font-variant-numeric:tabular-nums; }
 
-.stage { min-height:0; display:flex; flex-direction:column; padding:13px 16px; gap:11px; background:var(--bg-0); overflow-y:auto; }
+.stage { min-height:0; display:flex; flex-direction:column; padding:0 16px 13px; gap:11px; background:var(--bg-0); overflow-y:auto; } /* top padding 去掉 → 交给 sticky 的 .srail-sticky,使其贴顶且 bg 能盖住下滚网格 */
 .banks { display:flex; align-items:center; gap:6px; }
 .banks .hint { margin-left:auto; font-size:11px; color:var(--tx-3); }
 .bank { font:inherit; font-size:12px; width:28px; height:24px; background:var(--bg-1); color:var(--tx-2); border:1px solid var(--line); border-radius:var(--r); cursor:pointer; }
 .bank:hover { color:var(--tx); }
 .bank.on { background:var(--on); color:var(--tx); border-color:var(--line-2); }
+
+/* §20 场景卡 rail —— 场景层(彩色卡,每场一个标识色 --c),区别于乐器 pad(.clip:启动条+波形)。 */
+/* 整个 session 区 sticky 钉在操场顶:负边距铺到操场边缘 + 铺底色盖住下方网格滚动 */
+.srail-sticky { position:sticky; top:0; z-index:20; background:var(--bg-0); margin:0 -16px 0; padding:13px 16px 10px; } /* 贴顶 + 顶部 pad + bg 盖住下滚网格 */
+.srail { align-items:flex-start; flex-wrap:nowrap; width:max-content; gap:8px; } /* §20 横排一排,intrinsic 宽度 → 溢出由 HScroll 横滚 */
+/* §20 两色制:session 不再各自上色,--c 默认中性暖灰;正在播放切到 --acc(橙)见 .playing */
+.scard { --c:var(--tx-2); position:relative; flex:0 0 auto; width:168px; box-sizing:border-box; display:flex; flex-direction:column; gap:6px; padding:8px 9px; border-radius:var(--r); overflow:hidden; cursor:pointer;
+  background:color-mix(in srgb, var(--c) 18%, var(--bg-1)); border:1px solid color-mix(in srgb, var(--c) 54%, var(--line)); transition:border-color .1s, background-color .1s; }
+.scard:hover { border-color:color-mix(in srgb, var(--c) 70%, var(--line)); }
+/* 选中(当前)= 抬亮一档灰底 + 单条提亮 1px 白边(不叠白内环 → 不再"边框+环"双线);overflow:hidden 已把走带裹进 border 内 */
+.scard.on { background:color-mix(in srgb, var(--c) 28%, var(--bg-2)); border-color:rgba(255,255,255,.5); }
+/* Live 卡内文字压在进度色块(.ph z0)之上、播放线(z2)之下 */
+.scard > .sc-h, .scard > .sc-chips, .scard > .sc-meta { position:relative; z-index:1; }
+.scard.queued { animation:clippulse .8s ease-in-out infinite; } /* 已排队、等量化边界切到 */
+/* 拖拽换位:被拖卡压暗当占位,整排靠 flex order 实时滑动让位(像已经挪过去),松手才落库;不再用左缘插入条 */
+.scard.dragging, .sstrip.dragging { opacity:.4; }
+.scard .sc-h { display:flex; align-items:center; gap:6px; min-height:20px; }
+.scard .sc-nm { flex:1; min-width:0; font-size:12px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:color-mix(in srgb, var(--c) 42%, var(--tx)); }
+.scard .sc-tools { display:flex; gap:4px; opacity:0; transition:opacity .1s; }
+.scard:hover .sc-tools { opacity:1; }
+.scard .sc-tools button, .sstrip .sc-tools button { width:18px; height:18px; display:flex; align-items:center; justify-content:center; padding:0; line-height:1; font-size:12px; background:transparent; border:none; color:rgba(236,233,227,.45); cursor:pointer; }
+.sstrip .sc-h { display:flex; align-items:center; gap:6px; min-height:20px; }
+.sstrip .sc-nm { flex:1; min-width:0; font-size:12px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:color-mix(in srgb, var(--c) 42%, var(--tx)); }
+.sstrip .sc-tools { display:flex; gap:4px; opacity:0; transition:opacity .1s; }
+.sstrip:hover .sc-tools { opacity:1; }
+.sstrip .sc-tools button:hover { color:var(--tx); }
+.sstrip .sc-chips { display:flex; gap:3px; align-items:center; flex-wrap:wrap; min-height:10px; overflow:hidden; max-height:23px; }
+.sstrip .sc-chip { width:10px; height:10px; border-radius:2px; flex:none; }
+.sstrip .sc-more { font-size:9px; color:rgba(236,233,227,.4); font-family:var(--mono); }
+.scard .sc-tools button:hover { color:var(--tx); }
+.scard .sc-chips { display:flex; gap:3px; align-items:center; flex-wrap:wrap; min-height:10px; overflow:hidden; max-height:23px; }
+.scard .sc-chip { width:10px; height:10px; border-radius:2px; flex:none; }
+.scard .sc-more { font-size:9px; color:rgba(236,233,227,.4); font-family:var(--mono); }
+.scard .sc-meta, .sstrip .sc-meta { font-size:10px; color:rgba(236,233,227,.42); font-family:var(--mono); }
+
+/* §20 Song 模式:卡 + 无缝同色编号格 一条 strip;次数 = 编号格,每格一遍;横排,溢出横滚。 */
+/* sstrip 不设固定高 → 高度 = scard-in 内容高(与 Live 的 .scard 同款盒子,故两模式等高);编号格 stretch 撑满。 */
+.sstrip { --c:var(--tx-2); position:relative; flex:0 0 auto; display:flex; align-items:stretch; border-radius:var(--r); overflow:hidden; cursor:pointer; transition:border-color .1s, background-color .1s;
+  background:color-mix(in srgb, var(--c) 18%, var(--bg-1)); border:1px solid color-mix(in srgb, var(--c) 54%, var(--line)); }
+.sstrip:hover { border-color:color-mix(in srgb, var(--c) 70%, var(--line)); }
+.sstrip.on { background:color-mix(in srgb, var(--c) 28%, var(--bg-2)); border-color:rgba(255,255,255,.5); } /* 选中 = 抬亮灰底 + 单线白边(同 .scard.on);放在 :hover 之后保证悬停时仍显选中 */
+/* 正在播放 = 橙:--c 切到 --acc → bg/边框/走带(.ph/文字)全自动跟着橙;放在 .on 之后,播放时盖过"选中灰底/白边" */
+.scard.playing, .sstrip.playing { --c:var(--acc); background:color-mix(in srgb, var(--acc) 22%, var(--bg-1)); border-color:color-mix(in srgb, var(--acc) 72%, var(--line)); }
+.sstrip.queued { animation:clippulse .8s ease-in-out infinite; }
+.sstrip .scard-in { width:168px; box-sizing:border-box; flex:none; display:flex; flex-direction:column; gap:6px; padding:8px 9px; border-right:1px solid color-mix(in srgb, var(--c) 38%, var(--line)); }
+.sstrip .rcell { position:relative; z-index:1; width:40px; flex:none; display:flex; flex-direction:column; align-items:center; border-right:1px solid color-mix(in srgb, var(--c) 30%, transparent); }
+.sstrip .rcell:last-child { border-right:none; }
+.sstrip .rcell .cn { margin-top:6px; font-family:var(--mono); font-size:13px; color:color-mix(in srgb, var(--c) 44%, var(--tx)); }
+.sstrip .rcell .cbtns { margin-top:auto; width:100%; display:flex; flex-direction:column; opacity:0; transition:opacity .1s; } /* §20.4 默认隐藏,hover 最后一格才出 */
+.sstrip .rcell:hover .cbtns { opacity:1; }
+/* §20.5 方形小按钮,不要圆角;颜色提亮(白+透明,别太深) */
+.sstrip .rcell .cb { height:14px; display:flex; align-items:center; justify-content:center; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.2); border-radius:0; color:rgba(236,233,227,.82); cursor:pointer; font-size:12px; line-height:1; }
+.sstrip .rcell .cb + .cb { border-top:none; }
+.sstrip .rcell .cb:hover { color:#fff; background:rgba(255,255,255,.14); }
+/* 已播进度色块(两模式都有,类 pad 已播 fill):Live=从左缘到播放头;Song=当前编号格 */
+.scard .ph, .sstrip .ph { position:absolute; top:0; bottom:0; z-index:0; background:color-mix(in srgb, var(--c) 40%, var(--bg-1)); pointer-events:none; }
+/* §20.2 播放线(两模式都有,类 pad 播放头,无波形):Live 在卡内一直 loop 扫;Song 在当前格内扫,逐格推进。调暗 .85→.55 */
+.sphead { position:absolute; top:0; bottom:0; width:1px; margin-left:-0.5px; z-index:2; background:var(--play); opacity:.55; pointer-events:none; }
+.sadd { order:999; flex:0 0 auto; align-self:stretch; min-width:34px; display:flex; align-items:center; justify-content:center; background:transparent; border:1px dashed var(--line-2); border-radius:var(--r); color:rgba(236,233,227,.45); cursor:pointer; font-size:15px; } /* order:999 → 卡片用 order 重排时 + 键始终在末尾 */
+.sadd:hover { color:var(--tx); border-color:#544e44; }
 
 /* clip 网格 */
 .clipgrid { display:grid; grid-template-columns:repeat(4,1fr); gap:5px; }
@@ -271,6 +334,8 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .gen-keyrow { display:flex; align-items:stretch; gap:8px; }
 .gen-go { flex:0 0 auto; width:50px; font:inherit; font-size:11px; font-weight:500; letter-spacing:.08em; color:var(--acc-ink); background:var(--acc); border:none; border-radius:var(--r); cursor:pointer; }
 .gen-go:hover { background:color-mix(in srgb, var(--acc) 88%, #fff); }
+.gen-go:disabled { opacity:.4; cursor:not-allowed; }
+.gen-go:disabled:hover { background:var(--acc); } /* 红灯禁用:hover 不再提亮 */
 
 .lib-list { flex:1; min-height:0; padding:12px 10px; display:flex; flex-direction:column; gap:16px; overflow-y:auto; } /* flex:1+min-height:0 = 真正可滚容器;gap 大些分隔各次生成 */
 @keyframes gbslide { 0% { margin-left:-40%; } 100% { margin-left:100%; } }
@@ -297,6 +362,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .gstep-b.on { background:color-mix(in srgb, var(--queue) 18%, var(--bg-3)); color:var(--queue); border-color:color-mix(in srgb, var(--queue) 45%, var(--line)); }
 .gstep-b.done { color:var(--play); border-color:var(--line-2); }
 .gvar-row { display:flex; align-items:center; gap:7px; font-size:11px; color:var(--tx-3); }
+.gvar-row .gcancel { margin-left:auto; padding:2px 9px; } /* 取消按钮靠右 */
 .gb-fail { display:flex; flex-direction:column; gap:6px; padding:10px 11px; border:1px solid var(--line-2); border-radius:5px; background:var(--bg-2); }
 .gb-err { font-size:11px; color:var(--danger); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .gb-acts { display:flex; gap:6px; }
@@ -434,14 +500,14 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .wb-top h1 { font-weight:500; font-size:20px; margin:0; }
 .wb-top .who { margin-left:auto; color:var(--tx-2); font-size:12.5px; display:flex; align-items:center; gap:12px; }
 .wb-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:13px; }
-.proj { display:flex; flex-direction:column; gap:8px; background:var(--bg-1); border:1px solid var(--line); border-radius:var(--r); padding:15px 16px; cursor:pointer; transition:border-color .1s; min-height:96px; }
+.proj { position:relative; display:flex; flex-direction:column; gap:8px; background:var(--bg-1); border:1px solid var(--line); border-radius:var(--r); padding:15px 16px; cursor:pointer; transition:border-color .1s; min-height:96px; }
 .proj:hover { border-color:var(--line-2); }
-.proj .pn { font-size:14px; color:var(--tx); font-weight:500; }
+.proj .pn { font-size:14px; color:var(--tx); font-weight:500; padding-right:24px; }
 .proj .pm { font-size:11.5px; color:var(--tx-3); font-variant-numeric:tabular-nums; }
-.proj .pr { margin-top:auto; display:flex; gap:10px; }
-.proj .pr button { font:inherit; font-size:11px; background:none; border:none; color:var(--tx-3); cursor:pointer; padding:0; }
-.proj .pr button:hover { color:var(--tx); }
-.proj .pr button.del:hover { color:var(--danger); }
+.proj-del { position:absolute; top:10px; right:10px; display:flex; align-items:center; justify-content:center; width:26px; height:26px; padding:0; background:none; border:none; border-radius:6px; color:var(--tx-3); cursor:pointer; opacity:0; transition:opacity .1s, color .1s, background .1s; }
+.proj:hover .proj-del { opacity:1; }
+.proj-del:hover { color:var(--danger); background:var(--bg-2); }
+.proj-del:focus-visible { opacity:1; outline:1px solid var(--line-2); }
 .proj.new { align-items:center; justify-content:center; color:var(--tx-2); border-style:dashed; font-size:13px; }
 .proj.new:hover { color:var(--acc); border-color:var(--acc); }
 
@@ -471,3 +537,33 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .fx-k { display:flex; flex-direction:column; align-items:center; gap:1px; user-select:none; }
 .fx-kl { font-size:9px; letter-spacing:.04em; color:var(--tx-3); }
 .fx-kv { font-size:9.5px; color:var(--tx); font-family:var(--mono); }
+
+/* —— §21 XY 表演板(Kaoss 式主总线 insert):顶栏 XY 按钮 + 浮层。左=XY 方块,右栏=效果选择 + X/Y 读数(并排)+ 触发/wet 一行。复用 .fx-pop/.fx-chip/.seg/.we-box —— */
+.xy-pop { width:560px; }                                                  /* 无标题/无状态:大方块 + 紧凑右栏 */
+.xy-body { display:grid; grid-template-columns:1fr 200px; gap:12px; }
+.xy-padwrap { display:grid; grid-template-columns:12px 1fr; grid-template-rows:1fr 14px; gap:4px; }
+.xy-ylab { grid-column:1; grid-row:1; display:flex; align-items:center; justify-content:center; }
+.xy-ylab span { writing-mode:vertical-rl; transform:rotate(180deg); font-size:8.5px; letter-spacing:.12em; text-transform:uppercase; color:var(--tx-3); }
+.xy-pad { grid-column:2; grid-row:1; position:relative; aspect-ratio:1/1; width:100%; background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); overflow:hidden; cursor:crosshair; touch-action:none; --xacc:var(--tx-3); }
+.xy-pad.off { opacity:.45; pointer-events:none; }
+.xy-xlab { grid-column:2; grid-row:2; text-align:center; font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--tx-3); }
+.xy-grid { position:absolute; inset:0; background-image:linear-gradient(rgba(236,233,227,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(236,233,227,.045) 1px,transparent 1px); background-size:25% 25%; pointer-events:none; }
+.xy-snaps i { position:absolute; top:0; bottom:0; width:1px; background:rgba(236,233,227,.07); }
+.xy-center { position:absolute; left:50%; top:50%; width:7px; height:7px; transform:translate(-50%,-50%); border:1px solid var(--line-2); border-radius:50%; pointer-events:none; }
+.xy-line-h { position:absolute; left:0; right:0; height:1px; background:var(--xacc); opacity:.5; bottom:50%; transform:translateY(50%); pointer-events:none; }
+.xy-line-v { position:absolute; top:0; bottom:0; width:1px; background:var(--xacc); opacity:.5; left:50%; transform:translateX(-50%); pointer-events:none; }
+.xy-dot { position:absolute; left:50%; bottom:50%; width:15px; height:15px; border-radius:50%; background:var(--xacc); box-shadow:0 0 0 1.5px var(--bg-0); transform:translate(-50%,50%); pointer-events:none; }
+.xy-dot.held { box-shadow:0 0 0 1.5px var(--bg-0), 0 0 0 4px color-mix(in srgb, var(--xacc) 55%, transparent); }  /* 锁定:外环区分 engaged */
+.xy-rail { display:flex; flex-direction:column; justify-content:flex-start; gap:13px; }
+.xy-progs { display:grid; grid-template-columns:1fr 1fr; gap:4px; }     /* 效果选择:2×2 */
+.xy-rail .fx-chip { text-align:center; }
+.xy-reads { display:grid; grid-template-columns:1fr 1fr; gap:8px; }      /* X / Y 读数并排 */
+.xy-rail .xy-cell { display:flex; flex-direction:column; min-width:0; }
+.xy-rail .we-lab { font-size:8.5px; letter-spacing:.06em; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.xy-rail .we-box { height:26px; padding:0 8px; font-size:12px; white-space:nowrap; overflow:hidden; }
+.xy-tw { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:11px; border-top:1px solid var(--line); }
+.xy-tw .seg { flex:1; }
+.xy-tw .fx-k { flex:none; }
+.xy-rail .seg { display:flex; flex:1; }
+.xy-rail .seg button { flex:1; padding:5px 0; }
+.xy-wet { display:flex; align-items:center; gap:8px; flex:none; }

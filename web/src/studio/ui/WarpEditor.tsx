@@ -13,6 +13,7 @@ import type { LoopAnalysis } from '@/audio/conditioning';
 import { decodeAsset } from '@/studio/realLibrary';
 import { TransportIcon } from '@/studio/ui/glyphs';
 import type { Clip } from '@/contracts';
+import { fadeGain } from '@/contracts';
 import type { ApiSound } from '@/studio/api';
 
 export interface WarpRegion {
@@ -20,6 +21,8 @@ export interface WarpRegion {
   endSample: number;
   bars: number; // loop 长度(小节,可分数)
   semitones: number;
+  fadeOutBars: number;     // §24 尾淡出起点(距 loop 尾的小节数,顶点);0=无淡出
+  fadeSilenceBars: number; // §24 静音尾(到零点后到 loop 尾的小节数,底点);0=淡到正好结尾
 }
 
 /** 预览路由(因场景而异,由宿主注入):库素材=裸试听;乐器=过自己的 mixer。 */
@@ -72,8 +75,9 @@ export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, 
     <WarpCanvas
       channels={audio.channels} sampleRate={audio.sampleRate} analysis={analysis}
       nativeBpm={sound.sourceBpm} targetBpm={targetBpm} beatsPerBar={beatsPerBar} initSemitones={clip.semitones}
+      initFadeOut={clip.fadeOutBars} initFadeSilence={clip.fadeSilenceBars}
       previewing={preview.previewing} queued={preview.queued} warming={preview.warming} getPhase={preview.getPhase} onPreviewToggle={() => preview.toggle()}
-      onChange={(r) => onChange({ ...clip, startSample: r.startSample, endSample: r.endSample, bars: r.bars, semitones: r.semitones })}
+      onChange={(r) => onChange({ ...clip, startSample: r.startSample, endSample: r.endSample, bars: r.bars, semitones: r.semitones, fadeOutBars: r.fadeOutBars || undefined, fadeSilenceBars: r.fadeSilenceBars || undefined })}
       hideHead compact compactHeader={header} compactMixer={mixer} canPreview={canPreview} onDragOut={onDragOut} maxBars={maxBars}
       initGridBars={initGridBars} initSnap={initSnap} onGridChange={onGridChange}
       timeMul={clip.timeMul ?? 1} onTimeMul={showTimeMul ? (m) => onChange({ ...clip, timeMul: m }) : undefined}
@@ -89,6 +93,8 @@ interface Props {
   targetBpm: number;
   beatsPerBar?: number;
   initSemitones?: number;         // 载入时的变调(从保存的 warp 来),否则每次选中都被重置成 0 并回写覆盖掉
+  initFadeOut?: number;           // §24 载入时的尾淡出起点(距尾小节数);空=无淡出
+  initFadeSilence?: number;       // §24 载入时的静音尾(距尾小节数);空=0
   previewing: boolean;            // 受控:由上层(库▶ / 编辑器播放键)统一管
   getPhase: () => number | null;  // 预览播放线相位 0..1(引擎按真实起播算);null=没在播
   onPreviewToggle: (r: WarpRegion) => void; // 播放/暂停
@@ -112,6 +118,11 @@ interface Props {
 
 const RULER_H = 22;
 const ANCHOR_HIT = 8; // px
+const FADE_DOT_HIT = 12; // px:fade 两点(顶/底)的命中半径(需 x+y 同时近)
+const FADE_INSET = 8;    // 顶/底点圆心离画布上/下边的内缩;曲线端点也用它 → 曲线恰穿过点心,且点不被边缘裁切
+const FADE_DOT_R = 4;    // 实心点半径(小)
+const FADE_RING_R = 6;   // 外圈半径
+const FADE_RING_HOVER_R = 8; // hover 时外圈放大
 const MIN_BARS = 0.5; // 缩放下限:半小节铺满舞台(深放大)
 const MAX_BARS = 256; // 缩放上限
 const TIME_OPTS: { label: string; m: number; tip: string }[] = [
@@ -127,10 +138,10 @@ const GRID_OPTS: { label: string; bars: number; tip: string }[] = [
   { label: '1/16', bars: 0.0625, tip: '¼ beat' },
 ];
 
-type DragMode = 'trimStart' | 'trimEnd' | 'stretch';
+type DragMode = 'trimStart' | 'trimEnd' | 'stretch' | 'fadeStart' | 'fadeEnd';
 interface DragSnap { mode: DragMode; grabSrcSec: number; anchorSrcSec0: number; secPerBar0: number; grabBarOffset: number; loopLen0: number; }
 
-function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beatsPerBar = 4, initSemitones = 0, previewing, getPhase, onPreviewToggle, onChange, onReset, hideHead = false, compact = false, compactHeader, compactMixer, timeMul = 1, onTimeMul, canPreview = true, queued = false, warming = false, onDragOut, maxBars, initGridBars, initSnap, onGridChange }: Props) {
+function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beatsPerBar = 4, initSemitones = 0, initFadeOut = 0, initFadeSilence = 0, previewing, getPhase, onPreviewToggle, onChange, onReset, hideHead = false, compact = false, compactHeader, compactMixer, timeMul = 1, onTimeMul, canPreview = true, queued = false, warming = false, onDragOut, maxBars, initGridBars, initSnap, onGridChange }: Props) {
   const total = channels[0].length;
   const srcDur = total / sampleRate;
   const beatsBar = beatsPerBar;
@@ -146,10 +157,10 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     const fromRegion = (s1 - s0) / N;
     const fromInput = (beatsBar * 60) / (nativeBpm > 0 ? nativeBpm : 90);
     const secPerBar = fromRegion > 0.05 ? fromRegion : fromInput;
-    const sig = `${analysis.startSample}|${analysis.endSample}|${analysis.bars}|${initSemitones}`; // 这条 clip 的 region 身份(用于区分「自家改动回流」vs 外部变更)
-    return { anchorOutBar: 1, anchorSrcSec: s0, secPerBar, trimStartBar: 1, trimEndBar: 1 + N, N, semitones: initSemitones, sig };
+    const sig = `${analysis.startSample}|${analysis.endSample}|${analysis.bars}|${initSemitones}|${initFadeOut}|${initFadeSilence}`; // 这条 clip 的 region 身份(用于区分「自家改动回流」vs 外部变更)
+    return { anchorOutBar: 1, anchorSrcSec: s0, secPerBar, trimStartBar: 1, trimEndBar: 1 + N, N, semitones: initSemitones, fadeOutBars: initFadeOut, fadeSilenceBars: initFadeSilence, sig };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [analysis, sampleRate, nativeBpm, beatsBar, initSemitones]);
+  }, [analysis, sampleRate, nativeBpm, beatsBar, initSemitones, initFadeOut, initFadeSilence]);
 
   const [anchorOutBar, setAnchorOutBar] = useState(init.anchorOutBar);
   const [anchorSrcSec, setAnchorSrcSec] = useState(init.anchorSrcSec);
@@ -160,6 +171,10 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const pickGrid = (bars: number) => { setSnap(true); setGridBars(bars); onGridChange?.(bars, true); }; // 改网格 → 持久化
   const toggleSnapOff = () => { setSnap(false); onGridChange?.(gridBars, false); };
   const [semitones, setSemitones] = useState(init.semitones);
+  const [fadeOutBars, setFadeOutBars] = useState(init.fadeOutBars); // §24 尾淡出起点(距尾小节数,顶点)
+  const [fadeSilenceBars, setFadeSilenceBars] = useState(init.fadeSilenceBars); // §24 静音尾(距尾小节数,底点)
+  const [fadeDragging, setFadeDragging] = useState(false); // 拖 fade 点中 → 画 ½-trim 上限参考线
+  const [fadeHover, setFadeHover] = useState<null | 'start' | 'end'>(null); // 悬停在哪个 fade 点 → 外圈放大
   const [snap, setSnap] = useState(initSnap ?? true);
   const [barsVisible, setBarsVisible] = useState(init.N + 2);
   const [vStart, setVStart] = useState(0);
@@ -187,7 +202,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     firstChange.current = true; // 选中/换素材/撤销造成的这批状态重置不当成"用户改动",别回写覆盖已存的 warp
     setAnchorOutBar(init.anchorOutBar); setAnchorSrcSec(init.anchorSrcSec); setSecPerBar(init.secPerBar);
     setTrimStartBar(init.trimStartBar); setTrimEndBar(init.trimEndBar);
-    setSemitones(init.semitones); setBarsVisible(init.N + 2); setVStart(0);
+    setSemitones(init.semitones); setFadeOutBars(init.fadeOutBars); setFadeSilenceBars(init.fadeSilenceBars); setBarsVisible(init.N + 2); setVStart(0);
     lastEmitSig.current = init.sig; // 重置后已与这条 region 对齐
   }, [init]);
 
@@ -203,12 +218,27 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const outBarAt = useCallback((srcSec: number) => anchorOutBar + (srcSec - anchorSrcSec) / secPerBar, [anchorOutBar, anchorSrcSec, secPerBar]);
 
   const loopLen = trimEndBar - trimStartBar; // 小节,网格倍数(可分数)
+  // §24 fade 两点几何:都钉在 loop 后半(≤ loopLen/2),顶点=fadeStart(gain 1→开始降)、底点=fadeEnd(gain→0);
+  // 存的是「距尾小节数」,读时按当前 loopLen 夹紧(loop 变长/变短自动归位,不必额外 effect)。
+  const fadeMax = loopLen / 2;
+  const fadeMidBar = trimStartBar + fadeMax; // 上限线:fade 点不得越过此处(loop 中点)
+  const fadeOut = Math.max(0, Math.min(fadeMax, fadeOutBars));
+  const fadeSilence = Math.max(0, Math.min(fadeOut, fadeSilenceBars));
+  const fadeStartBar = trimEndBar - fadeOut; // 顶点 outBar
+  const fadeEndBar = trimEndBar - fadeSilence; // 底点 outBar
+  const hasFade = fadeOut > 1e-4;
+  const fadeGainAtBar = (b: number) => {
+    if (!hasFade || b <= fadeStartBar) return 1;
+    if (b >= fadeEndBar) return 0;
+    return fadeGain((b - fadeStartBar) / Math.max(1e-6, fadeEndBar - fadeStartBar)); // 与离线 bake 共用 fadeGain(隆起抛物线 1-t²)
+  };
   // 不夹到 [0,total]:loop 可滑出音频(超出部分渲染时补零);srcEnd-srcStart 恒 = loopLen·secPerBar → 速率不变量成立
   const srcStart = Math.round(srcSecAt(trimStartBar) * sampleRate);
   const srcEnd = Math.max(srcStart + 1, Math.round(srcSecAt(trimEndBar) * sampleRate));
   const trimBpm = secPerBar > 0 ? (beatsBar * 60) / secPerBar : 0;
   const rate = masterBar > 0 ? secPerBar / masterBar : 1;
-  const region: WarpRegion = { startSample: srcStart, endSample: srcEnd, bars: loopLen, semitones };
+  // 罩层/曲线阈值(hasFade)与落库口径统一:低于阈值一律按 0 发出,避免 UI 显示"无淡出"却烘了个微淡出。
+  const region: WarpRegion = { startSample: srcStart, endSample: srcEnd, bars: loopLen, semitones, fadeOutBars: hasFade ? fadeOut : 0, fadeSilenceBars: hasFade ? fadeSilence : 0 };
 
   const hiBar = outBarAt(srcDur);
   const contentBars = Math.max(trimEndBar, hiBar); // 内容(波形+loop)实际跨度,不含视口富余
@@ -288,6 +318,25 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
       if (x >= -2 && x <= W + 2) c.fillRect(x, RULER_H, 1.5, 8);
     }
 
+    // §24 淡出:一块实心(非渐变)更深罩层,下沿 = 抛物线(gain 1→0);罩住的部分即被衰减,越靠尾越满 → 读作淡出到静音。
+    // 抛物线竖直区间内缩到 [顶点心, 底点心] = [RULER_H+INSET, H-INSET],曲线端点正好落在两个圆点心上。
+    const fadeTopY = RULER_H + FADE_INSET, fadeBotY = H - FADE_INSET;
+    if (hasFade) {
+      const STEPS = 40;
+      c.beginPath();
+      c.moveTo(bx(fadeStartBar), RULER_H); // 顶边起,i=0 竖直降到顶点心
+      for (let i = 0; i <= STEPS; i++) {   // 沿抛物线从顶点心降到底点心
+        const b = fadeStartBar + (fadeEndBar - fadeStartBar) * (i / STEPS);
+        c.lineTo(bx(b), fadeTopY + (1 - fadeGainAtBar(b)) * (fadeBotY - fadeTopY));
+      }
+      c.lineTo(bx(fadeEndBar), H);   // 底点心直落底边 → fadeEnd 处整列盖满(无亮缝)
+      c.lineTo(bx(trimEndBar), H);   // 静音尾沿底边到结束线
+      c.lineTo(bx(trimEndBar), RULER_H); // 右边上到顶,closePath 沿顶回起点 → 罩层 = 抛物线之上 + 静音尾整列
+      c.closePath();
+      c.fillStyle = 'rgba(15,14,13,0.55)';
+      c.fill();
+    }
+
     const anchor = (x: number, color: string) => {
       c.strokeStyle = color; c.lineWidth = 1.5;
       c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke();
@@ -296,7 +345,21 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     };
     anchor(tx0, '#7cd17c');
     anchor(tx1, '#e8a33d');
-  }, [mono, total, sampleRate, barsVisible, vStart, trimStartBar, trimEndBar, beatsBar, gridBars, srcSecAt, outBarAt, analysis.onsets]);
+
+    // §24 fade 两点(画在最上层)。拖动时显 ½-trim 上限线(两点都不得越过)。无连接线 —— 抛物线即罩层下沿。
+    if (fadeDragging) {
+      const xm = bx(fadeMidBar);
+      c.save(); c.setLineDash([4, 4]); c.strokeStyle = 'rgba(240,201,138,0.45)'; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(xm, RULER_H); c.lineTo(xm, H); c.stroke(); c.restore();
+    }
+    const fadeDot = (x: number, y: number, hovered: boolean) => {
+      c.beginPath(); c.arc(x, y, hovered ? FADE_RING_HOVER_R : FADE_RING_R, 0, Math.PI * 2); c.strokeStyle = 'rgba(240,201,138,0.45)'; c.lineWidth = 1.5; c.stroke();
+      c.beginPath(); c.arc(x, y, FADE_DOT_R, 0, Math.PI * 2); c.fillStyle = '#f0c98a'; c.fill(); c.strokeStyle = '#2a1a0b'; c.lineWidth = 1.2; c.stroke();
+    };
+    fadeDot(bx(fadeStartBar), fadeTopY, fadeHover === 'start'); // 顶点(圆心在曲线端点):无 fade 时停在结束线顶,供拉出
+    if (hasFade) fadeDot(bx(fadeEndBar), fadeBotY, fadeHover === 'end'); // 底点:有 fade 才显
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fade 几何为派生常量,随下列 state 一并重建
+  }, [mono, total, sampleRate, barsVisible, vStart, trimStartBar, trimEndBar, beatsBar, gridBars, srcSecAt, outBarAt, analysis.onsets, fadeOutBars, fadeSilenceBars, fadeDragging, fadeHover]);
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => {
@@ -344,25 +407,32 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const commitNow = () => setCommitTick((t) => t + 1);
   const onDown = (e: React.PointerEvent) => {
     const stage = stageRef.current!;
-    const W = stage.clientWidth;
+    const rectB = stage.getBoundingClientRect();
+    const W = stage.clientWidth, Hpx = stage.clientHeight;
     const pxPerBar = W / barsVisible;
-    const x = e.clientX - stage.getBoundingClientRect().left;
+    const x = e.clientX - rectB.left, y = e.clientY - rectB.top;
     const ob = vStart + x / pxPerBar;
     const xStart = (trimStartBar - vStart) * pxPerBar;
     const xEnd = (trimEndBar - vStart) * pxPerBar;
+    // §24 fade 两点优先命中(需 x+y 同时近 → 不抢 trim 锚的整条竖线):顶点(RULER_H+INSET)、底点(Hpx-INSET)
+    const xFadeStart = (fadeStartBar - vStart) * pxPerBar, xFadeEnd = (fadeEndBar - vStart) * pxPerBar;
     let mode: DragMode;
-    if (Math.abs(x - xEnd) <= ANCHOR_HIT) mode = 'trimEnd';
+    if (Math.hypot(x - xFadeStart, y - (RULER_H + FADE_INSET)) <= FADE_DOT_HIT) mode = 'fadeStart';
+    else if (hasFade && Math.hypot(x - xFadeEnd, y - (Hpx - FADE_INSET)) <= FADE_DOT_HIT) mode = 'fadeEnd';
+    else if (Math.abs(x - xEnd) <= ANCHOR_HIT) mode = 'trimEnd';
     else if (Math.abs(x - xStart) <= ANCHOR_HIT) mode = 'trimStart';
     else if (e.shiftKey) mode = 'stretch';
     else {
       // 空白/身体区不平移波形(起播位置只由绿色起始线决定);记为点击候选,松手没怎么动 = 试听一次。
-      // 可拖出且在身体区(armed)时不夺指针捕获 —— 否则会压住原生 HTML5 拖拽,波形就拖不出去。
-      if (!(onDragOut && armed)) (e.target as Element).setPointerCapture(e.pointerId);
+      // 可拖出时身体区永不夺指针捕获 —— 捕获会压住原生 HTML5 拖拽。轻点(按下没动)仍走 clickCand 试听,一动就起原生 drag。
+      // 不再看异步的 armed:否则「按太快 armed 还没就位 → draggable=false → 拖不出去」(经常拖不上 pad 的根因)。
+      if (!onDragOut) (e.target as Element).setPointerCapture(e.pointerId);
       clickCand.current = { x: e.clientX, y: e.clientY };
       return;
     }
     (e.target as Element).setPointerCapture(e.pointerId);
     draggingRef.current = true;
+    if (mode === 'fadeStart' || mode === 'fadeEnd') setFadeDragging(true);
     drag.current = { mode, grabSrcSec: srcSecAt(ob), anchorSrcSec0: anchorSrcSec, secPerBar0: secPerBar, grabBarOffset: trimStartBar - ob, loopLen0: trimEndBar - trimStartBar };
     applyDrag(e.clientX);
   };
@@ -383,7 +453,11 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     } else if (d.mode === 'trimEnd') {
       const s = snapGrid(ob);
       const capped = maxBars != null ? Math.min(trimStartBar + maxBars, s) : s; // collage:loop 不得长过到下一片的空档
-      setTrimEndBar(Math.max(trimStartBar + gridBars, capped)); // 吸附到相对起点的网格 → 长度=网格整数倍;可超出音频(补零)
+      const ne = Math.max(trimStartBar + gridBars, capped);
+      setTrimEndBar(ne); // 吸附到相对起点的网格 → 长度=网格整数倍;可超出音频(补零)
+      const nm = (ne - trimStartBar) / 2; // loop 变短 → fade 不得超过新后半;把 state 也夹回去(否则 loop 再变长会复活旧值,与已落库的夹后值背离)
+      setFadeOutBars((f) => Math.min(f, nm));
+      setFadeSilenceBars((f) => Math.min(f, nm));
     } else if (d.mode === 'stretch') {
       // 支点 = trim 起点,抓住的源点跟随光标 → 改 secPerBar;锚定到源速 ±半个八度(超出走 ÷2/×2)
       const pivotSrc = srcSecAt(trimStartBar);
@@ -394,6 +468,17 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
         setAnchorSrcSec(pivotSrc);
         setSecPerBar(sp);
       }
+    } else if (d.mode === 'fadeStart') {
+      // 顶点:无极(不吸网格),夹在 [loop 中点, 结束线];越过底点则把底点一起右推(顶点不可在底点右侧)。
+      // 允许一路拉到结束线 → fadeOut=0 = 取消淡出(即便此前有静音尾也能彻底清掉)。
+      const fs = Math.max(fadeMidBar, Math.min(trimEndBar, ob));
+      const newOut = trimEndBar - fs;
+      setFadeOutBars(newOut);
+      if (fadeSilence > newOut) setFadeSilenceBars(newOut); // 底点不能落在顶点左侧 → 顶点推着底点走
+    } else if (d.mode === 'fadeEnd') {
+      // 底点:无极,夹在 [max(loop 中点, 顶点), 结束线];往左拉 = 在 loop 结束前就到静音(尾巴留空)。
+      const fe = Math.max(Math.max(fadeMidBar, fadeStartBar), Math.min(trimEndBar, ob));
+      setFadeSilenceBars(trimEndBar - fe);
     }
   };
   const onMove = (e: React.PointerEvent) => {
@@ -403,23 +488,33 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     // 悬停光标:锚点附近(或按住 Shift 变速)= 横向拖拽箭头;波形身体(可拖出时)= 抓手;其余 = 喇叭(CSS)
     const stage = stageRef.current;
     if (stage) {
+      const rectB = stage.getBoundingClientRect();
       const pxPerBar = stage.clientWidth / barsVisible;
-      const x = e.clientX - stage.getBoundingClientRect().left;
+      const x = e.clientX - rectB.left, y = e.clientY - rectB.top;
+      const onStart = Math.hypot(x - (fadeStartBar - vStart) * pxPerBar, y - (RULER_H + FADE_INSET)) <= FADE_DOT_HIT;
+      const onEnd = hasFade && Math.hypot(x - (fadeEndBar - vStart) * pxPerBar, y - (stage.clientHeight - FADE_INSET)) <= FADE_DOT_HIT;
+      const nearFadeDot = onStart || onEnd;
+      const hov = onStart ? 'start' : onEnd ? 'end' : null;
+      if (hov !== fadeHover) setFadeHover(hov); // 悬停 → 外圈放大
       const nearAnchor = Math.abs(x - (trimEndBar - vStart) * pxPerBar) <= ANCHOR_HIT || Math.abs(x - (trimStartBar - vStart) * pxPerBar) <= ANCHOR_HIT;
-      const canDrag = !!onDragOut && !nearAnchor && !e.shiftKey; // 身体区可拖出(避开 trim 锚 / Shift 变速)→ 切到 draggable
+      const canDrag = !!onDragOut && !nearAnchor && !nearFadeDot && !e.shiftKey; // 身体区可拖出(避开 trim 锚 / fade 点 / Shift 变速)→ 切到 draggable
       if (canDrag !== armed) setArmed(canDrag);
-      stage.style.cursor = nearAnchor || e.shiftKey ? 'ew-resize' : canDrag ? 'grab' : '';
+      stage.style.cursor = nearFadeDot || nearAnchor || e.shiftKey ? 'ew-resize' : canDrag ? 'grab' : '';
     }
   };
-  // 波形身体拖出:HTML5 drag(目标 pad/轨复用现成 text/plain 落点);只在 armed(非锚、非 Shift)时允许,否则取消让位给 trim。
+  // 波形身体拖出:HTML5 drag(目标 pad/轨复用现成 text/plain 落点)。
+  // ⚠setPointerCapture 并不会压住原生 HTML5 drag —— 拖 trim 锚/Shift 变速时 dragstart 照样起,会把波形拖出、抢走 pointermove
+  // 导致 trim 失效。pointerdown 永远先于 dragstart 触发,故 onDown 设的 drag.current 在这儿一定已就位 → 以它判定「正在 trim/stretch」并拦下原生 drag。
+  // 只有真·身体区(drag.current 为空 + 非 Shift)才放行拖出;不再看异步 armed —— 那会丢掉「按下即拖」的首帧。
   const onStageDragStart = (e: React.DragEvent) => {
-    if (!onDragOut || !armed) { e.preventDefault(); return; }
+    if (!onDragOut || e.shiftKey || drag.current) { e.preventDefault(); return; }
     clickCand.current = null; // 拖出时不再当作轻点试听
     onDragOut(e);
   };
   const onUp = () => {
     if (clickCand.current) { clickCand.current = null; if (canPreview) onPreviewToggle(region); return; } // 空白区轻点 = 试听一次(不提交)
-    drag.current = null; draggingRef.current = false; if (compact) commitNow();
+    const wasFade = drag.current?.mode === 'fadeStart' || drag.current?.mode === 'fadeEnd';
+    drag.current = null; draggingRef.current = false; if (wasFade) setFadeDragging(false); if (compact) commitNow();
   };
 
   // 变调值框:上下拖(≈6px / 半音)+ 滚轮 ±1,clamp ±12。换掉原来的滑杆,贴 Live 的数字框交互。
@@ -468,13 +563,13 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     if (compact && draggingRef.current) return;
     const id = setTimeout(() => {
       const r = regionRef.current;
-      lastEmitSig.current = `${r.startSample}|${r.endSample}|${r.bars}|${r.semitones}`; // 记下这次 emit:回流时 init.sig 会匹配 → 不重置视图
+      lastEmitSig.current = `${r.startSample}|${r.endSample}|${r.bars}|${r.semitones}|${r.fadeOutBars}|${r.fadeSilenceBars}`; // 记下这次 emit:回流时 init.sig 会匹配 → 不重置视图
       playRef.current = { trimStartBar: viewRef.current.trimStartBar, loopLen: viewRef.current.loopLen }; // 提交 = 引擎换新 buffer(重 audition)→ 播放线几何同步切到新 loop
       onChangeRef.current(r);
     }, 200);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trimStartBar, trimEndBar, anchorOutBar, anchorSrcSec, secPerBar, semitones, commitTick]);
+  }, [trimStartBar, trimEndBar, anchorOutBar, anchorSrcSec, secPerBar, semitones, fadeOutBars, fadeSilenceBars, commitTick]);
   useEffect(() => () => stopPlayhead(), []);
 
   const slow = rate < 0.985, fast = rate > 1.015;
@@ -542,7 +637,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const main = (
       <div className="we-main">
         <div className={'we-stage' + (previewing && queued ? ' is-queued' : '')} ref={stageRef}
-          draggable={!!onDragOut && armed} onDragStart={onStageDragStart} onPointerLeave={() => { if (armed) setArmed(false); }}
+          draggable={!!onDragOut} onDragStart={onStageDragStart} onPointerLeave={() => { if (armed) setArmed(false); if (fadeHover) setFadeHover(null); }}
           onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}>
           <canvas ref={canvasRef} />
           <div className="we-playhead" ref={playheadRef} style={{ display: previewing ? 'block' : 'none' }} />
@@ -565,7 +660,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
           <div className="we-thumb" style={{ left: thumbLeft + '%', width: thumbW + '%' }} />
         </div>
 
-        <div className="we-hint">Click waveform = preview · drag green line = move start (free) · drag orange anchor = change length · Shift+drag = stretch · scroll / Alt+scroll = pan / zoom</div>
+        <div className="we-hint">Click waveform = preview · drag green line = move start (free) · drag orange anchor = change length · drag the cream dots (top/bottom) = fade-out tail · Shift+drag = stretch · scroll / Alt+scroll = pan / zoom</div>
       </div>
   );
 

@@ -7,16 +7,17 @@ import type { Session } from '@/contracts';
 import { defaultSends } from '@/contracts';
 
 // —— 扁平行(字段 = DB 列)——
-export interface NSession { id: string; name: string; index: number }
+export interface NSession { id: string; name: string; index: number; repeats: number; color: string | null }
 export interface NInstrument {
   id: string; sessionId: string; slot: number; type: string; label: string; color: string | null; icon: string | null; enabled: boolean;
-  gainDb: number; pan: number; eqLowDb: number; eqHighDb: number;
+  gainDb: number; pan: number; eqLowDb: number; eqMidDb: number; eqHighDb: number;
   collageBars: number | null; stepsPerBar: number | null; loopStartStep: number | null; bakedAssetId: string | null; sends: unknown;
 }
 export interface NClip {
   id: string; instrumentId: string; soundId: string; assetId: string;
   startSample: number; endSample: number; bars: number; timeMul: number | null; semitones: number;
-  gainDb: number; pan: number; eqLowDb: number; eqHighDb: number;
+  fadeOutBars: number | null; fadeSilenceBars: number | null;
+  gainDb: number; pan: number; eqLowDb: number; eqMidDb: number; eqHighDb: number;
   startStep: number | null; orderIndex: number;
 }
 
@@ -44,11 +45,11 @@ const hasAsset = (assetId: string) => typeof assetId === 'string' && assetId.len
 export function normalize(sessions: Session[]): Snapshot {
   const snap: Snapshot = { sessions: {}, instruments: {}, clips: {} };
   for (const s of sessions) {
-    snap.sessions[s.id] = { id: s.id, name: s.name, index: s.index };
+    snap.sessions[s.id] = { id: s.id, name: s.name, index: s.index, repeats: s.repeats ?? 1, color: s.color ?? null };
     for (const i of s.instruments) {
       snap.instruments[i.id] = {
         id: i.id, sessionId: s.id, slot: i.slot, type: i.payload.kind, label: i.label, color: i.color ?? null, icon: i.icon ?? null, enabled: !!i.enabled,
-        gainDb: i.mixer.gainDb, pan: i.mixer.pan, eqLowDb: i.mixer.eq.lowDb, eqHighDb: i.mixer.eq.highDb,
+        gainDb: i.mixer.gainDb, pan: i.mixer.pan, eqLowDb: i.mixer.eq.lowDb, eqMidDb: i.mixer.eq.midDb, eqHighDb: i.mixer.eq.highDb,
         collageBars: i.payload.kind === 'collage' ? i.payload.bars : null,
         stepsPerBar: i.payload.kind === 'collage' ? i.payload.stepsPerBar : null,
         loopStartStep: i.payload.kind === 'collage' ? i.payload.loopStartStep : null,
@@ -58,12 +59,12 @@ export function normalize(sessions: Session[]): Snapshot {
       if (i.payload.kind === 'sample') {
         const c = i.payload.clip;
         if (c.id && hasAsset(c.assetId)) {
-          snap.clips[c.id] = { id: c.id, instrumentId: i.id, soundId: c.soundId || '', assetId: c.assetId, startSample: Math.round(c.startSample), endSample: Math.round(c.endSample), bars: c.bars, timeMul: c.timeMul ?? null, semitones: c.semitones, gainDb: c.gainDb, pan: 0, eqLowDb: 0, eqHighDb: 0, startStep: null, orderIndex: 0 };
+          snap.clips[c.id] = { id: c.id, instrumentId: i.id, soundId: c.soundId || '', assetId: c.assetId, startSample: Math.round(c.startSample), endSample: Math.round(c.endSample), bars: c.bars, timeMul: c.timeMul ?? null, semitones: c.semitones, fadeOutBars: c.fadeOutBars ?? null, fadeSilenceBars: c.fadeSilenceBars ?? null, gainDb: c.gainDb, pan: 0, eqLowDb: 0, eqMidDb: 0, eqHighDb: 0, startStep: null, orderIndex: 0 };
         }
       } else {
         i.payload.clips.forEach((c, idx) => {
           if (c.id && hasAsset(c.assetId)) {
-            snap.clips[c.id] = { id: c.id, instrumentId: i.id, soundId: c.soundId || '', assetId: c.assetId, startSample: Math.round(c.startSample), endSample: Math.round(c.endSample), bars: c.bars, timeMul: c.timeMul ?? null, semitones: c.semitones, gainDb: c.gainDb, pan: c.pan ?? 0, eqLowDb: c.eqLowDb ?? 0, eqHighDb: c.eqHighDb ?? 0, startStep: c.startStep, orderIndex: idx };
+            snap.clips[c.id] = { id: c.id, instrumentId: i.id, soundId: c.soundId || '', assetId: c.assetId, startSample: Math.round(c.startSample), endSample: Math.round(c.endSample), bars: c.bars, timeMul: c.timeMul ?? null, semitones: c.semitones, fadeOutBars: c.fadeOutBars ?? null, fadeSilenceBars: c.fadeSilenceBars ?? null, gainDb: c.gainDb, pan: c.pan ?? 0, eqLowDb: c.eqLowDb ?? 0, eqMidDb: c.eqMidDb ?? 0, eqHighDb: c.eqHighDb ?? 0, startStep: c.startStep, orderIndex: idx };
           }
         });
       }
@@ -72,9 +73,9 @@ export function normalize(sessions: Session[]): Snapshot {
   return snap;
 }
 
-const SESS_FIELDS: (keyof NSession)[] = ['name', 'index'];
-const INST_FIELDS: (keyof NInstrument)[] = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'];
-const CLIP_FIELDS: (keyof NClip)[] = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'semitones', 'gainDb', 'pan', 'eqLowDb', 'eqHighDb', 'startStep', 'orderIndex'];
+const SESS_FIELDS: (keyof NSession)[] = ['name', 'index', 'repeats', 'color'];
+const INST_FIELDS: (keyof NInstrument)[] = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'];
+const CLIP_FIELDS: (keyof NClip)[] = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'];
 
 // 字段相等:标量直接比,sends(对象)按 JSON 比。
 function eq(a: unknown, b: unknown): boolean {

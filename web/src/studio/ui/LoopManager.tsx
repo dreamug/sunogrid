@@ -2,7 +2,7 @@
 // 左列:Suno 生成(控件)+ 素材库(两级卡片:一级=全混变体,二级=分离出的乐器轨,凹陷一层、可折叠)。
 import { useState } from 'react';
 import type { GenView } from '../useLoopMachine';
-import { SunoStatus } from '@/studio/ui/SunoStatus';
+import { SunoStatus, type SunoConnState } from '@/studio/ui/SunoStatus';
 import { TransportIcon } from '@/studio/ui/glyphs';
 
 interface Props {
@@ -29,6 +29,7 @@ interface Props {
   onAssignNext: (id: string) => void;
   onSeparate: (id: string) => void;
   onRetryGen?: (id: string) => void;   // 失败重试(studio 提供;loop 机不传则不显示)
+  onCancelGen?: (id: string) => void;  // 取消生成中的整组(随时干掉,不管落了几条变体)
   onDeleteGen?: (id: string) => void;  // 删除整组生成
   onDeleteSound?: (id: string) => void; // 软删单条素材/分轨
   stemServiceUp: boolean | null;
@@ -107,6 +108,7 @@ export function LoopManager(p: Props) {
   // 变体全被软删后的 complete 空壳不再展示(避免无内容、无操作的孤卡)。
   const gens = p.gens.filter((g) => !(g.status === 'complete' && g.sounds.length === 0));
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({}); // 变体 id → 二级收起
+  const [sunoState, setSunoState] = useState<SunoConnState>('checking'); // 连接灯 → 红灯时禁用生成
   const toggle = (id: string) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
   // ▶ 三态:warm-up=转圈、在响=均衡条(点了停)、空闲=▶。
   const playInner = (id: string) => {
@@ -135,7 +137,7 @@ export function LoopManager(p: Props) {
               <label className="gbpm" title="Generation BPM; syncs from master BPM once when it changes, editable after">
                 <input type="number" min={40} max={220} value={p.genBpm} onChange={(e) => p.onGenBpm(Number(e.target.value))} />
               </label>
-              <SunoStatus />
+              <SunoStatus onState={setSunoState} />
             </div>
           </div>
           <textarea
@@ -147,7 +149,12 @@ export function LoopManager(p: Props) {
           />
           <div className="gen-keyrow">
             <KeyKeyboard value={p.genKey} onChange={p.onGenKey} />
-            <button className="gen-go" onClick={p.onGenerate} title="Generate → library">GO</button>
+            <button
+              className="gen-go"
+              onClick={p.onGenerate}
+              disabled={sunoState === 'problem'}
+              title={sunoState === 'problem' ? 'Suno not connected — check the status light before generating' : 'Generate → library'}
+            >GO</button>
           </div>
         </div>
       </section>
@@ -182,7 +189,11 @@ export function LoopManager(p: Props) {
                       })}
                     </div>
                     <div className="gb-bar"><i /></div>
-                    <div className="gvar-row"><span className="sg-spin sm" aria-hidden="true" /><span>{g.sounds.length > 0 ? `${g.sounds.length}/2 variants in` : 'Generating 2 variants…'}</span></div>
+                    <div className="gvar-row">
+                      <span className="sg-spin sm" aria-hidden="true" />
+                      <span>{g.sounds.length > 0 ? `${g.sounds.length}/2 variants in` : 'Generating 2 variants…'}</span>
+                      {p.onCancelGen && <button className="gb-btn danger gcancel" onClick={() => p.onCancelGen!(g.id)} title="Cancel & discard this generation">Cancel</button>}
+                    </div>
                   </div>
                 )}
                 {g.status === 'failed' && (

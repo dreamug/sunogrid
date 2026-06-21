@@ -11,7 +11,7 @@ const del = (p: string) => fetch(p, { method: 'DELETE' }).then(J);
 
 export interface ApiGenPrefs { mode: 'sound' | 'advanced'; loop: boolean; bpm: number }
 export interface ApiGridPrefs { arrange: number; warp: number; snap: boolean }
-export interface ApiProject { id: string; name: string; masterBpm: number; masterKey: string | null; genPrefs: ApiGenPrefs | null; gridPrefs: ApiGridPrefs | null; fx: FxConfig | null; quantize: string; beatsPerBar: number }
+export interface ApiProject { id: string; name: string; masterBpm: number; masterKey: string | null; genPrefs: ApiGenPrefs | null; gridPrefs: ApiGridPrefs | null; fx: FxConfig | null; quantize: string; beatsPerBar: number; loopSong: boolean; isExample: boolean; owned: boolean }
 export interface ApiAsset { id: string; path: string; contentType: string }
 export interface ApiSound {
   id: string; name: string; mode: string; sourceBpm: number; musicalKey: string | null;
@@ -33,6 +33,9 @@ export const api = {
     list: (): Promise<ApiProject[]> => fetch('/api/projects').then(J),
     create: (b: Partial<ApiProject>): Promise<ApiProject> => post('/api/projects', b),
     update: (id: string, b: Partial<ApiProject>): Promise<ApiProject> => patch(`/api/projects/${id}`, b),
+    // §25 示例项目:进入示例 → 写时复制出我的副本(返回副本 id);把示例从我的列表隐藏。
+    fork: (id: string): Promise<{ id: string; resumed: boolean }> => post(`/api/projects/${id}/fork`, {}),
+    dismiss: (id: string): Promise<{ ok: boolean }> => post(`/api/projects/${id}/dismiss`, {}),
   },
   gens: {
     list: (projectId: string): Promise<ApiGen[]> => fetch(`/api/gens?projectId=${projectId}`).then(J),

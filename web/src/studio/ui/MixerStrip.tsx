@@ -1,8 +1,9 @@
 'use client';
-// 单 sample 乐器的 mixer 外壳 —— 最左竖排:满高推子(+实时电平表) + 一列竖排旋钮(PAN / EQ HI / EQ LO)。
+// 单 sample 乐器的 mixer 外壳 —— GAIN 列:PAN 旋钮在上 + 压缩推子(+实时电平表)在下;EQ 列:三段竖排旋钮(EQ HI / MID / LO)。PAN 上移、推子压矮是为了不抬高整条高度。
 // 旋钮/推子都可拖(竖向拖改值,双击复位)。onStart 在拖动开始压一次撤销快照,onChange 实时改。配色走 app 暗色主题。
 import { useRef } from 'react';
 import type { InstrumentSends, Mixer } from '@/contracts';
+import { EQ_DB_RANGE } from '@/contracts';
 import type { StudioEngine } from '@/audio/studioEngine';
 import { useVoiceLevel } from './live';
 
@@ -10,18 +11,19 @@ const CLAY = '#c2724f';
 const TRACK = '#39352f';
 
 function Knob({ label, value, min, max, def = 0, fmt, onStart, onChange }: { label: string; value: number; min: number; max: number; def?: number; fmt: (v: number) => string; onStart: () => void; onChange: (v: number) => void }) {
+  const v = Number.isFinite(value) ? value : def; // 兜底:缺字段/旧数据传进 undefined/NaN 不能让 SVG 坐标变 NaN(整条 mixer 崩)
   const st = useRef({ y: 0, v: 0 });
   const down = (e: React.PointerEvent) => {
     e.preventDefault();
     try { (e.target as Element).setPointerCapture?.(e.pointerId); } catch { /* 合成事件/无效 pointerId */ }
     onStart();
-    st.current = { y: e.clientY, v: value };
+    st.current = { y: e.clientY, v };
     const move = (ev: PointerEvent) => { const dv = ((st.current.y - ev.clientY) / 140) * (max - min); onChange(Math.max(min, Math.min(max, st.current.v + dv))); };
     const up = (ev: PointerEvent) => { (e.target as Element).releasePointerCapture?.(ev.pointerId); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
-  const norm = (value - min) / (max - min);
+  const norm = (v - min) / (max - min);
   const a0 = -135, a1 = 135, ang = a0 + norm * (a1 - a0);
   const pt = (deg: number, r: number) => [24 + r * Math.sin((deg * Math.PI) / 180), 24 - r * Math.cos((deg * Math.PI) / 180)];
   const [sx, sy] = pt(a0, 17), [ex, ey] = pt(a1, 17), [vx, vy] = pt(ang, 17), [cx, cy] = pt(ang, 6.5), [lx, ly] = pt(ang, 15.5);
@@ -35,7 +37,7 @@ function Knob({ label, value, min, max, def = 0, fmt, onStart, onChange }: { lab
         <line x1={cx} y1={cy} x2={lx} y2={ly} stroke="#ece9e3" strokeWidth="2" strokeLinecap="round" />
       </svg>
       <span style={{ fontSize: 8.5, letterSpacing: '.05em', color: '#6f6a60' }}>{label}</span>
-      <span style={{ fontSize: 9.5, color: '#ece9e3', fontFamily: 'ui-monospace,monospace' }}>{fmt(value)}</span>
+      <span style={{ fontSize: 9.5, color: '#ece9e3', fontFamily: 'ui-monospace,monospace' }}>{fmt(v)}</span>
     </div>
   );
 }
@@ -56,7 +58,7 @@ function Fader({ value, min, max, def = 0, getLevel, live, onStart, onChange }: 
     window.addEventListener('pointerup', up);
   };
   return (
-    <div style={{ display: 'flex', gap: 4, alignItems: 'stretch', height: 150 }}>
+    <div style={{ display: 'flex', gap: 4, alignItems: 'stretch', height: 90 }}>
       <div ref={trackRef} onPointerDown={down} onDoubleClick={() => { onStart(); onChange(def); }} style={{ position: 'relative', width: 22, cursor: 'ns-resize', touchAction: 'none' }}>
         <div style={{ position: 'absolute', left: 9, width: 4, top: 0, bottom: 0, background: TRACK, borderRadius: 2 }} />
         <div style={{ position: 'absolute', left: 9, width: 4, bottom: 0, height: `${norm * 100}%`, background: CLAY, borderRadius: 2 }} />
@@ -80,22 +82,31 @@ export function MixerStrip({ mixer, onMixer, sends, onSends, engine, voiceId, pl
   return (
     <div style={{ flex: 'none', borderRight: '1px solid var(--line)', padding: '12px', display: 'flex', flexDirection: 'column', gap: 9, background: 'var(--bg-1)' }}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-          <Fader value={mixer.gainDb} min={-24} max={6} def={0} getLevel={getLevel} live={!!playing} onStart={begin} onChange={(v) => onMixer({ gainDb: Math.round(v) })} />
-          <span style={{ fontSize: 8.5, letterSpacing: '.05em', color: '#6f6a60' }}>GAIN</span>
-          <span style={{ fontSize: 9.5, color: 'var(--tx)', fontFamily: 'var(--mono)' }}>{Math.round(mixer.gainDb)}dB</span>
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+        {/* GAIN 列:PAN 旋钮在上,压缩推子在下(总高与右侧 3 旋钮列对齐 → 不抬高整条) */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 7 }}>
           <Knob label="PAN" value={mixer.pan} min={-1} max={1} def={0} fmt={(v) => v.toFixed(1)} onStart={begin} onChange={(v) => onMixer({ pan: Math.round(v * 20) / 20 })} />
-          <Knob label="EQ HI" value={mixer.eq.highDb} min={-12} max={12} def={0} fmt={(v) => `${Math.round(v)}`} onStart={begin} onChange={(v) => onMixer({ eq: { ...mixer.eq, highDb: Math.round(v) } })} />
-          <Knob label="EQ LO" value={mixer.eq.lowDb} min={-12} max={12} def={0} fmt={(v) => `${Math.round(v)}`} onStart={begin} onChange={(v) => onMixer({ eq: { ...mixer.eq, lowDb: Math.round(v) } })} />
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+            <Fader value={mixer.gainDb} min={-24} max={6} def={0} getLevel={getLevel} live={!!playing} onStart={begin} onChange={(v) => onMixer({ gainDb: Math.round(v) })} />
+            <span style={{ fontSize: 8.5, letterSpacing: '.05em', color: '#6f6a60' }}>GAIN</span>
+            <span style={{ fontSize: 9.5, color: 'var(--tx)', fontFamily: 'var(--mono)' }}>{Math.round(mixer.gainDb)}dB</span>
+          </div>
+        </div>
+        {/* EQ 列:三段 HI / MID / LO(频率高→低自上而下) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+          <Knob label="EQ HI" value={mixer.eq.highDb} min={-EQ_DB_RANGE} max={EQ_DB_RANGE} def={0} fmt={(v) => `${Math.round(v)}`} onStart={begin} onChange={(v) => onMixer({ eq: { ...mixer.eq, highDb: Math.round(v) } })} />
+          <Knob label="EQ MID" value={mixer.eq.midDb} min={-EQ_DB_RANGE} max={EQ_DB_RANGE} def={0} fmt={(v) => `${Math.round(v)}`} onStart={begin} onChange={(v) => onMixer({ eq: { ...mixer.eq, midDb: Math.round(v) } })} />
+          <Knob label="EQ LO" value={mixer.eq.lowDb} min={-EQ_DB_RANGE} max={EQ_DB_RANGE} def={0} fmt={(v) => `${Math.round(v)}`} onStart={begin} onChange={(v) => onMixer({ eq: { ...mixer.eq, lowDb: Math.round(v) } })} />
         </div>
         {sends && onSends && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 7, paddingLeft: 11, borderLeft: '1px solid var(--line)' }} title="Aux sends to the master effects (FX rack)">
-            <Knob label="DIST" value={sends.dist} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ dist: s2(v) })} />
-            <Knob label="DLY" value={sends.delay} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ delay: s2(v) })} />
-            <Knob label="REV" value={sends.reverb} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ reverb: s2(v) })} />
-          </div>
+          <>
+            {/* 分隔线:撑满行高 + 负 margin 溢出 padding(12px)→ 抵到面板上下内边缘 */}
+            <div style={{ alignSelf: 'stretch', width: 1, margin: '-12px 0', background: 'var(--line)', flex: 'none' }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }} title="Aux sends to the master effects (FX rack)">
+              <Knob label="DIST" value={sends.dist} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ dist: s2(v) })} />
+              <Knob label="DLY" value={sends.delay} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ delay: s2(v) })} />
+              <Knob label="REV" value={sends.reverb} min={0} max={1} def={0} fmt={pctFmt} onStart={beginS} onChange={(v) => onSends({ reverb: s2(v) })} />
+            </div>
+          </>
         )}
       </div>
     </div>

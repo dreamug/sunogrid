@@ -2,7 +2,7 @@
 // 自驱动「活叶子」—— 高频视觉(电平表/走带位置/播放头/电平条)各自订阅一个**共享单 rAF**,
 // 每帧只重渲自己这片小组件,不再让 StudioApp 整树每帧 setTick。离散态(voice on/off/呼吸、
 // 编辑器布尔)仍由父树在用户动作 + 引擎 onChange 边界跃迁时重渲(见 studioEngine.onChange)。
-import { memo, useEffect, useReducer } from 'react';
+import { memo, useEffect, useReducer, useRef } from 'react';
 import type { StudioEngine } from '@/audio/studioEngine';
 
 // --- 共享单 rAF:所有活跃叶子每帧被叫一次;无人订阅则停表 ---
@@ -85,6 +85,51 @@ export function CollageHead({ engine, id, playing }: { engine: StudioEngine | nu
     <div className="cwave" aria-hidden="true">
       <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${(ph * 100).toFixed(1)}%`, width: 1, background: '#fff', opacity: 0.9, pointerEvents: 'none' }} />
     </div>
+  );
+}
+
+/** §20 场景播放态(自驱动,类 pad 播放头但无波形):
+ *  Live —— 卡内一条线随 loop 一直扫(period = 本场 bar 数);Song —— 线在"当前第几遍"那格内扫 + 该格柔和同色高亮,逐格推进。 */
+export function SessionPlayhead({ engine, mode, startBar, barsPerRep, repeats, playing, cardW = 168, cellW = 40 }: { engine: StudioEngine | null; mode: 'live' | 'song'; startBar: number; barsPerRep: number; repeats: number; playing: boolean; cardW?: number; cellW?: number }) {
+  useFrame(playing && !!engine && barsPerRep > 0);
+  const ref = useRef<HTMLDivElement>(null);
+  // 播放时横向滚动跟随播放头:独立 rAF 循环(只要 playing 就每帧读 DOM 把播放头保持在视口内,边缘留白触发滚动),不依赖重渲时机。
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    const tick = () => {
+      const line = ref.current;
+      const sc = line?.closest('.lane-scroll') as HTMLElement | null;
+      if (line && sc && sc.scrollWidth > sc.clientWidth + 1) {
+        const l = line.getBoundingClientRect(), s = sc.getBoundingClientRect(), m = 90;
+        if (l.left < s.left + m) sc.scrollLeft -= (s.left + m - l.left);
+        else if (l.right > s.right - m) sc.scrollLeft += (l.right - (s.right - m));
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
+  if (!playing || !engine || barsPerRep <= 0) return null;
+  const pos = engine.songPosBars();
+  const frac = (x: number) => ((x % barsPerRep) + barsPerRep) % barsPerRep / barsPerRep; // loop 内相位 0..1
+  if (mode === 'live') {
+    const x = frac(pos) * cardW; // 卡内 loop 相位 → 像素
+    return (
+      <>
+        <div className="ph" style={{ left: 0, width: x }} aria-hidden="true" />{/* 已播进度色块(类 pad fill) */}
+        <div ref={ref} className="sphead" style={{ left: x }} aria-hidden="true" />{/* 播放头线 */}
+      </>
+    );
+  }
+  const rel = pos - startBar;
+  if (rel < 0) return null;
+  const idx = Math.max(0, Math.min(repeats - 1, Math.floor(rel / barsPerRep)));
+  return (
+    <>
+      <div className="ph" style={{ left: cardW + idx * cellW, width: cellW }} aria-hidden="true" />
+      <div ref={ref} className="sphead" style={{ left: cardW + idx * cellW + frac(rel) * cellW }} aria-hidden="true" />
+    </>
   );
 }
 

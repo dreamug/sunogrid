@@ -5,8 +5,8 @@ import { db } from '@/lib/db';
 import { getCurrentUser, unauthorized } from '@/lib/auth';
 import type { Op, NInstrument, NClip } from '@/studio/sync';
 
-const INST_COLS = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'] as const;
-const CLIP_COLS = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'semitones', 'gainDb', 'pan', 'eqLowDb', 'eqHighDb', 'startStep', 'orderIndex'] as const;
+const INST_COLS = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'] as const;
+const CLIP_COLS = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'] as const;
 
 const pick = <T extends object>(o: T, cols: readonly (keyof T)[]): Record<string, unknown> => {
   const out: Record<string, unknown> = {};
@@ -64,11 +64,11 @@ export async function POST(req: Request) {
       for (const op of ops) {
         switch (op.t) {
           case 'sess.add':
-            await tx.studioSession.create({ data: { id: op.row.id, projectId, name: op.row.name, index: op.row.index } });
+            await tx.studioSession.create({ data: { id: op.row.id, projectId, name: op.row.name, index: op.row.index, repeats: op.row.repeats ?? 1, color: op.row.color ?? null } });
             liveSessions.add(op.row.id);
             break;
           case 'sess.upd':
-            await tx.studioSession.updateMany({ where: { id: op.id, projectId }, data: pick(op.fields, ['name', 'index']) });
+            await tx.studioSession.updateMany({ where: { id: op.id, projectId }, data: pick(op.fields, ['name', 'index', 'repeats', 'color']) });
             break;
           case 'sess.del':
             await tx.studioSession.deleteMany({ where: { id: op.id, projectId } });
@@ -100,6 +100,7 @@ export async function POST(req: Request) {
       }
     });
   } catch (e) {
+    console.error('[studio/ops] apply failed:', e); // 全文落服务端日志(响应里截断不便排查)
     return Response.json({ error: e instanceof Error ? e.message : 'apply failed' }, { status: 500 });
   }
   // 静默丢弃过 add(孤儿父)→ 这是 bug,不是正常路径。打日志 + 据实回报 skipped,让客户端别再当"已保存"。

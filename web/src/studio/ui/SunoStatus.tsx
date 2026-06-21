@@ -4,9 +4,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { sunoBridge } from '@/studio/sunoBridge';
 
-type State = 'checking' | 'ready' | 'problem';
+export type SunoConnState = 'checking' | 'ready' | 'problem';
+type State = SunoConnState;
 
-export function SunoStatus() {
+// onState:把连接状态上报给父级(生成按钮用来在红灯时 disable)。
+export function SunoStatus({ onState }: { onState?: (s: SunoConnState) => void } = {}) {
   const [st, setSt] = useState<State>('checking');
   const [msg, setMsg] = useState({ title: 'Checking…', detail: 'Connecting to the Suno plugin…' });
   const [open, setOpen] = useState(false);
@@ -31,6 +33,7 @@ export function SunoStatus() {
   const setMsgSt = (s: State, title: string, detail: string) => { setSt(s); setMsg({ title, detail }); };
 
   useEffect(() => { probe(); }, []);
+  useEffect(() => { onState?.(st); }, [st, onState]); // 状态变化上报父级
   // 点外面关 popover
   useEffect(() => {
     if (!open) return;

@@ -9,11 +9,11 @@ import { defaultSends } from '@/contracts';
 // —— DB 行 → contract 形状 ——
 type DbClip = {
   id: string; soundId: string | null; assetId: string; startSample: number; endSample: number;
-  bars: number; timeMul: number | null; semitones: number; gainDb: number; pan: number; eqLowDb: number; eqHighDb: number; startStep: number | null; orderIndex: number;
+  bars: number; timeMul: number | null; semitones: number; fadeOutBars: number | null; fadeSilenceBars: number | null; gainDb: number; pan: number; eqLowDb: number; eqMidDb: number; eqHighDb: number; startStep: number | null; orderIndex: number;
 };
 type DbInstrument = {
   id: string; slot: number; type: string; label: string; color: string | null; icon: string | null; enabled: boolean;
-  gainDb: number; pan: number; eqLowDb: number; eqHighDb: number;
+  gainDb: number; pan: number; eqLowDb: number; eqMidDb: number; eqHighDb: number;
   collageBars: number | null; stepsPerBar: number | null; loopStartStep: number | null; bakedAssetId: string | null; sends: unknown; clips: DbClip[];
 };
 
@@ -22,7 +22,7 @@ const EMPTY_CLIP: Clip = { soundId: '', assetId: '', startSample: 0, endSample: 
 function clipFromDb(c: DbClip): Clip {
   return {
     id: c.id, soundId: c.soundId ?? '', assetId: c.assetId, startSample: c.startSample, endSample: c.endSample,
-    bars: c.bars, ...(c.timeMul != null ? { timeMul: c.timeMul } : {}), semitones: c.semitones, gainDb: c.gainDb, pan: c.pan, eqLowDb: c.eqLowDb, eqHighDb: c.eqHighDb,
+    bars: c.bars, ...(c.timeMul != null ? { timeMul: c.timeMul } : {}), semitones: c.semitones, ...(c.fadeOutBars != null ? { fadeOutBars: c.fadeOutBars } : {}), ...(c.fadeSilenceBars != null ? { fadeSilenceBars: c.fadeSilenceBars } : {}), gainDb: c.gainDb, pan: c.pan, eqLowDb: c.eqLowDb, eqMidDb: c.eqMidDb, eqHighDb: c.eqHighDb,
   };
 }
 
@@ -40,7 +40,7 @@ function payloadFromDb(i: DbInstrument): InstrumentPayload {
 function instrumentFromDb(i: DbInstrument): Instrument {
   return {
     id: i.id, slot: i.slot, label: i.label, color: i.color, icon: i.icon,
-    mixer: { gainDb: i.gainDb, pan: i.pan, eq: { lowDb: i.eqLowDb, highDb: i.eqHighDb } },
+    mixer: { gainDb: i.gainDb, pan: i.pan, eq: { lowDb: i.eqLowDb, midDb: i.eqMidDb ?? 0, highDb: i.eqHighDb } },
     sends: i.sends && typeof i.sends === 'object' && !Array.isArray(i.sends) ? (i.sends as Instrument['sends']) : defaultSends(),
     enabled: i.enabled, payload: payloadFromDb(i),
   };
@@ -64,18 +64,16 @@ export async function GET(req: Request) {
   // 那批 id 不在库 → 之后 inst.add 引用孤儿 sessionId,被 /api/studio/ops 静默丢弃(返回 200 却 0 落库)——
   // 新工程的 pad 永远存不进去就是这么来的。确定性 id + skipDuplicates → 并发 GET(StrictMode 双挂载)也不会建重复。
   if (sessions.length === 0) {
+    // 新工程只落地 1 个默认会话(确定性 id + skipDuplicates → StrictMode 双挂载/并发 GET 也不会建重复)。
     await db.studioSession.createMany({
-      data: [
-        { id: `${projectId}-verse`, projectId, name: 'Verse', index: 0 },
-        { id: `${projectId}-break`, projectId, name: 'Break', index: 1 },
-      ],
+      data: [{ id: `${projectId}-scene1`, projectId, name: 'Scene 1', index: 0, color: null }],
       skipDuplicates: true,
     });
     sessions = await db.studioSession.findMany(query);
   }
   return Response.json(
     sessions.map((s) => ({
-      id: s.id, name: s.name, index: s.index,
+      id: s.id, name: s.name, index: s.index, repeats: s.repeats ?? 1, color: s.color ?? null,
       instruments: (s.instruments as unknown as DbInstrument[]).map(instrumentFromDb),
     })),
   );

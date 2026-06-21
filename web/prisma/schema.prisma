@@ -18,17 +18,24 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Role {
+  USER
+  SUPER_ADMIN // §25:能把项目标成示例母版的站长角色
+}
+
 model User {
   id           String   @id @default(cuid())
   username     String   @unique
   passwordHash String
+  role         Role     @default(USER) // §25 示例项目:只有 SUPER_ADMIN 能标记/取消示例
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  projects Project[]
-  sounds   Sound[]
-  gens     Gen[]
-  sessions AuthSession[]
+  projects          Project[]
+  sounds            Sound[]
+  gens              Gen[]
+  sessions          AuthSession[]
+  exampleDismissals ExampleDismissal[]
 }
 
 model AuthSession {
@@ -54,6 +61,12 @@ model Project {
   genPrefs    Json?    // 生成窗口偏好 {mode,loop,bpmLinked,bpmManual} —— 形状演进中,JSON 逃生口(PRODUCT §15.A)
   gridPrefs   Json?    // 编辑器网格偏好 {arrange,warp,snap} —— UI 偏好,JSON 逃生口(PRODUCT §15.A),记住不重置
   fx          Json?    // 主总线效果器 {distortion,delay,reverb} —— 固定小配置,JSON 逃生口(PRODUCT §15.A/§17)
+  loopSong    Boolean  @default(false) // §20 Song 线性模式:播到时间线末尾后循环整首
+
+  // —— §25 示例项目 ——
+  isExample           Boolean @default(false) // SUPER_ADMIN 标记:全局共享只读母版
+  forkedFromExampleId String? // 副本回链母版(去重 resume + 溯源);普通项目为 null
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -62,7 +75,20 @@ model Project {
   originatedSounds Sound[]         @relation("SoundOrigin")
   studioSessions   StudioSession[]
 
+  @@unique([userId, forkedFromExampleId]) // §25 每个用户对每个母版至多一份副本(MySQL 多 NULL 互不冲突 → 普通项目不受限)
   @@index([userId])
+  @@index([isExample])
+}
+
+// §25 示例项目:用户把某个示例母版"从我的列表移除"= 这里加一行(per-user 隐藏,不删母版/不删任何副本)。
+model ExampleDismissal {
+  userId    String
+  projectId String // 指向 isExample=true 的母版
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, projectId])
+  @@index([projectId])
 }
 
 model Asset {
@@ -192,6 +218,8 @@ model StudioSession {
   project     Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   name        String
   index       Int
+  repeats     Int                @default(1) // §20 Song 线性模式:本场景连播次数(Live 模式忽略)
+  color       String?            // §20 场景标识色(rail 彩色卡)
   instruments StudioInstrument[]
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
@@ -214,6 +242,7 @@ model StudioInstrument {
   gainDb   Float @default(0)
   pan      Float @default(0)
   eqLowDb  Float @default(0)
+  eqMidDb  Float @default(0)
   eqHighDb Float @default(0)
 
   // —— collage 专属(sample 为 null)——
@@ -245,10 +274,13 @@ model Clip {
   bars        Float
   timeMul     Float? // ÷2/×2 快捷;null/1=原速
   semitones   Float  @default(0)
-  // per-片 mixer(arrange 层;collage 片用,sample 片走乐器 mixer 故为 0)。gain + pan + 两段 shelf EQ,与 Mixer 同口径。
+  fadeOutBars     Float? // §24 clip 尾淡出起点(距 loop 尾的小节数,顶点);null/0=无淡出
+  fadeSilenceBars Float? // §24 淡出静音尾(到零点后到 loop 尾的小节数,底点);null/0=淡到正好结尾
+  // per-片 mixer(arrange 层;collage 片用,sample 片走乐器 mixer 故为 0)。gain + pan + 三段 EQ(low shelf / mid peaking / high shelf),与 Mixer 同口径。
   gainDb      Float  @default(0)
   pan         Float  @default(0)
   eqLowDb     Float  @default(0)
+  eqMidDb     Float  @default(0)
   eqHighDb    Float  @default(0)
   startStep   Int? // null=sample 唯一片;有值=collage 轨上位置
   orderIndex  Int    @default(0)

@@ -5,8 +5,22 @@ import { getCurrentUser, unauthorized } from '@/lib/auth';
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return unauthorized();
-  const projects = await db.project.findMany({ where: { userId: user.id }, orderBy: { updatedAt: 'desc' } });
-  return Response.json(projects);
+  // §25 并集:我的项目 ∪ 未被我隐藏的示例母版(别人标的)。每行带 owned/isExample,前端据此决定 fork/删除/角标。
+  const dismissed = await db.exampleDismissal.findMany({ where: { userId: user.id }, select: { projectId: true } });
+  const dismissedIds = dismissed.map((d) => d.projectId);
+  const [own, examples] = await Promise.all([
+    db.project.findMany({ where: { userId: user.id }, orderBy: { updatedAt: 'desc' } }),
+    db.project.findMany({
+      where: { isExample: true, userId: { not: user.id }, id: { notIn: dismissedIds } },
+      orderBy: { updatedAt: 'desc' },
+    }),
+  ]);
+  // 示例排在前(新用户一进来就看见);owned 标志区分"我的(含我自己的母版)"vs"只读示例"。
+  const out = [
+    ...examples.map((p) => ({ ...p, owned: false })),
+    ...own.map((p) => ({ ...p, owned: true })),
+  ];
+  return Response.json(out);
 }
 
 export async function POST(req: Request) {

@@ -25,7 +25,7 @@ web/
 ```bash
 cd web
 npm install
-npm run dev        # http://localhost:3000
+npm run dev        # http://localhost:3007(本地固定 3007)
 npm run typecheck  # tsc --noEmit
 ```
 

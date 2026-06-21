@@ -10,7 +10,13 @@ import { SESSION_COOKIE } from './authConst';
 export { SESSION_COOKIE };
 const SESSION_DAYS = 30;
 
-export type SessionUser = { id: string; username: string };
+export type Role = 'USER' | 'SUPER_ADMIN';
+export type SessionUser = { id: string; username: string; role: Role };
+
+/** §25:能标记/取消示例项目的站长。 */
+export function isSuperAdmin(user: SessionUser | null): boolean {
+  return user?.role === 'SUPER_ADMIN';
+}
 
 export function hashPassword(pw: string): Promise<string> {
   return bcrypt.hash(pw, 10);
@@ -53,7 +59,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     await db.authSession.delete({ where: { token } }).catch(() => {});
     return null;
   }
-  return { id: session.user.id, username: session.user.username };
+  return { id: session.user.id, username: session.user.username, role: session.user.role as Role };
 }
 
 /** 401 JSON 响应。 */

@@ -1,6 +1,6 @@
 // 单个项目:GET / PATCH(改主BPM/量化/名) / DELETE。全部校验归属当前用户。
 import { db } from '@/lib/db';
-import { getCurrentUser, unauthorized } from '@/lib/auth';
+import { getCurrentUser, isSuperAdmin, unauthorized } from '@/lib/auth';
 
 type P = { params: Promise<{ id: string }> };
 
@@ -26,7 +26,13 @@ export async function PATCH(req: Request, { params }: P) {
   if (!guard.ok) return guard.res;
   const b = await req.json();
   const data: Record<string, unknown> = {};
-  for (const k of ['name', 'masterBpm', 'masterKey', 'genPrefs', 'gridPrefs', 'fx', 'quantize', 'beatsPerBar'] as const) if (k in b) data[k] = b[k];
+  for (const k of ['name', 'masterBpm', 'masterKey', 'genPrefs', 'gridPrefs', 'fx', 'quantize', 'beatsPerBar', 'loopSong'] as const) if (k in b) data[k] = b[k];
+  // §25:把项目标成/取消示例母版,只有 SUPER_ADMIN 能干(且只能标自己拥有的项目 —— ownedOr 已保证)。
+  if ('isExample' in b) {
+    const user = await getCurrentUser();
+    if (!isSuperAdmin(user)) return new Response('forbidden', { status: 403 });
+    data.isExample = !!b.isExample;
+  }
   const project = await db.project.update({ where: { id }, data });
   return Response.json(project);
 }

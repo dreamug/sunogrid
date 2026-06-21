@@ -3,7 +3,7 @@
 MV3 Chrome 插件:在你已登录的 suno.com 活会话里**驱动** Suno 生成(重放私有接口),并把能力**桥接给本地 app**(localhost)。token 全程不出浏览器。
 
 ```
-本地 app (localhost:3001)
+本地 app (localhost:3007)
   │ window.postMessage {source:'APP_SUNO', cmd, args}
   ▼  bridge.js (注入 localhost)
   │ chrome.runtime

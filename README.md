@@ -60,7 +60,7 @@ cd web
 npm install
 cp .env.example .env          # 填 DATABASE_URL(本机 MySQL)
 npx prisma db push            # 建库 / 建表
-npm run dev                   # 打开 http://localhost:3001/projects
+npm run dev                   # 打开 http://localhost:3007/projects(本地固定 3007)
 
 # 2) Suno 桥接插件(生成 loop 必需)
 #    chrome://extensions → 开启开发者模式 → 加载 suno-bridge/,并登录 Suno

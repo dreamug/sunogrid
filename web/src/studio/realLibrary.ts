@@ -4,7 +4,7 @@
 import type { ApiSound } from '@/studio/api';
 import { api, cdnUrl } from '@/studio/api';
 import type { Clip, CollageClip, Instrument, SampleWarp, Session } from '@/contracts';
-import { clipTimeMul, defaultMixer, defaultSends } from '@/contracts';
+import { clipTimeMul, defaultMixer, defaultSends, EQ_BANDS, fadeGain } from '@/contracts';
 
 let _ctx: AudioContext | null = null;
 const getCtx = () => (_ctx ??= new AudioContext());
@@ -28,14 +28,20 @@ async function decodedBuffer(assetId: string): Promise<AudioBuffer> {
   return buf;
 }
 
-export interface Region { startSample: number; endSample: number; bars: number; semitones: number }
+// fadeOutFrac/fadeSilenceFrac = 占 loop **整段**(渲染出的 buffer)的比例 0..0.5;在 region 层就换算成比例,
+// 这样 timeMul(buffer 拉长)时仍与编辑器里看到的"占后半多少"对齐,且 warpToBuffer 不必知道 bars/timeMul。
+export interface Region { startSample: number; endSample: number; bars: number; semitones: number; fadeOutFrac?: number; fadeSilenceFrac?: number }
+const fadeFrac = (bars: number | undefined, loopBars: number): number => (bars && bars > 0 && loopBars > 0 ? Math.max(0, Math.min(0.5, bars / loopBars)) : 0);
 export function regionFromSound(s: ApiSound): Region {
   const w = (s.warp || {}) as Record<string, number>;
   const a = (s.analysis || {}) as Record<string, number>;
-  if (typeof w.startSample === 'number' && typeof w.endSample === 'number') return { startSample: w.startSample, endSample: w.endSample, bars: w.bars ?? 1, semitones: w.semitones ?? 0 };
+  if (typeof w.startSample === 'number' && typeof w.endSample === 'number') {
+    const bars = w.bars ?? 1;
+    return { startSample: w.startSample, endSample: w.endSample, bars, semitones: w.semitones ?? 0, fadeOutFrac: fadeFrac(w.fadeOutBars, bars), fadeSilenceFrac: fadeFrac(w.fadeSilenceBars, bars) };
+  }
   return { startSample: a.startSample ?? 0, endSample: a.endSample ?? 0, bars: a.bars ?? 1, semitones: 0 };
 }
-export const regionFromClip = (c: Clip): Region => ({ startSample: c.startSample, endSample: c.endSample, bars: c.bars * clipTimeMul(c), semitones: c.semitones });
+export const regionFromClip = (c: Clip): Region => ({ startSample: c.startSample, endSample: c.endSample, bars: c.bars * clipTimeMul(c), semitones: c.semitones, fadeOutFrac: fadeFrac(c.fadeOutBars, c.bars), fadeSilenceFrac: fadeFrac(c.fadeSilenceBars, c.bars) });
 
 /** Sound.warp(JSON 种子)→ 强类型 SampleWarp(与 Clip 同形)。缺字段按 analysis 兜底;出身默认 auto。 */
 export function warpFromSound(s: ApiSound): SampleWarp {
@@ -49,21 +55,49 @@ export function warpFromSound(s: ApiSound): SampleWarp {
     bars: num(w.bars, a.bars ?? 1),
     timeMul: typeof w.timeMul === 'number' ? num(w.timeMul, 1) : undefined,
     semitones: num(w.semitones, 0),
+    fadeOutBars: typeof w.fadeOutBars === 'number' ? num(w.fadeOutBars, 0) : undefined,
+    fadeSilenceBars: typeof w.fadeSilenceBars === 'number' ? num(w.fadeSilenceBars, 0) : undefined,
     warpedBy: w.warpedBy === 'manual' ? 'manual' : 'auto',
   };
 }
 /** 由 Sound + 其种子 warp 合成一条独立 Clip 副本(无 id;预调喂 ClipEditor、建乐器 clone 都走它)。 */
 export function soundToClip(s: ApiSound): Clip {
   const w = warpFromSound(s);
-  return { soundId: s.id, assetId: s.assetId, startSample: w.startSample, endSample: w.endSample, bars: w.bars, timeMul: w.timeMul, semitones: w.semitones, gainDb: 0 };
+  return { soundId: s.id, assetId: s.assetId, startSample: w.startSample, endSample: w.endSample, bars: w.bars, timeMul: w.timeMul, semitones: w.semitones, fadeOutBars: w.fadeOutBars, fadeSilenceBars: w.fadeSilenceBars, gainDb: 0 };
 }
 
 const warpCache = new Map<string, AudioBuffer>();
-/** 把某条 Sound 的某 region warp 到 masterBpm（signalsmith；先查 warp-render 落盘缓存）。 */
-export async function warpToBuffer(s: ApiSound, masterBpm: number, region: Region): Promise<AudioBuffer> {
-  const sig = `${s.assetId}|${region.startSample}|${region.endSample}|${region.bars.toFixed(4)}|${region.semitones || 0}|${masterBpm}`;
+const lruBump = (k: string, v: AudioBuffer) => { warpCache.delete(k); warpCache.set(k, v); }; // 命中刷到最近端(真 LRU)
+const lruTrim = () => { if (warpCache.size > 40) warpCache.delete(warpCache.keys().next().value as string); };
+// 纯 warp 的缓存键(不含 fade):落盘渲染只存纯 warp,fade 在内存里后挂(见 applyFade)。
+const pureSig = (s: ApiSound, masterBpm: number, region: Region) => `${s.assetId}|${region.startSample}|${region.endSample}|${region.bars.toFixed(4)}|${region.semitones || 0}|${s.sourceBpm}|${masterBpm}`;
+
+/** clip 尾淡出:在纯 warp 出来的 buffer 尾巴乘一条隆起抛物线包络 1-t²(两点曲线:fadeStart→fadeEnd 由 1 降到 0,fadeEnd 之后到尾=静音)。
+ *  烘进 buffer 而非实时增益 → 与 trim/warp 同档离线,引擎 loop=true 时每圈循环自然淡尾(也顺手消循环接缝爆音)。不改源 buffer,返回新副本。 */
+function applyFade(base: AudioBuffer, outFrac: number, silFrac: number): AudioBuffer {
+  const dur = base.duration, SR = base.sampleRate, n = base.length;
+  const fadeStart = dur * (1 - outFrac);
+  const fadeEnd = dur * (1 - Math.min(silFrac, outFrac));
+  const span = Math.max(1e-6, fadeEnd - fadeStart);
+  const startIdx = Math.max(0, Math.min(n, Math.floor(fadeStart * SR))); // 淡出前整段不变 → 只处理这之后
+  const out = getCtx().createBuffer(base.numberOfChannels, n, SR);
+  for (let ch = 0; ch < base.numberOfChannels; ch++) {
+    const src = base.getChannelData(ch), dst = out.getChannelData(ch);
+    dst.set(src.subarray(0, startIdx)); // 不变前缀整段拷(不逐样本)
+    for (let i = startIdx; i < n; i++) {
+      const t = i / SR;
+      dst[i] = t >= fadeEnd ? 0 : src[i] * fadeGain((t - fadeStart) / span); // fadeGain = 隆起抛物线,与编辑器共用
+    }
+  }
+  return out;
+}
+
+/** 纯 warp(无 fade):某条 Sound 的某 region warp 到 masterBpm(signalsmith;先查 warp-render 落盘缓存)。 */
+async function warpPure(s: ApiSound, masterBpm: number, region: Region): Promise<AudioBuffer> {
+  // sourceBpm 决定拉伸比(喂 nativeBpm),必须进 key:否则同一 asset 的 sourceBpm 被重新分析/纠正后,旧 key 仍命中旧拉伸 = 放错速度/音高。
+  const sig = pureSig(s, masterBpm, region);
   const hit = warpCache.get(sig);
-  if (hit) return hit;
+  if (hit) { lruBump(sig, hit); return hit; }
   try {
     const found = await api.warpRender.get(sig);
     if (found) { const ab = await fetch(found.cdn).then((r) => r.arrayBuffer()); const audio = await getCtx().decodeAudioData(ab); warpCache.set(sig, audio); return audio; }
@@ -73,9 +107,22 @@ export async function warpToBuffer(s: ApiSound, masterBpm: number, region: Regio
   const sliced = sliceChannelsPadded(channels, region.startSample, region.endSample);
   const done = await warpClip({ id: sig, channels: sliced, sampleRate, nativeBpm: s.sourceBpm, targetBpm: masterBpm, semitones: region.semitones || 0, beatsPerBar: 4, conditioning: 'trust-tempo', targetBars: region.bars });
   const buf = toAudioBuffer(done);
-  warpCache.set(sig, buf);
-  if (warpCache.size > 32) warpCache.delete(warpCache.keys().next().value as string);
+  warpCache.set(sig, buf); lruTrim();
   return buf;
+}
+
+/** 把某条 Sound 的某 region warp 到 masterBpm,并按 region 上的 fade 比例后挂尾部淡出(命中纯 warp 缓存 + faded 缓存分开存)。 */
+export async function warpToBuffer(s: ApiSound, masterBpm: number, region: Region): Promise<AudioBuffer> {
+  const base = await warpPure(s, masterBpm, region);
+  const outFrac = Math.max(0, Math.min(0.5, region.fadeOutFrac ?? 0));
+  if (outFrac <= 1e-4) return base;
+  const silFrac = Math.max(0, Math.min(outFrac, region.fadeSilenceFrac ?? 0));
+  const fsig = `${pureSig(s, masterBpm, region)}|fo${outFrac.toFixed(4)}|fs${silFrac.toFixed(4)}`;
+  const fhit = warpCache.get(fsig);
+  if (fhit) { lruBump(fsig, fhit); return fhit; }
+  const faded = applyFade(base, outFrac, silFrac);
+  warpCache.set(fsig, faded); lruTrim();
+  return faded;
 }
 
 export interface RealStudio { sessions: Session[]; soundsById: Map<string, ApiSound>; collageSources: Map<string, AudioBuffer>; bpm: number; beatsPerBar: number }
@@ -110,8 +157,9 @@ export async function buildCollageBuffer(
     let tail: AudioNode = node;
     const g = ctx.createGain(); g.gain.value = Math.pow(10, c.gainDb / 20); tail.connect(g); tail = g; // per-片 gain
     if (c.pan) { const p = ctx.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, c.pan)); tail.connect(p); tail = p; } // per-片 pan
-    if (c.eqLowDb) { const f = ctx.createBiquadFilter(); f.type = 'lowshelf'; f.frequency.value = 400; f.gain.value = c.eqLowDb; tail.connect(f); tail = f; } // per-片 EQ low
-    if (c.eqHighDb) { const f = ctx.createBiquadFilter(); f.type = 'highshelf'; f.frequency.value = 2500; f.gain.value = c.eqHighDb; tail.connect(f); tail = f; } // per-片 EQ high
+    if (c.eqLowDb) { const f = ctx.createBiquadFilter(); f.type = 'lowshelf'; f.frequency.value = EQ_BANDS.lowFreq; f.gain.value = c.eqLowDb; tail.connect(f); tail = f; } // per-片 EQ low(频点/dB 与 studioEngine 共用 EQ_BANDS)
+    if (c.eqMidDb) { const f = ctx.createBiquadFilter(); f.type = 'peaking'; f.frequency.value = EQ_BANDS.midFreq; f.Q.value = EQ_BANDS.midQ; f.gain.value = c.eqMidDb; tail.connect(f); tail = f; } // per-片 EQ mid(钟形,频点/Q 与 studioEngine 对齐)
+    if (c.eqHighDb) { const f = ctx.createBiquadFilter(); f.type = 'highshelf'; f.frequency.value = EQ_BANDS.highFreq; f.gain.value = c.eqHighDb; tail.connect(f); tail = f; } // per-片 EQ high
     tail.connect(ctx.destination);
     node.start(Math.max(0, offsetSec), offsetSec < 0 ? -offsetSec : 0); // 片起点在 loop 前 → 从 buffer 内部跳入
     node.stop(loopLenSec); // loop 尾硬切
@@ -177,8 +225,8 @@ export async function buildRealStudio(bpm = 90): Promise<RealStudio> {
   const breakSamples = sounds.slice(1, Math.min(3, sounds.length)).map((s, i) => sampleInst(s, i, 'b'));
 
   const sessions: Session[] = [
-    { id: 's-a', name: 'Verse', index: 0, instruments: [...verseSamples, collage] },
-    { id: 's-b', name: 'Break', index: 1, instruments: breakSamples },
+    { id: 's-a', name: 'Verse', index: 0, repeats: 1, color: '#6f9e8b', instruments: [...verseSamples, collage] },
+    { id: 's-b', name: 'Break', index: 1, repeats: 1, color: '#7e8a9e', instruments: breakSamples },
   ];
   return { sessions, soundsById, collageSources, bpm, beatsPerBar: 4 };
 }

@@ -114,16 +114,30 @@ export interface FxReverb {
   damp: number;                        // 0..1 高频阻尼(越大越暗)
   mix: number;                         // 0..1 直/湿
 }
+/** XY 表演板(§21):Kaoss Pad 式主总线 insert。配置(program/wet/mode/on)折进 Project.fx 持久化 + 进 undo;
+ *  实时手指位置 X/Y/engage 是瞬态演奏态(直连引擎,不落库/不进 undo,对标 §18 Solo)。 */
+export type XYProgram = 'filter' | 'slicer' | 'delay' | 'brake';
+export interface XYConfig {
+  on: boolean;                          // 总开关(armed);off=insert 恒旁路
+  program: XYProgram;                   // 当前激活的效果(单板单 program)
+  wet: number;                          // 0..1 engaged 时的湿量(WET 旋钮;1=纯效果)
+  mode: 'spring' | 'latch';            // 松手回中(spring,效果归零)/ 不回中(latch,保持锁定)
+  springMs: number;                     // spring 模式:松手后 X/Y 滑回中点的时长(ms;效果随之扫回中性,UI 驱动)
+}
+export const DEFAULT_XY: XYConfig = { on: true, program: 'filter', wet: 1, mode: 'spring', springMs: 300 };
+
 export interface FxConfig {
   distortion: FxDistortion;
   delay: FxDelay;
   reverb: FxReverb;
+  xy: XYConfig;                         // §21 XY 表演板(主总线 insert)
 }
 /** 默认全部 bypass —— 不改默认音色,加进信号链零副作用。 */
 export const DEFAULT_FX: FxConfig = {
   distortion: { on: false, drive: 0.3, tone: 0.5, character: 'soft', mix: 1 },
   delay: { on: false, sync: '1/8', timeMs: 250, feedback: 0.35, tone: 0.5, pingpong: false, mix: 0.3 },
   reverb: { on: false, decay: 2.5, preDelay: 0.02, damp: 0.5, mix: 0.3 },
+  xy: DEFAULT_XY,
 };
 
 /** 一个工程(整套设置)。 */
