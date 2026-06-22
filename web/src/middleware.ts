@@ -6,6 +6,17 @@ import { SESSION_COOKIE } from '@/lib/authConst';
 
 const PUBLIC_PAGES = ['/login', '/register'];
 
+function redirectUrl(req: NextRequest, pathname: string, search = '') {
+  const forwardedHost = req.headers.get('x-forwarded-host');
+  const host = forwardedHost || req.headers.get('host') || req.nextUrl.host;
+  const forwardedProto = req.headers.get('x-forwarded-proto');
+  const proto = forwardedProto || req.nextUrl.protocol.replace(/:$/, '') || 'https';
+  const url = new URL(`${proto}://${host}`);
+  url.pathname = pathname;
+  url.search = search;
+  return url;
+}
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
@@ -18,9 +29,7 @@ export function middleware(req: NextRequest) {
   if (!hasSession) {
     if (pathname.startsWith('/api/')) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
     if (!isPublicPage) {
-      const url = req.nextUrl.clone();
-      url.pathname = '/login';
-      url.search = pathname === '/' ? '' : `?next=${encodeURIComponent(pathname)}`;
+      const url = redirectUrl(req, '/login', pathname === '/' ? '' : `?next=${encodeURIComponent(pathname)}`);
       return NextResponse.redirect(url);
     }
     return NextResponse.next();
@@ -28,10 +37,7 @@ export function middleware(req: NextRequest) {
 
   // 已登录:别停在登录/注册页。
   if (isPublicPage) {
-    const url = req.nextUrl.clone();
-    url.pathname = '/projects';
-    url.search = '';
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(redirectUrl(req, '/projects'));
   }
   return NextResponse.next();
 }
