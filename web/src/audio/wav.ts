@@ -1,7 +1,10 @@
 'use client';
-// 把声道(Float32)编码成 16-bit PCM WAV 的 base64,用于把 warp 渲染结果落盘(POST /api/warp-render)。
+// 把声道(Float32)编码成 16-bit PCM WAV。
+// `encodeWav` → ArrayBuffer(给 Blob 下载,§32 总混音导出);`encodeWavBase64` → base64(warp 渲染落盘 POST /api/warp-render)。
 // decodeAudioData 按字节头(RIFF/WAVE)识别,与文件扩展名无关,所以回读能正常解码。
-export function encodeWavBase64(channels: Float32Array[], sampleRate: number): string {
+
+/** 声道数组 → 16-bit PCM WAV 字节(含 44 字节头,交错写样本)。 */
+export function encodeWav(channels: Float32Array[], sampleRate: number): ArrayBuffer {
   const numCh = channels.length;
   const len = channels[0]?.length ?? 0;
   const blockAlign = numCh * 2; // 16-bit
@@ -22,7 +25,11 @@ export function encodeWavBase64(channels: Float32Array[], sampleRate: number): s
       off += 2;
     }
   }
-  const bytes = new Uint8Array(buffer);
+  return buffer;
+}
+
+export function encodeWavBase64(channels: Float32Array[], sampleRate: number): string {
+  const bytes = new Uint8Array(encodeWav(channels, sampleRate));
   let bin = '';
   const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);

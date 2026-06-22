@@ -42,9 +42,21 @@ export async function warpClip(req: WarpRequest): Promise<WarpDone> {
   const rendered = await ctx.startRendering();
 
   const startSample = skipLoops * targetSamples;
+  // loop 缝去咔哒:把每条声道末 X 样本与"循环起点前 X 样本"(自然 pre-roll = rendered[A-X..A),
+  // 与末段相位差正好一圈 → ≈等值)线性交叉淡化。结果末样本落到 rendered[A-1]、首样本仍是 rendered[A] →
+  // 循环接缝 = 连续渲染里相邻两样本 rendered[A-1]→rendered[A] 的自然过渡,消掉 warp 稳态循环的残余阶跃(实测 ~-20dBFS)。
+  // ⚠ 这是循环属性(每圈缝),该烘进 buffer;起播头部的去咔哒不在此(那是一次性的,由播放器 fadeIn 负责,烘进去会每圈淡掉下拍)。
+  const X = Math.min(Math.round(0.005 * sampleRate), Math.floor(targetSamples / 8), startSample);
   const out: Float32Array[] = [];
   for (let c = 0; c < numCh; c++) {
-    out.push(rendered.getChannelData(c).slice(startSample, startSample + targetSamples));
+    const ch = rendered.getChannelData(c);
+    const seg = ch.slice(startSample, startSample + targetSamples);
+    for (let i = 0; i < X; i++) {
+      const t = (i + 0.5) / X;                       // 0→1
+      const preRoll = ch[startSample - X + i];       // rendered[A-X+i]:与 seg[T-X+i] 同相位(差一圈)
+      seg[targetSamples - X + i] = seg[targetSamples - X + i] * (1 - t) + preRoll * t; // 等值信号 → 线性淡化和恒定,不抬不掉
+    }
+    out.push(seg);
   }
   return {
     id: req.id,

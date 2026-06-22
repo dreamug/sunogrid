@@ -1,7 +1,59 @@
 const $ = (id) => document.getElementById(id);
 
-// ===== Bridge 连接:把 bridge.js 动态注册到用户授权的 app 域名 =====
-// 内建(写死在 manifest)= sunogrid.com + localhost,零点击;其它自托管域名 → 这里点 Connect 授权后动态注册(持久,刷新不掉)。
+// 版本号(从 manifest 读,显示在标题旁)
+try { $('ver').textContent = 'v' + chrome.runtime.getManifest().version; } catch (_) {}
+
+// ===== suno.com 连接/登录状态 =====
+// 探测链:popup → background(popup-probe)→ 路由到在听的 suno 标签 → interceptor.status() → 回传。
+// 绿 = 有登录会话即可生成;红 = 没 suno 标签 / 标签未就绪(刚装/刚重载,需刷新该标签)/ 没登录;灰闪 = 检测中。
+async function sunoTabs() {
+  try { return await chrome.tabs.query({ url: ['https://suno.com/*', 'https://*.suno.com/*'] }); }
+  catch { return []; }
+}
+function probeBg(timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const to = setTimeout(() => { if (!done) { done = true; resolve({ ok: false, error: 'timeout' }); } }, timeoutMs);
+    try {
+      chrome.runtime.sendMessage({ type: 'popup-probe' }, (res) => {
+        if (done) return; done = true; clearTimeout(to);
+        if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
+        resolve(res || { ok: false });
+      });
+    } catch (e) { clearTimeout(to); resolve({ ok: false, error: String(e) }); }
+  });
+}
+function setSuno(state, title, detail, showOpen) {
+  $('su-led').className = 'led ' + state;       // ok | err | checking
+  $('su-title').textContent = title;
+  $('su-detail').textContent = detail;
+  $('su-open').style.display = showOpen ? '' : 'none';
+}
+async function probeSuno() {
+  setSuno('checking', 'Checking…', 'Talking to your suno.com tab…', false);
+  const tabs = await sunoTabs();
+  if (!tabs.length) {
+    setSuno('err', 'No suno.com tab open', 'Open suno.com and log in, then re-check.', true);
+    return;
+  }
+  const res = await probeBg();
+  if (!res || !res.ok) {
+    // 有 suno 标签但驱动不应答 = 内容脚本未注入(插件刚装/刚重载,而标签是更早开的)→ 刷新该标签
+    setSuno('err', 'suno.com tab not ready', 'A suno.com tab is open but the bridge isn’t active in it yet. Reload that tab, then re-check.', false);
+    return;
+  }
+  const d = res.data || {};
+  if (d.hasAuth) {
+    setSuno('ok', 'Connected & logged in', d.hasUI ? 'Ready to generate from the app.' : 'Logged in. Open Create on suno.com so generation can run.', false);
+  } else {
+    setSuno('err', 'Not logged in', 'A suno.com tab is open but you’re not logged in. Log in to suno.com, then re-check.', false);
+  }
+}
+$('su-recheck').onclick = probeSuno;
+$('su-open').onclick = async () => { try { await chrome.tabs.create({ url: 'https://suno.com/create' }); window.close(); } catch (_) {} };
+
+// ===== App sites bridge:把 bridge.js 动态注册到用户授权的 app 域名 =====
+// 内建(写死在 manifest)= sunogrid.com + localhost,零点击;其它自托管域名 → 点 Connect 授权后动态注册(持久,刷新不掉)。
 const DYN_PREFIX = 'dyn-bridge-';
 
 function patternOf(url) {
@@ -71,61 +123,5 @@ async function renderBridge() {
   }
 }
 
-// ===== Sniffer(legacy 调试:旧驱动抓请求模板用,新驱动已不需要;background 无 handler 时静默)=====
-let LOG = [];
-function hasAuth(e) {
-  const h = e.reqHeaders || {};
-  return Object.keys(h).some((k) => k.toLowerCase() === 'authorization');
-}
-function filtered() {
-  const q = $('filter').value.trim().toLowerCase();
-  const onlyAuth = $('onlyauth').checked;
-  return LOG.filter((e) => {
-    if (q && !(e.url || '').toLowerCase().includes(q)) return false;
-    if (onlyAuth && !hasAuth(e)) return false;
-    return true;
-  });
-}
-function render() {
-  const items = filtered();
-  $('count').textContent = `${items.length} / ${LOG.length}`;
-  const list = $('list');
-  list.innerHTML = '';
-  items.slice().reverse().forEach((e) => {
-    const div = document.createElement('div');
-    div.className = 'item';
-    const sClass = 's' + String(e.status || '')[0];
-    const path = (() => { try { return new URL(e.url).pathname; } catch { return e.url; } })();
-    div.innerHTML =
-      `<span class="m">${e.method}</span> ` +
-      `<span class="${sClass}">${e.status ?? 'ERR'}</span> ` +
-      (hasAuth(e) ? `<span class="auth">🔑</span> ` : '') +
-      `<span class="u">${path}</span>`;
-    div.title = '点击复制这一条的完整 JSON';
-    div.onclick = () => navigator.clipboard.writeText(JSON.stringify(e, null, 2));
-    list.appendChild(div);
-  });
-}
-function load() {
-  chrome.runtime.sendMessage({ kind: 'get' }, (resp) => {
-    if (chrome.runtime.lastError) return; // 新版 background 不再记录请求模板,无接收方 → 静默
-    LOG = (resp && resp.log) || [];
-    render();
-  });
-}
-$('filter').oninput = render;
-$('onlyauth').onchange = render;
-$('dl').onclick = () => {
-  const data = JSON.stringify(filtered(), null, 2);
-  const blob = new Blob([data], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'suno-capture.json';
-  a.click();
-};
-$('clear').onclick = () => {
-  chrome.runtime.sendMessage({ kind: 'clear' }, () => { if (chrome.runtime.lastError) return; LOG = []; render(); });
-};
-
 renderBridge();
-load();
+probeSuno();

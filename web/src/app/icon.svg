@@ -1,0 +1,37 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Loop Machine — 16-pad bank mark. No chassis: pads only, transparent bg. -->
+  <defs>
+    <linearGradient id="acc" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d2814f"/>
+      <stop offset="1" stop-color="#b6663f"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ecc14f"/>
+      <stop offset="1" stop-color="#d9a52f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 4x4 pad bank: pad 12, gap 3, margin 3.5 -> columns/rows at 3.5/18.5/33.5/48.5 -->
+  <g>
+    <!-- row 0 -->
+    <rect x="3.5"  y="3.5"  width="12" height="12" rx="2.8" fill="url(#acc)"/>
+    <rect x="18.5" y="3.5"  width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="33.5" y="3.5"  width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="48.5" y="3.5"  width="12" height="12" rx="2.8" fill="url(#gold)"/>
+    <!-- row 1 -->
+    <rect x="3.5"  y="18.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="18.5" y="18.5" width="12" height="12" rx="2.8" fill="url(#acc)"/>
+    <rect x="33.5" y="18.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="48.5" y="18.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <!-- row 2 -->
+    <rect x="3.5"  y="33.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="18.5" y="33.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="33.5" y="33.5" width="12" height="12" rx="2.8" fill="url(#acc)"/>
+    <rect x="48.5" y="33.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <!-- row 3 -->
+    <rect x="3.5"  y="48.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="18.5" y="48.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="33.5" y="48.5" width="12" height="12" rx="2.8" fill="#46413a"/>
+    <rect x="48.5" y="48.5" width="12" height="12" rx="2.8" fill="url(#acc)"/>
+  </g>
+</svg>

@@ -10,11 +10,9 @@ import type { FxConfig, InstrumentSends, Mixer, Quantize } from '@/contracts';
 import { EQ_BANDS } from '@/contracts';
 import { FxBus } from './fxBus';
 import { XYPad } from './xyPad';
+import { softClipCurve, makeShelfEq, type ShelfEq } from './masterChain'; // §32:与离线导出共用软削波曲线 + 三段 EQ 构造(防音色漂移)
 
 type VoiceState = 'off' | 'queued' | 'on' | 'stopping';
-
-// 三段串联 EQ:lowshelf@200 + peaking@1k(Q0.7) + highshelf@4k(频点见 EQ_BANDS;low 为入口节点,接它即接整段)。
-interface ShelfEq { low: Tone.Filter; mid: Tone.Filter; high: Tone.Filter; }
 
 interface Voice {
   player: Tone.Player;
@@ -32,19 +30,12 @@ interface Voice {
   pending?: Tone.Player; // 无缝换 buffer:已建好、等下一个小节边界接管的新 player
 }
 
-// 软削波曲线:|x|≤T 纯净直通;超 T 用 tanh 平滑趋近天花板 ceil(memoryless,无抽吸)。给主总线 WaveShaper 当安全天花板。
-function softClipCurve(T: number, ceil: number, n = 2048): Float32Array {
-  const c = new Float32Array(n), span = Math.max(1e-4, ceil - T);
-  for (let i = 0; i < n; i++) {
-    const x = (i / (n - 1)) * 2 - 1, ax = Math.abs(x);
-    c[i] = ax <= T ? x : Math.sign(x) * (T + span * Math.tanh((ax - T) / span));
-  }
-  return c;
-}
-
 // 主峰值表弹道(见 masterLevel):窗口短 → 抓得到瞬态;归一窗收窄 → 短表条上动态可见;慢落 → 余辉而不闪。
 const METER_FLOOR_DB = -48;   // 峰值表归一下限(dBFS):窗口 [-48,0] 铺满短表条,鼓点动态吃满量程
 const PEAK_RELEASE = 0.88;    // 慢落系数(每 rAF 帧 ×0.88;~60fps 下视觉余辉约 300ms,落到 37% ≈130ms)
+// 起播去咔哒(declick):播放器一次性淡入秒数(~3ms)。从静音瞬跳到 buffer[0](几乎从不为 0)= 宽带咔哒;
+// Tone.Player.fadeIn 的语义是"start 时淡一次,loop 不重触发"→ 只磨掉这记起播阶跃,不碰每圈下拍的 attack(2-3ms 足够消阶跃又几乎不削瞬态)。
+const DECLICK = 0.003;
 
 export class StudioEngine {
   private voices = new Map<string, Voice>();
@@ -180,13 +171,7 @@ export class StudioEngine {
 
   /** 建一段三段串联 EQ(low shelf / mid peaking / high shelf,各一颗 biquad,gain 单位 dB,初值 0)。频点来自 EQ_BANDS,与 realLibrary 离线 bake 共用一组。
    *  shelf 只吃 gain(Web Audio 的 shelf 忽略 Q,斜率固定);只有 mid peaking 用 Q(0.7=约 2 个八度宽钟形,当 tone 控不当手术刀)。每颗 0dB 时透明 → 0/0/0 不染色。 */
-  private makeEq(): ShelfEq {
-    return {
-      low: new Tone.Filter({ type: 'lowshelf', frequency: EQ_BANDS.lowFreq, gain: 0 }),
-      mid: new Tone.Filter({ type: 'peaking', frequency: EQ_BANDS.midFreq, Q: EQ_BANDS.midQ, gain: 0 }),
-      high: new Tone.Filter({ type: 'highshelf', frequency: EQ_BANDS.highFreq, gain: 0 }),
-    };
-  }
+  private makeEq(): ShelfEq { return makeShelfEq(); } // §32:构造移到 masterChain,与离线导出共用
 
   /** 装载/替换一件乐器的可播放 buffer + mixer 链 + 3 条 aux send。 */
   loadInstrument(id: string, buffer: AudioBuffer, bars: number, mixer: Mixer, sends?: InstrumentSends): void {
@@ -195,6 +180,7 @@ export class StudioEngine {
     player.loop = true;
     player.loopStart = 0;
     player.loopEnd = buffer.duration;
+    player.fadeIn = DECLICK; // 起播去咔哒(一次性,loop 不重触发)
     const eq = this.makeEq();
     const muteGain = new Tone.Gain(1); // §18 solo 遮罩(audible?1:0);在 sends 分叉前 → 静音连干声带 FX send 一起灭
     const panner = new Tone.Panner(0);
@@ -417,9 +403,17 @@ export class StudioEngine {
     this.voices.forEach((v, id) => this.reconcileForSolo(id, v));
   }
 
+  /** 设 muteGain 遮罩到可听性:已出声(on/stopping)→ 15ms 斜坡(solo/静音切换防 click,保相位);
+   *  尚未出声(off/queued,即将 fire)→ 直接置值,免那条斜坡骑在首拍 attack 上把它削弱(起播去咔哒由 player.fadeIn 负责)。 */
+  private applyMute(id: string, v: Voice): void {
+    const target = this.isAudible(id, v) ? 1 : 0;
+    if (v.state === 'on' || v.state === 'stopping') v.muteGain.gain.rampTo(target, 0.015);
+    else v.muteGain.gain.value = target;
+  }
+
   /** 按当前 wantOn + soloIds 重算单个 voice:muteGain 遮罩(即时、保相位)+ player 跑/停(量化)。 */
   private reconcileVoice(id: string, v: Voice): void {
-    v.muteGain.gain.rampTo(this.isAudible(id, v) ? 1 : 0, 0.015); // 遮罩即时跟随,不动 player → 保相位、清 solo 原相位接回
+    this.applyMute(id, v); // 遮罩跟随(出声中走斜坡;未出声直接置,见 applyMute)
     this.setRunning(v, this.shouldRun(id, v));
   }
 
@@ -429,7 +423,7 @@ export class StudioEngine {
    *  连正常 solo/取消 solo 当前块都会触发(setSolo 重算的是全引擎,不分块)。这里加 running||soloed 闸:
    *  预载/未被 solo 的 off voice 一律不碰(留给换场边界 swapVoicesAt 起);solo 显式点起一件关着的乐器(§18)仍生效。 */
   private reconcileForSolo(id: string, v: Voice): void {
-    v.muteGain.gain.rampTo(this.isAudible(id, v) ? 1 : 0, 0.015);
+    this.applyMute(id, v); // 出声中(solo 常态)走斜坡防 click;未出声的预载 voice 直接置(不会被下面 setRunning 点起)
     const running = v.state === 'on' || v.state === 'queued' || v.state === 'stopping';
     if (running || this.soloIds.has(id)) this.setRunning(v, this.shouldRun(id, v));
   }
@@ -540,6 +534,9 @@ export class StudioEngine {
   private auditionDur = 0;
   private auditionQueued = false;        // 量化预览:已排队、等小节边界(还没出声)
   private auditionSchedId?: number;       // 排队的 scheduleOnce id
+  private auditionGen = 0;                 // §28.7 异步预览防陈旧令牌:每次 stopAudition 自增 → 作废 await 窗口里 in-flight 的预览(stop/新预览顶掉迟到的 audition)
+  private auditionPendingTok = 0;          // §28.7 当前"加载中"预览的令牌(还在 warp、未出声);供空格识别 warm-up 窗口先停、不误启走带。0=无
+  private auditionFading = new Set<Tone.Player>(); // §28.8 auditionSwap 淡出中的旧 player(在未来 loop boundary 才停)。⚠ 长 loop 的 boundary 可能在很久之后 → 必须能被 stopAudition 立即灭掉,否则旧 player 漏播 = "停不下来"
   private audEq?: ShelfEq;               // collage 片预览的常驻 mixer 链(low/mid/high → panner → dest,频点同 EQ_BANDS/离线 bake);懒建复用、随实例销毁
   private audPan?: Tone.Panner;
   private auditionUsesChain = false;     // 当前试听是否走 audEq 片链(走才允许 setAuditionMix 实时改;区别于库素材裸链 / 乐器共享 eq 链)
@@ -551,6 +548,7 @@ export class StudioEngine {
   audition(id: string, buffer: AudioBuffer, through?: { eq: ShelfEq; gainDb: number } | { mixer: Mixer }, quantize = false, startSec = 0): void {
     this.stopAudition();
     const p = new Tone.Player(buffer);
+    p.fadeIn = DECLICK; // 试听同样起播去咔哒(预览路径不过主链/muteGain,自身淡入兜底)
     if (through && 'mixer' in through) { p.volume.value = through.mixer.gainDb; p.connect(this.auditionChain(through.mixer)); this.auditionUsesChain = true; }
     else if (through) { p.volume.value = through.gainDb; p.connect(through.eq.low); this.auditionUsesChain = false; }
     else { p.toDestination(); this.auditionUsesChain = false; }
@@ -599,10 +597,12 @@ export class StudioEngine {
     old.fadeOut = XF;
     np.start(boundary);                                        // 边界对齐起、新 loop 从头
     try { old.stop(boundary + XF); } catch { /* */ }
+    this.auditionFading.add(old);                              // §28.8 旧 player 登记为"淡出中":boundary 前若 stopAudition(空格/切换)→ 立即被一并灭掉,不漏播到远期 boundary
     this.auditionPlayer = np;                                  // 立即换引用(后续 stop 走新的);相位参考等到边界再切,免得切前 phase 错乱
     const flipMs = Math.max(0, (boundary - now) * 1000);
     const tid = setTimeout(() => {
       this.disposeTimers.delete(tid);
+      this.auditionFading.delete(old);
       this.auditionStart = boundary; this.auditionDur = buffer.duration; // 边界后:播放线相位参考切到新 loop
       try { old.dispose(); } catch { /* */ }
     }, flipMs + XF * 1000 + 60);
@@ -640,10 +640,23 @@ export class StudioEngine {
     this.auditionPlayer.volume.value = mixer.gainDb;
     this.auditionChain(mixer);
   }
+  /** §28.7 异步预览防陈旧:起播前(任何 await 之前)取令牌 → await 解析后用 auditionStale(tok) 校验是否被顶掉。
+   *  本调用**不停**当前预览(保「旧预览放到新的就绪」无缝手感);停旧由随后 audition() 内部的 stopAudition 完成。 */
+  nextAuditionToken(): number { this.auditionPendingTok = ++this.auditionGen; return this.auditionPendingTok; }
+  /** 令牌已被后续 stopAudition / 新预览顶掉 → true:此时迟到的 audition() 应放弃,不出声(否则 stop 反悔 / 后解析者错位)。 */
+  auditionStale(token: number): boolean { return token !== this.auditionGen; }
+  /** 有预览正在加载(已取令牌、还没出声/没被停)→ true。空格据此在 warm-up 窗口先停预览,而非误启走带。 */
+  auditionPending(): boolean { return this.auditionPendingTok !== 0; }
+  /** host 在 finally 调:**按令牌清** pending(只清自己那次)→ 扛并发 in-flight + warp 抛错不泄漏(后来者/已停者的 0 不被误覆盖)。 */
+  clearAuditionPending(token: number): void { if (this.auditionPendingTok === token) this.auditionPendingTok = 0; }
   stopAudition(): void {
+    this.auditionGen++; // §28.7 作废任何 in-flight 异步预览(stop 落在 warp await 窗口内时,迟到的 audition 据此放弃)
+    this.auditionPendingTok = 0; // §28.7 stop 取消"加载中"标志(空格第二下才走带)
     if (this.auditionSchedId != null) { Tone.getTransport().clear(this.auditionSchedId); this.auditionSchedId = undefined; }
     this.auditionQueued = false;
     if (this.auditionPlayer) { try { this.auditionPlayer.stop(); } catch { /* */ } this.auditionPlayer.dispose(); this.auditionPlayer = null; }
+    this.auditionFading.forEach((p) => { try { p.stop(); } catch { /* */ } try { p.dispose(); } catch { /* */ } }); // §28.8 连淡出中的旧 swap player 一起灭(否则长 loop 漏播到远期 boundary = 停不下来)
+    this.auditionFading.clear();
     this.auditionId = null;
     this.auditionUsesChain = false;
   }

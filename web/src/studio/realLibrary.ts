@@ -70,7 +70,8 @@ const warpCache = new Map<string, AudioBuffer>();
 const lruBump = (k: string, v: AudioBuffer) => { warpCache.delete(k); warpCache.set(k, v); }; // 命中刷到最近端(真 LRU)
 const lruTrim = () => { if (warpCache.size > 40) warpCache.delete(warpCache.keys().next().value as string); };
 // 纯 warp 的缓存键(不含 fade):落盘渲染只存纯 warp,fade 在内存里后挂(见 applyFade)。
-const pureSig = (s: ApiSound, masterBpm: number, region: Region) => `${s.assetId}|${region.startSample}|${region.endSample}|${region.bars.toFixed(4)}|${region.semitones || 0}|${s.sourceBpm}|${masterBpm}`;
+// `x1` = warp 算法版本标记(x1=输出烘入 loop 缝交叉淡化,见 signalsmithWarp)。改 warp 产物口径时 ++,令旧落盘渲染失效、强制重渲。
+const pureSig = (s: ApiSound, masterBpm: number, region: Region) => `${s.assetId}|${region.startSample}|${region.endSample}|${region.bars.toFixed(4)}|${region.semitones || 0}|${s.sourceBpm}|${masterBpm}|x1`;
 
 /** clip 尾淡出:在纯 warp 出来的 buffer 尾巴乘一条隆起抛物线包络 1-t²(两点曲线:fadeStart→fadeEnd 由 1 降到 0,fadeEnd 之后到尾=静音)。
  *  烘进 buffer 而非实时增益 → 与 trim/warp 同档离线,引擎 loop=true 时每圈循环自然淡尾(也顺手消循环接缝爆音)。不改源 buffer,返回新副本。 */

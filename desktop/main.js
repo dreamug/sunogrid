@@ -59,6 +59,16 @@ function startDevServer() {
   devServerProc.on('exit', (code) => console.log('[desktop] web dev server 退出', code));
 }
 
+// §31 音频输出设备选择(setSinkId + 枚举设备名)需要媒体/设备权限。
+// 桌面端自动授予 → 下拉框直接显示真实声卡名、切换免弹窗(比 web 更原生:省掉「为看设备名先授权麦克风」那步)。
+// 仅桌面、零碰 web;只放行媒体/扬声器相关,其它权限照常拒。
+function grantMediaAccess(ses) {
+  const ok = (p) => p === 'media' || p === 'audioCapture' || p === 'speaker-selection';
+  ses.setPermissionRequestHandler((_wc, permission, cb) => cb(ok(permission)));
+  ses.setPermissionCheckHandler((_wc, permission) => ok(permission));
+  ses.setDevicePermissionHandler(() => true);
+}
+
 // ── 主窗口:加载云端/本地的 SunoGrid app ─────────────────────────
 function createWindow() {
   win = new BrowserWindow({
@@ -89,7 +99,17 @@ function createWindow() {
   win.webContents.on('did-finish-load', async () => {
     try {
       const probe = await win.webContents.executeJavaScript(
-        'JSON.stringify({ url: location.pathname, isDesktop: !!window.sunogrid, sunoBtn: !!document.getElementById("__sg_suno_btn") })',
+        `(async () => {
+          let outs = [];
+          try { outs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audiooutput'); } catch (_) {}
+          return JSON.stringify({
+            url: location.pathname,
+            isDesktop: !!window.sunogrid,
+            sunoBtn: !!document.getElementById('__sg_suno_btn'),
+            audioOuts: outs.length,
+            audioLabels: outs.filter((d) => d.label).length,
+          });
+        })()`,
       );
       console.log('[desktop] 加载完成 probe:', probe);
     } catch (e) {
@@ -263,6 +283,7 @@ async function boot() {
   }
   buildMenu();
   registerIpc();
+  grantMediaAccess(session.defaultSession); // §31 音频设备选择:建窗口前先放行媒体/设备权限
   createWindow();
   createSunoWindow(); // 后台预热 Suno(隐藏);未登录会自动弹出
 }

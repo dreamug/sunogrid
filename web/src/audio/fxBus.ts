@@ -138,6 +138,13 @@ class ReverbFx {
     const m = c.on ? clamp(c.mix, 0, 1) : 0; // send/return:本块是 return,只出湿声;mix = return 输出电平
     this.wet.gain.value = m; this.dry.gain.value = 0;
   }
+  /** §32 离线导出:跳过 set() 的 200ms 防抖,立即用当前 decay/preDelay 同步重生成 IR 并 await。
+   *  离线渲染等不到 setTimeout,不 await 就会拿到旧/空 IR(混响 send 出不来)。 */
+  async ready(): Promise<void> {
+    if (this.regenTimer) { clearTimeout(this.regenTimer); this.regenTimer = undefined; }
+    this.rev.decay = this.decay; this.rev.preDelay = this.preDelay;
+    await this.rev.generate();
+  }
   dispose(): void { if (this.regenTimer) clearTimeout(this.regenTimer); [this.input, this.output, this.dry, this.wet, this.rev, this.damp].forEach((n) => { try { n.dispose(); } catch { /* */ } }); }
 }
 
@@ -159,5 +166,7 @@ export class FxBus {
   /** delay 同步分割跟工程 BPM。 */
   setBpm(bpm: number): void { this.delay.setBpm(bpm); }
   setAll(cfg: FxConfig): void { this.dist.set(cfg.distortion); this.delay.set(cfg.delay); this.reverb.set(cfg.reverb); }
+  /** §32 离线导出:等混响 IR 就绪(setAll 后调,transport.start 前 await)。 */
+  async ready(): Promise<void> { await this.reverb.ready(); }
   dispose(): void { this.dist.dispose(); this.delay.dispose(); this.reverb.dispose(); }
 }

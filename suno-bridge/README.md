@@ -1,36 +1,61 @@
-# Suno Bridge — Driver (v0.2)
+# Suno Bridge — Driver
 
-MV3 Chrome 插件:在你已登录的 suno.com 活会话里**驱动** Suno 生成(重放私有接口),并把能力**桥接给本地 app**(localhost)。token 全程不出浏览器。
+A Manifest V3 Chrome extension that lets the [SunoGrid](https://sunogrid.com) web app generate
+loops through **your own logged-in suno.com session**. It drives Suno's real UI to generate, watches
+the responses to collect the results, and downloads the finished audio from Suno's CDN.
+
+**Your Suno token never leaves the browser.** The extension only acts inside the suno.com tab you're
+already logged into — nothing is sent to any SunoGrid server.
+
+> **For learning & research only.** Driving Suno's private interface may violate its Terms of Service
+> and can get your account rate-limited or banned. Your account, your risk.
+
+## How it works
 
 ```
-本地 app (localhost:3007)
-  │ window.postMessage {source:'APP_SUNO', cmd, args}
-  ▼  bridge.js (注入 localhost)
-  │ chrome.runtime
-  ▼  background.js (路由)
-  │ tabs.sendMessage → suno.com 标签页
-  ▼  relay.js (注入 suno.com, ISOLATED)
-  │ window.postMessage
-  ▼  interceptor.js (注入 suno.com, MAIN) —— 驱动:capture 鉴权+模板 / generate / poll / download
+SunoGrid app (sunogrid.com / localhost)
+  │  window.postMessage {source:'APP_SUNO', cmd, args}
+  ▼  bridge.js   — injected into the app site (ISOLATED world)
+  │  chrome.runtime
+  ▼  background.js — routes app tab ⇄ suno.com tab
+  │  tabs.sendMessage
+  ▼  relay.js     — injected into suno.com (ISOLATED world)
+  │  window.postMessage
+  ▼  interceptor.js — injected into suno.com (MAIN world): drives the UI + observes fetch
 ```
 
-支持命令:`status` · `generate({prompt,loop,bpm,key})` · `poll(clipIds)` · `download(url)→base64`。
-generate 用"克隆最近一次真实请求模板 + 改参 + 刷新 UUID"的方式重放,模板持久化在 `chrome.storage`(一次手动生成后跨会话复用)。
+Commands: `status` · `generate({mode, prompt, loop, bpm, key})` · `poll(clipIds)` · `download(url) → base64`.
 
-## 用法
+Generation **drives Suno's own UI** (fills the prompt, sets Type/BPM/Key, clicks Create) rather than
+replaying the private API — Suno's anti-bot only trusts genuine UI flows, so a reconstructed request
+gets rejected. Clip IDs come from the observed `generate` response; `poll` reads the observed `feed`
+cache and actively re-fetches until `complete`; `download` pulls the public `cdn1.suno.ai` mp3.
 
-1. `chrome://extensions` → 开开发者模式 → **加载/重新加载**本目录(改过代码要点「重新加载」)。
-2. 开一个 **suno.com 标签页并登录**(驱动需要活会话)。
-3. **首次**在 Suno 的 Sounds 手动生成一次 → 捕获请求模板(之后持久化,不必再做)。
-4. 打开本地 app(`web` 的 `/projects/[id]` Studio)→ 在左栏点生成。
+## Install
 
-## 文件
+1. Open `chrome://extensions` and turn on **Developer mode** (top right).
+2. Click **Load unpacked** and pick this `suno-bridge/` folder.
+3. After editing any file, click **Reload** on the extension card.
 
-| 文件 | 作用 |
+## Use
+
+1. Open **suno.com**, log in, and leave a tab on the **Create** page (Sounds / Advanced).
+2. Open the SunoGrid app (`sunogrid.com`, or `localhost` in dev) and generate from the left panel.
+
+Click the extension icon to check status:
+- **suno.com connection** — green when a logged-in suno.com tab is reachable. If it's red right after
+  installing/reloading, reload your suno.com tab so the content scripts inject.
+- **App sites** — `sunogrid.com` and `localhost` work with no setup. Self-hosting on another domain?
+  Open your site, click **Connect**, and approve the permission prompt — no manifest editing needed.
+
+## Files
+
+| File | Role |
 |---|---|
-| `interceptor.js` | suno.com MAIN:驱动(capture/generate/poll/download)|
-| `relay.js` | suno.com ISOLATED:background ↔ 驱动桥接 + 模板持久化 |
-| `bridge.js` | localhost ISOLATED:app ↔ background 桥接 |
-| `background.js` | 路由 localhost 标签 ↔ suno.com 标签 |
-| `manifest.json` | MV3 配置 |
-| `api-map.md` | 逆向出的接口 map |
+| `interceptor.js` | suno.com MAIN world: drives the UI + observes fetch (generate / poll / download) |
+| `relay.js` | suno.com ISOLATED world: bridges background ⇄ the MAIN-world driver |
+| `bridge.js` | app site ISOLATED world: bridges the app ⇄ background |
+| `background.js` | service worker: routes app tab ⇄ suno.com tab, answers popup probes |
+| `popup.html` / `popup.js` | toolbar popup: suno.com status + app-site connections |
+| `manifest.json` | MV3 configuration |
+| `api-map.md` | reverse-engineered notes on Suno's Sound endpoints (dev reference) |

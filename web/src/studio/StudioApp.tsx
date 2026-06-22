@@ -23,6 +23,7 @@ import { LoopManager } from '@/studio/ui/LoopManager';
 import { FxRack } from '@/studio/ui/FxRack';
 import { XYPad } from '@/studio/ui/XYPad';
 import { OutputDevice } from '@/studio/ui/OutputDevice';
+import { ExportDialog } from '@/studio/ui/ExportDialog';
 import { applySavedOutput } from '@/studio/useAudioOutputs';
 import { AutomationLane } from '@/studio/ui/AutomationLane';
 import { defaultAutomation, rescaleAuto, sampleXY, isActiveAuto, NEUTRAL, normalizeXyAuto, PROG_COLOR, PROG_LABEL, PROG_ORDER } from '@/studio/xyAutomation';
@@ -394,9 +395,11 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   // 走带启停只切 playing(setState 即重渲一次);高频视觉(电平/走带位置/播放头)由自驱动叶子按 playing 起停 rAF。
   const togglePlay = () => {
     const e = eng.current; if (!e) return;
-    if (e.isPlaying()) { cancelSongSchedule(); e.stopTransport(); setPendingIdx(null); setPlaying(false); }
+    if (e.isPlaying()) { cancelSongSchedule(); e.stopTransport(); e.stopAudition(); setPendingIdx(null); setPlaying(false); } // 停走带连带停掉「走带在跑时点起、跟随走带在响」的 clip/chop 预览
     else startPlayback();
   };
+  // §32 导出前停掉一切发声(走带 + 松散预览 + Song 待推进 + 排队态),免离线渲染与实时播放抢 context。
+  const stopAllAudio = () => { cancelSongSchedule(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false); };
 
   const curSession = sessions[sessionIdx];
   // §16 撤销宪法:快照口径 = sessions 整树 + 各库声音 warp(预调改 Sound.warp,不在 sessions 里)+ 主 bpm(项目级标量,亦在 sessions 外)。
@@ -502,7 +505,14 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (confirmState) return; // 弹窗开着时,快捷键交给弹窗(Enter/Esc)
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return; // 含 <select>(量化下拉):聚焦时 Del/空格交给控件,别误删乐器/误触走带
-      if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); if (!e.repeat) togglePlay(); return; } // 空格 = 走带启停;挡掉列表/页面滚动 + 按钮的空格触发
+      if (e.code === 'Space' || e.key === ' ') { // 空格 = 走带启停;挡掉列表/页面滚动 + 按钮的空格触发
+        e.preventDefault();
+        if (e.repeat) return;
+        const en = eng.current;
+        if (en && !en.isPlaying() && (en.auditioningId() != null || en.auditionPending())) { en.stopAudition(); setTick((t) => t + 1); return; } // §28.7 有预览在响**或正在加载(warm-up)**且走带没跑 → 第一下空格只停预览(不误启走带);再按才控走带
+        togglePlay();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
       // §26 Song 块 / §26.9 Live 卡:session 卡片获得焦点(点击/Tab)→ Del/⌫ 删 · ⌘C/⌘V 复制粘贴 · ⌘D 复制,作用于该 session。两模式同款热键(Live 去掉了 ⧉/✕ 按钮)。
       // 让位乐器级靠**选择态**消歧(不靠 DOM 焦点是否从卡片移走 —— pad 是不可聚焦 div,跨浏览器行为不一):有乐器/片/库选中就不当 session 操作。点卡片会清掉 selId/selClipId/libSel,故点卡=session、点 pad=乐器。
@@ -609,6 +619,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   //   起播期间是异步窗口(loadSession),用 starting 锁挡住重入起播 + 并发 switchSession(见 switchSession),避免两次 loadSession 交错混场。
   const startPlayback = async () => {
     const e = eng.current; if (!e || starting.current) return;
+    if (e.auditioningId() != null) { e.stopAudition(); setTick((t) => t + 1); } // 点走带起播前先同步停掉松散的 clip/chop 预览(startTransport 也会停,但那在 resume/load/settle 之后,这里提前关掉重叠窗口)
     const song = playModeRef.current === 'song';
     const startIdx = song ? 0 : sessionIdx; // §26 Song:Play 永远从头(第一个 block);Live:选中场景。从具体位置起播走 startPlayFromBar(点标尺)
     const s = sessionsRef.current[startIdx]; if (!s) return;
@@ -621,7 +632,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (song || !loaded) {
         await loadSession(s); // 重灌:引擎里只剩当前场
         if (eng.current !== e) return; // 期间被卸载/重建 → 放弃
-        clearSolo(); // loadSession 的 clearAll 已抹掉引擎 soloIds → 同步清 React 态(口径外瞬态,重播即复位)
+        reapplySoloFor(ids); // §18 loadSession 的 clearAll 抹了引擎 soloIds → 把本场仍存活的 solo 推回(跨停/起走带常驻);跨块残留过滤掉
       } else {
         e.retainOnly(ids); // Live 常态:当前场已在引擎 → 瞬时剔掉别场残留(保留 solo)
       }
@@ -667,7 +678,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       // 同块:只剔掉 lookahead 预载的下一块 voice(否则 startTransport 会把它们一并点响),其余瞬时复用(同 §20 retainOnly 套路)。跨块/冷起仍重灌,引擎里只剩目标块。
       if (sameBlock) e.retainOnly(s.instruments.map((i) => i.id));
       else { await loadSession(s); if (eng.current !== e) return; }
-      clearSolo();
+      reapplySoloFor(s.instruments.map((i) => i.id)); // §18 跳播同样跨停/起常驻 solo:同块 retainOnly 已留 soloIds(原样推回),跨块重灌则按本场过滤掉残留
       setSessionIdx(bi); setSelId(null); setSelClipId(null); setLibSel(null);
       viewFollows.current = true; playingIdxRef.current = bi; playingRef.current = true; songBlockStart.current = blockStart;
       if (s.xyAuto) { // prime 在 localBar(不是 0):从第 rep 遍起,automation 相位对齐
@@ -844,6 +855,15 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   //   若放行,setSolo 会重算全引擎 voice:把预载的该非播放块 voice 点响 + 让正在播的块(不在 soloIds 里)被遮罩静音。
   const toggleSolo = (id: string) => { if (!viewingSoundingBlock()) return; const next = new Set(soloRef.current); if (next.has(id)) next.delete(id); else next.add(id); applySolo(next); };
   const clearSolo = () => { if (soloRef.current.size) applySolo(new Set()); };
+  // §18 重灌后保留 solo:loadSession 的 clearAll 抹了引擎 soloIds —— solo 是瞬态但应**跨停/起走带常驻**(同 ▶),
+  //   故重播不复位,而是把仍存活于本场的 solo 重新推回引擎。跨块残留(soloIds 装的是别块乐器 id)被过滤掉 → solo 收敛。
+  const reapplySoloFor = (ids: string[]) => {
+    if (!soloRef.current.size) return;
+    const idset = new Set(ids);
+    const survivors = new Set([...soloRef.current].filter((id) => idset.has(id)));
+    if (survivors.size < soloRef.current.size) applySolo(survivors); // 有失效 id → 同步 React+引擎+重渲
+    else eng.current?.setSolo(survivors);                            // 全存活(同场重播)→ 只推引擎,React 态不变、免多余重渲
+  };
 
   const toggleInst = (id: string) => {
     const inst = findInst(curSession, id); if (!inst) return;
@@ -974,13 +994,15 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     focusSound(id);
     if (startPhase == null && en.auditioningId() === id) { en.stopAudition(); setTick((t) => t + 1); return; } // §28 给了 startPhase = 从起播线重起(不当 toggle 关)
     const s = c.soundsById.get(id); if (!s) return;
-    await en.resume();
+    const tok = en.nextAuditionToken(); // §28.7 防陈旧:await 期间发生 stop / 更新预览则作废本次(并标记"加载中"供空格识别)
     const warmT = setTimeout(() => setWarming(id), 120); // ⑥ 命中缓存(<120ms)直接出声、不闪 spinner
     try {
+      await en.resume();
       const buf = await warpToBuffer(s, c.bpm, regionFromClip(soundToClip(s))); // 走种子 Clip(含 timeMul),与建乐器后一致
+      if (en.auditionStale(tok)) return; // §28.7 warp 期间被 stop / 新预览顶掉 → 不出声(否则停不下来/错位)
       en.audition(id, buf, undefined, en.isPlaying(), (startPhase ?? 0) * buf.duration); // §28 startPhase→从起播线偏移;走带在跑则量化跟随 bar
     } finally {
-      clearTimeout(warmT); setWarming((w) => (w === id ? null : w));
+      clearTimeout(warmT); setWarming((w) => (w === id ? null : w)); en.clearAuditionPending(tok); // §28.7 按令牌清 pending(防抛错泄漏)
     }
     setTick((t) => t + 1);
   };
@@ -1176,9 +1198,15 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const e = eng.current, c = ctxRef.current; if (!e || !c) return;
     if (startPhase == null && e.auditioningId() === clip.id) { e.stopAudition(); setTick((t) => t + 1); return; } // §28 同 auditionSound
     const s = c.soundsById.get(clip.soundId); if (!s) return;
-    await e.resume();
-    const buf = await warpToBuffer(s, c.bpm, regionFromClip(clip));
-    e.audition(clip.id, buf, { mixer: clipMixer(clip) }, false, (startPhase ?? 0) * buf.duration); setTick((t) => t + 1);
+    const tok = e.nextAuditionToken(); // §28.7 防陈旧:同 auditionSound
+    try {
+      await e.resume();
+      const buf = await warpToBuffer(s, c.bpm, regionFromClip(clip));
+      if (e.auditionStale(tok)) return; // §28.7 warp 期间被 stop / 新预览顶掉 → 不出声
+      e.audition(clip.id, buf, { mixer: clipMixer(clip) }, false, (startPhase ?? 0) * buf.duration); setTick((t) => t + 1);
+    } finally {
+      e.clearAuditionPending(tok); // §28.7 按令牌清 pending(防抛错泄漏)
+    }
   };
 
   // --- collage arrange(自由网格:拖移/拖放/留白/无限延长;片按网格吸附,长度=各自 warp 的 bars)---
@@ -1281,6 +1309,10 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const editSoundRegion = async (soundId: string, clip: Clip) => {
     const c = ctxRef.current; if (!c) return;
     const s = c.soundsById.get(soundId); if (!s) return;
+    const cur = soundToClip(s); // §28.8 ClipEditor 在「选中/换素材/analysis 到达」重挂时会回流一次 emit;与现有 warp 无实质差异 → 早退:不压栈(免污染 undo)、不落库、不触发 auditionSwap(长 loop 会孤儿化正在响的 player = 停不下来)
+    if (cur.startSample === clip.startSample && cur.endSample === clip.endSample && cur.bars === clip.bars
+        && (cur.timeMul ?? 1) === (clip.timeMul ?? 1) && (cur.semitones || 0) === (clip.semitones || 0)
+        && (cur.fadeOutBars || 0) === (clip.fadeOutBars || 0) && (cur.fadeSilenceBars || 0) === (clip.fadeSilenceBars || 0)) return;
     pushHistory(); // §16:预调改 Sound.warp(快照口径②)→ 改动前压栈,可撤
     const warp: SampleWarp = { startSample: clip.startSample, endSample: clip.endSample, bars: clip.bars, timeMul: clip.timeMul, semitones: clip.semitones, fadeOutBars: clip.fadeOutBars, fadeSilenceBars: clip.fadeSilenceBars, warpedBy: 'manual' };
     const sounds = new Map(c.soundsById); sounds.set(soundId, { ...s, warp }); // 不可变更新:免污染已压栈的快照引用
@@ -1457,6 +1489,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
 
         {/* §31 输出设备选择:把整条出声链路由到指定声卡/接口(偏好存 localStorage,不入库/不进 undo) */}
         <OutputDevice onSelect={(id) => { eng.current?.setOutputDevice(id).catch(() => {}); }} />
+
+        {/* §32 总混音导出:把 Song 模式整首歌离线渲成 WAV/MP3 下载(只读快照,不落库/不进 undo) */}
+        <ExportDialog
+          fileName={projName}
+          onStopAll={stopAllAudio}
+          getInput={() => ({ sessions: sessionsRef.current, soundsById: ctxRef.current?.soundsById ?? ctx.soundsById, fx: fxRef.current, bpm: ctx.bpm, beatsPerBar: ctx.beatsPerBar, masterVolDb: masterVol })}
+        />
 
         {/* 主总线效果器(§17):失真 / 延迟 / 混响 */}
         <span className="tb-sep" />

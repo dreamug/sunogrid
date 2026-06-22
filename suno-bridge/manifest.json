@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Suno Bridge — Driver",
-  "version": "0.4.0",
-  "description": "嗅探 + 驱动 suno.com:在活会话里重放 generate/feed,并桥接 app(sunogrid.com / localhost)。",
+  "version": "0.5.0",
+  "description": "在你已登录的 suno.com 会话里驱动生成 loop,并桥接给 app(sunogrid.com / localhost)。token 不出浏览器。",
   "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": [
     "https://suno.com/*",
@@ -14,8 +14,23 @@
     "http://127.0.0.1/*"
   ],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html", "default_title": "Suno Bridge" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Suno Bridge",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
   "content_scripts": [
     {
       "matches": ["https://suno.com/*", "https://*.suno.com/*", "https://*.suno.ai/*"],
