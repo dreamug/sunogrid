@@ -22,6 +22,8 @@ import { ConfirmDialog, type ConfirmOpts } from '@/ui/ConfirmDialog';
 import { LoopManager } from '@/studio/ui/LoopManager';
 import { FxRack } from '@/studio/ui/FxRack';
 import { XYPad } from '@/studio/ui/XYPad';
+import { OutputDevice } from '@/studio/ui/OutputDevice';
+import { applySavedOutput } from '@/studio/useAudioOutputs';
 import { AutomationLane } from '@/studio/ui/AutomationLane';
 import { defaultAutomation, rescaleAuto, sampleXY, isActiveAuto, NEUTRAL, normalizeXyAuto, PROG_COLOR, PROG_LABEL, PROG_ORDER } from '@/studio/xyAutomation';
 import type { GenView, LoopView } from '@/contracts/studioViews';
@@ -158,6 +160,9 @@ const emptySessions = (): Session[] => [
 export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = null, genPrefs = null, gridPrefs = null, fx: fxProp = null, quantize: propQuantize = '1bar', beatsPerBar = 4, loopSong: propLoopSong = false, playMode: propPlayMode = 'live', showAutomation: propShowAutomation = true }: { projectId: string; name?: string; masterBpm: number; masterKey?: string | null; genPrefs?: GenPrefs | null; gridPrefs?: GridPrefs | null; fx?: FxConfig | null; quantize?: Quantize; beatsPerBar?: number; loopSong?: boolean; playMode?: 'live' | 'song'; showAutomation?: boolean }) {
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [projName, setProjName] = useState(name); // 顶栏可编辑工程名;改即乐观写 Project.name(同 quantize 套路,不进 undo/发件箱)
+  // §19 桌面化:仅 Electron(注入 window.sunogrid)才显示顶栏的「Suno」按钮。useEffect 里读,避免 SSR 水合不一致。web 上恒 false → 不渲染,行为不变。
+  const [isDesktop, setIsDesktop] = useState(false);
+  useEffect(() => { setIsDesktop(typeof window !== 'undefined' && !!(window as unknown as { sunogrid?: unknown }).sunogrid); }, []);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionIdx, setSessionIdx] = useState(0); // 「查看/编辑」中的场景(pad 区 + 编辑器都读它);Song 模式下它与「正在播的块」解耦
   const sessionIdxRef = useRef(0); sessionIdxRef.current = sessionIdx; // 给 useCallback([]) 的 loadInstrumentToEngine 读最新查看场景(判 viewingSoundingBlock)
@@ -367,6 +372,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         eng.current.onChange = () => setTick((t) => t + 1);
         eng.current.setQuantize(propQuantize); // 初始量化粒度(顶栏 Quantize 选择器)
         eng.current.setFx(fxRef.current);      // 初始主总线效果器(§17)
+        applySavedOutput(eng.current);         // §31:应用已存的输出设备偏好(校验设备仍在,否则回落默认)
         ctxRef.current = c;
         setCtx(c); setGens(g); setSessions(sessions);
         await loadSession(sessions[0]);
@@ -654,9 +660,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     starting.current = true;
     try {
       await e.resume().catch(() => {});
+      // 走带中点同一块的另一遍:该块 voice 已在引擎、已 warp、正出声 —— 无需 clearAll+逐件重建 buffer(那一整套同步拆/建音频图就是卡顿源)。
+      const sameBlock = e.isPlaying() && playingIdxRef.current === bi;
       if (e.isPlaying()) { cancelSongSchedule(); e.stopTransport(); setPendingIdx(null); }
       cancelSongSchedule();
-      await loadSession(s); if (eng.current !== e) return; // 引擎里只剩目标块
+      // 同块:只剔掉 lookahead 预载的下一块 voice(否则 startTransport 会把它们一并点响),其余瞬时复用(同 §20 retainOnly 套路)。跨块/冷起仍重灌,引擎里只剩目标块。
+      if (sameBlock) e.retainOnly(s.instruments.map((i) => i.id));
+      else { await loadSession(s); if (eng.current !== e) return; }
       clearSolo();
       setSessionIdx(bi); setSelId(null); setSelClipId(null); setLibSel(null);
       viewFollows.current = true; playingIdxRef.current = bi; playingRef.current = true; songBlockStart.current = blockStart;
@@ -1445,6 +1455,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
           <MasterMeter engine={e} playing={playing} />
         </span>
 
+        {/* §31 输出设备选择:把整条出声链路由到指定声卡/接口(偏好存 localStorage,不入库/不进 undo) */}
+        <OutputDevice onSelect={(id) => { eng.current?.setOutputDevice(id).catch(() => {}); }} />
+
         {/* 主总线效果器(§17):失真 / 延迟 / 混响 */}
         <span className="tb-sep" />
         <FxRack fx={fx} bpm={ctx.bpm} onFx={commitFx} onStart={pushHistory} />
@@ -1465,6 +1478,22 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         <button className="ic" disabled={!past.length} title="Undo (⌘Z)" onClick={undo} aria-label="Undo">↩</button>
         <button className="ic" disabled={!future.length} title="Redo (⌘⇧Z)" onClick={redo} aria-label="Redo">↪</button>
         <span className={'svc-dot ' + sync} title="Changes auto-save to the library; restored on reload">{sync === 'saving' ? 'Saving' : sync === 'error' ? '⚠ Failed' : 'Saved'}</span>
+
+        {/* §19 桌面化:打开内嵌 suno.com 窗口(登录 / 解验证码)。仅 Electron 显示,样式同 FX/XY 顶栏按钮。 */}
+        {isDesktop && (
+          <>
+            <span className="tb-sep" />
+            <button
+              className="fx-btn"
+              title="打开 Suno 窗口(登录 / 解验证码)"
+              aria-label="Open Suno"
+              onClick={() => (window as unknown as { sunogrid?: { showSunoLogin?: () => void } }).sunogrid?.showSunoLogin?.()}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
+              Suno
+            </button>
+          </>
+        )}
       </header>
 
       {sync === 'error' && (
@@ -1648,7 +1677,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                   <div key={slot} className={'clip empty' + (over === slot ? ' over' : '')} style={{ minHeight: 0, borderRadius: 0, borderWidth: '0 1px 1px 0', borderStyle: 'solid', borderColor: FAINT }} onMouseEnter={() => setHoverSlot(slot)} onMouseLeave={() => setHoverSlot((h) => (h === slot ? null : h))} onClick={() => { eng.current?.stopAudition(); setSelId(null); setSelClipId(null); setMarkedIds(new Set()); }} {...dnd}>
                     <span className="cidx">{slot + 1}</span>
                     {over === slot ? (
-                        <div style={{ margin: 'auto', padding: '6px 12px', border: '1px dashed var(--acc)', borderRadius: 'var(--r)', color: 'var(--acc)', fontSize: 11, fontWeight: 500, background: 'var(--acc-dim)' }}>
+                        <div style={{ margin: 'auto', padding: '6px 12px', border: '1px dashed var(--acc)', borderRadius: 'var(--r)', color: 'var(--acc)', fontSize: 11, fontWeight: 500, background: 'var(--acc-dim)', pointerEvents: 'none' }}>{/* pointerEvents:none:覆盖层必须对拖拽透明,否则光标移到这块文案上时父槽收到 dragleave→setOver(null)→层卸载→又 dragover→重挂,无限闪烁致 drop 失败(同 CollageEditor 落点徽标) */}
                           {overKind === 'inst' ? 'Move here' : 'Drop here · new instrument'}
                         </div>
                       ) : hoverSlot === slot ? (

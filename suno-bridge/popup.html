@@ -3,14 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <style>
-    body { font: 12px/1.4 -apple-system, system-ui, sans-serif; width: 380px; margin: 0; padding: 10px; }
+    body { font: 12px/1.4 -apple-system, system-ui, sans-serif; width: 360px; margin: 0; padding: 12px; color:#1c1b19; }
     h1 { font-size: 13px; margin: 0 0 8px; }
     .row { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
-    input[type=text] { flex: 1; padding: 4px 6px; }
     button { padding: 4px 8px; cursor: pointer; }
     label { font-size: 11px; color: #555; }
+    .hint { font-size: 11px; color:#888; margin: 6px 0 0; line-height: 1.5; }
+    /* —— Bridge 连接区 —— */
+    #bridge { padding-bottom: 11px; margin-bottom: 11px; border-bottom: 1px solid #e7e7e7; }
+    .bx-cur { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+    .bx-org { flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 11px; word-break: break-all; color: #333; }
+    .bx-state { font-size: 11px; color: #0a7d00; }
+    .bx-builtin { font-size: 11px; color: #888; }
+    #bx-list { margin-top: 4px; }
+    .bx-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-top: 1px solid #f2f2f2; }
+    .bx-item .o { flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 11px; word-break: break-all; }
+    /* —— Sniffer(legacy)—— */
     #count { color: #888; }
-    #list { max-height: 320px; overflow: auto; border-top: 1px solid #eee; margin-top: 6px; }
+    input[type=text] { flex: 1; padding: 4px 6px; }
+    #list { max-height: 240px; overflow: auto; border-top: 1px solid #eee; margin-top: 6px; }
     .item { padding: 4px 2px; border-bottom: 1px solid #f2f2f2; cursor: pointer; }
     .item:hover { background: #f7f7ff; }
     .m { font-weight: bold; color: #06c; }
@@ -20,7 +31,14 @@
   </style>
 </head>
 <body>
-  <h1>Suno Bridge — Sniffer</h1>
+  <div id="bridge">
+    <h1>Bridge — app sites</h1>
+    <div id="bx-cur" class="bx-cur"></div>
+    <div id="bx-list"></div>
+    <p class="hint">Built in: <b>sunogrid.com</b> &amp; <b>localhost</b> (no setup). Self-hosting on another domain? Open your site, then click <b>Connect</b> — no manifest editing needed.</p>
+  </div>
+
+  <h1>Sniffer</h1>
   <div class="row">
     <input id="filter" type="text" placeholder="过滤 URL（默认 api）" value="api" />
     <span id="count">0</span>

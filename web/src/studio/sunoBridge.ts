@@ -28,13 +28,24 @@ export interface BridgeClip {
   duration?: number;
 }
 
-export const sunoBridge = {
+// web 现状:走插件 postMessage(下面这套一字不改)。
+const webBridge = {
   status: () => call<{ hasAuth: boolean; hasTemplate: boolean }>('status', {}, 8000),
   generate: (args: { prompt: string; mode?: 'sound' | 'advanced'; loop?: boolean; bpm?: number; key?: string }) =>
     call<{ batchId: string; clipIds: string[] }>('generate', args, 120000),
   poll: (clipIds: string[]) => call<BridgeClip[]>('poll', { clipIds }, 15000),
   download: (url: string) => call<{ b64: string; contentType: string }>('download', { url }),
 };
+
+// §19 桌面化:Electron 的 preload 注入 window.sunogrid.bridge(内嵌 suno.com 驱动)。
+// 有它 → 走 IPC 桥;否则(web)→ 走上面的插件 postMessage。调用方(studioGens/StudioApp)无感。
+// ⚠ 铁律:web 上 window.sunogrid 为 undefined → sunoBridge === webBridge,行为与改动前完全一致。
+const desktopBridge =
+  typeof window !== 'undefined'
+    ? (window as unknown as { sunogrid?: { bridge?: typeof webBridge } }).sunogrid?.bridge
+    : undefined;
+
+export const sunoBridge: typeof webBridge = desktopBridge ?? webBridge;
 
 export function base64ToArrayBuffer(b64: string): ArrayBuffer {
   const bin = atob(b64);

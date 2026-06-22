@@ -154,6 +154,13 @@ export class StudioEngine {
     if (play) this.clickSynth.triggerAttackRelease(down ? 'C6' : 'C5', '32n', time);
   }
   async resume(): Promise<void> { await Tone.start(); }
+  /** §31 把整条出声链路由到指定输出设备。全应用只有 Tone 这一个 context 真驱动扬声器(解码/离线 ctx 不出声),
+   *  故只切它即全局生效。deviceId='default' → setSinkId('') = 跟随系统默认;Safari/Firefox 无 setSinkId → 静默走默认。 */
+  async setOutputDevice(deviceId: string): Promise<void> {
+    const raw = Tone.getContext().rawContext as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+    if (typeof raw.setSinkId !== 'function') return;
+    await raw.setSinkId(deviceId === 'default' ? '' : deviceId);
+  }
   /** 改主 BPM:主走带 transport 立即跟随(buffer 的 re-warp/热替换由上层逐乐器做)。 */
   setBpm(bpm: number): void { Tone.getTransport().bpm.value = bpm; this.fx?.setBpm(bpm); this.xy?.setBpm(bpm); }
 

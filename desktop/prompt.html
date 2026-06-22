@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; height: 100%; font: 13px -apple-system, system-ui, sans-serif; background: #16161a; color: #e8e8ea; }
+      .wrap { box-sizing: border-box; height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 18px; }
+      #msg { font-weight: 600; }
+      input { box-sizing: border-box; width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid #3a3a42; background: #0f0f12; color: #fff; font-size: 14px; outline: none; }
+      input:focus { border-color: #6b8afd; }
+      .row { margin-top: auto; display: flex; justify-content: flex-end; gap: 8px; }
+      button { padding: 7px 16px; border-radius: 8px; border: 1px solid #3a3a42; background: #26262e; color: #e8e8ea; cursor: pointer; font-size: 13px; }
+      button#ok { background: #6b8afd; border-color: #6b8afd; color: #0b0b0d; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div id="msg"></div>
+      <input id="inp" />
+      <div class="row">
+        <button id="cancel">取消</button>
+        <button id="ok">确定</button>
+      </div>
+    </div>
+    <script>
+      const q = new URLSearchParams(location.search);
+      document.getElementById('msg').textContent = q.get('message') || '';
+      const inp = document.getElementById('inp');
+      inp.value = q.get('def') || '';
+      setTimeout(() => { inp.focus(); inp.select(); }, 0);
+      const ok = () => window.promptAPI.submit(inp.value);
+      const cancel = () => window.promptAPI.submit(null);
+      document.getElementById('ok').addEventListener('click', ok);
+      document.getElementById('cancel').addEventListener('click', cancel);
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') ok();
+        else if (e.key === 'Escape') cancel();
+      });
+    </script>
+  </body>
+</html>

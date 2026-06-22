@@ -1,9 +1,10 @@
 'use client';
 // 登录/注册共用表单。注册=用户名+密码+确认密码,登录=用户名+密码。成功跳 next || /projects。
-// 左品牌面板(波形 hero)+ 右表单双栏;面板下方一个插件 block(下载 / 安装步骤 / 学习用途风险声明,细线分隔)。
+// 左品牌面板(波形 hero)+ 右表单双栏;面板下方插件 block 复用 <BridgeInstall variant="block" />。
 import { useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import { BridgeInstall } from '@/ui/BridgeInstall';
 
 // 一段"音频片段"的波形(build→peak→decay→tail);播放头扫过点亮陶土色,呼应 pad 已播 fill。
 const WAVE = [
@@ -104,33 +105,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
           </form>
         </div>
 
-        {/* Suno 桥接插件:没上商店,下载未打包扩展 + 开发者模式加载;声明仅供学习、账号风险自负。 */}
-        <div className="auth-ext">
-          <div className="ax-main">
-            <span className="ax-icon"><img src="/suno.png" alt="Suno" width={34} height={34} /></span>
-            <div className="ax-t">
-              <div className="ax-tt">Suno Bridge extension</div>
-              <div className="ax-ts">Needed to generate — it runs in your own browser. Install once.</div>
-            </div>
-            <a className="ax-dl" href="/suno-bridge.zip" download>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 3v12M7 10l5 5 5-5M5 21h14" />
-              </svg>
-              Download .zip
-            </a>
-          </div>
-          <div className="ax-steps">
-            <span><span className="ax-n">1</span>open <em>chrome://extensions</em></span><span className="ax-sep">→</span>
-            <span><span className="ax-n">2</span>turn on <em>Developer mode</em></span><span className="ax-sep">→</span>
-            <span><span className="ax-n">3</span><em>Load unpacked</em> → pick the folder</span>
-          </div>
-          <div className="ax-warn">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12 3l9 16H3z" /><path d="M12 10v4M12 17.4v.01" />
-            </svg>
-            <p><b>For learning &amp; research only.</b> Replaying Suno's private API can get your account rate-limited or banned — your account, your risk.</p>
-          </div>
-        </div>
+        <BridgeInstall variant="block" />
       </div>
     </main>
   );

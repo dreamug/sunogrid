@@ -35,6 +35,8 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 
   if (msg.type === 'suno-cmd') {
     const appTabId = sender.tab && sender.tab.id;
+    // 纵深防御:命令只接受来自页面标签(bridge.js 注入在 app 页);非标签来源直接丢弃。
+    if (appTabId == null) return;
     pending[msg.id] = appTabId;
     sendToDriver({ type: 'suno-cmd', id: msg.id, cmd: msg.cmd, args: msg.args }).then((ok) => {
       if (!ok) {

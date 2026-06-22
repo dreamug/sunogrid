@@ -2,10 +2,12 @@
 // 项目工作台:列出当前用户项目 + 示例母版(§25)、新建、重命名、删除、打开 → /projects/[id]。
 // §25:示例母版(别人标的,owned=false)只读 —— 点开 = 写时复制出我的副本再进;"删除"按钮变成"从我的列表隐藏"。
 //      SUPER_ADMIN 在自己拥有的项目上多一个 ★ 开关,把项目标成/取消示例母版。
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, type ApiProject } from '@/studio/api';
 import { ConfirmDialog, type ConfirmOpts } from '@/ui/ConfirmDialog';
+import { BridgeInstall } from '@/ui/BridgeInstall';
+import { promptText } from '@/ui/promptText';
 
 export function Workbench({ username, isSuperAdmin = false }: { username: string; isSuperAdmin?: boolean }) {
   const router = useRouter();
@@ -16,6 +18,18 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
   // 通用确认弹窗:const ok = await askConfirm({...}); if (ok) ...
   const askConfirm = (opts: ConfirmOpts) => new Promise<boolean>((resolve) => setConfirmState({ ...opts, resolve }));
 
+  // 右上角"Get the bridge"弹层:点按钮开/关,点外面关。
+  const [bridgeOpen, setBridgeOpen] = useState(false);
+  const bridgeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!bridgeOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (bridgeRef.current && !bridgeRef.current.contains(e.target as Node)) setBridgeOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [bridgeOpen]);
+
   const reload = async () => {
     try { setProjects(await api.projects.list()); } catch { setProjects([]); }
   };
@@ -23,7 +37,7 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
 
   const create = async () => {
     if (busy) return;
-    const name = (window.prompt('Project name', 'Untitled project') ?? '').trim();
+    const name = ((await promptText('Project name', 'Untitled project')) ?? '').trim();
     if (name === '') return; // 取消
     setBusy(true);
     try {
@@ -75,6 +89,14 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
       <div className="wb-top">
         <h1>My projects</h1>
         <div className="who">
+          <div className="wb-ext" ref={bridgeRef}>
+            <button className="wb-get" onClick={() => setBridgeOpen((o) => !o)} aria-expanded={bridgeOpen}>
+              <img src="/suno.png" alt="" width={16} height={16} />
+              Get the bridge
+              <span className="wb-get-cv">▾</span>
+            </button>
+            {bridgeOpen && <div className="wb-ext-pop"><BridgeInstall variant="popover" /></div>}
+          </div>
           <span>{username}</span>
           <button className="btn" style={{ padding: '6px 14px' }} onClick={logout}>Log out</button>
         </div>

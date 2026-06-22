@@ -139,7 +139,11 @@ pm2 start "npm start" --name sunogrid --cwd /path/to/sunogrid/web \
 生成发生在**用户自己浏览器里的插件**(在其登录的 suno.com 会话重放私有接口,token 不出浏览器)。要让你的线上站点能驱动它,必须做两件事:
 
 ### 7.1 让插件认你的生产域名
-插件目前只注入 `localhost`/`127.0.0.1`(见 [`suno-bridge/manifest.json`](suno-bridge/manifest.json) 与 [`bridge.js`](suno-bridge/bridge.js))。改 manifest **两处**为你的域名后重新加载:
+插件已内建 `localhost` + 本项目生产域名 `sunogrid.com`(零配置即用)。**自托管到别的域名**有两种办法:
+
+**① 推荐 · 插件 popup 一键授权(免改任何文件)** —— 打开你的站点 → 点插件图标 → 在 “Bridge — app sites” 里点 **Connect** → 同意权限提示。插件用 `optional_host_permissions` + 运行时 `chrome.scripting.registerContentScripts` 把 bridge.js 注册到你的域名(持久,刷新不掉;可在同处 Disconnect)。
+
+**② 或 · 手改 manifest 两处 `matches`**(见 [`suno-bridge/manifest.json`](suno-bridge/manifest.json) 的 `host_permissions` 与 bridge.js 那条 content_script)再重新加载:
 
 ```jsonc
 // host_permissions 里加:
@@ -150,7 +154,7 @@ pm2 start "npm start" --name sunogrid --cwd /path/to/sunogrid/web \
 
 > 桥接靠 content-script `postMessage`(`bridge.js` 注释:“无需 app 知道插件 ID”),所以**插件 ID 不稳定不影响**,唯一耦合点就是上面这两处 `matches`。
 >
-> 开源给别人自托管:在 README 里说明“自托管者需把这两处 `matches` 改成自己的域名再加载插件”,或把域名做成构建参数。
+> 开源给别人自托管:首选上面 ① 的 popup **Connect**(零文件改动、用户自助授权);需要预置/批量分发时再用 ② 手改 `matches`。
 
 ### 7.2 分发给公众用户
 插件没上架商店、是未打包扩展。公开分发的现实选项:

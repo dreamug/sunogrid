@@ -1,0 +1,17 @@
+{
+  "name": "sunogrid-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SunoGrid 桌面宿主(Electron)。web 为主,这是 bonus 外壳。设计见仓库 PRODUCT.md §19。删掉本目录 web 必须照跑不误(§19 铁律)。",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^33.3.0",
+    "electron-builder": "^25.1.8"
+  }
+}

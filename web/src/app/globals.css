@@ -128,6 +128,26 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .metro-pop input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:8px; height:15px; background:var(--play); border-radius:2px; margin-top:-6px; }
 .metro-pop input[type=range]::-moz-range-thumb { width:8px; height:15px; background:var(--play); border:none; border-radius:2px; }
 
+/* §31 输出设备选择:顶栏 Output 按钮 + 右对齐浮层单选列 */
+.tb-out { position:relative; display:flex; align-items:center; }
+.out-btn { display:flex; align-items:center; gap:5px; height:30px; box-sizing:border-box; padding:0 9px; font-size:11px; color:var(--tx-2); background:var(--bg-3); border:1px solid var(--line-2); border-radius:var(--r); cursor:pointer; }
+.out-btn:hover { color:var(--tx); }
+.out-btn.on, .out-btn.on svg { color:var(--acc); border-color:var(--acc); }
+.out-lbl { font-size:11px; }
+.out-pop { position:absolute; top:calc(100% + 6px); right:0; z-index:40; width:252px; background:var(--bg-2); border:1px solid var(--line-2); border-radius:var(--r); padding:6px; box-shadow:0 8px 22px rgba(0,0,0,.5); }
+.out-pop .op-h { font-size:11px; color:var(--tx); padding:4px 6px 6px; }
+.out-pop .op-note { font-size:10px; line-height:1.5; color:var(--tx-3); padding:2px 6px 6px; }
+.out-pop .op-list { display:flex; flex-direction:column; }
+.out-pop .op-row { display:flex; align-items:center; gap:8px; width:100%; min-width:0; overflow:hidden; text-align:left; padding:7px 8px; background:none; border:none; border-radius:var(--r); color:var(--tx-2); font-size:12px; cursor:pointer; }
+.out-pop .op-row:hover { background:var(--bg-3); color:var(--tx); }
+.out-pop .op-row.op-sel { background:var(--acc-dim); color:var(--tx); } /* 独立类名 op-sel,避开全局 .sel(顶栏选择器)的 max-width:170px 泄漏 → 选中行被截短不铺满 */
+.out-pop .op-ck { flex:0 0 12px; width:12px; color:var(--acc); font-size:11px; }
+.out-pop .op-text { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:1px; overflow:hidden; }
+.out-pop .op-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.out-pop .op-sub { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--tx-3); font-size:10px; }
+.out-pop .op-grant { width:100%; margin-top:4px; padding:6px; font-size:11px; color:var(--tx-2); background:var(--bg-3); border:1px solid var(--line-2); border-radius:var(--r); cursor:pointer; }
+.out-pop .op-grant:hover { color:var(--tx); border-color:var(--acc); }
+
 /* 分段控件:激活 = 亮一档的灰 */
 .seg { display:inline-flex; border:1px solid var(--line); border-radius:var(--r); overflow:hidden; background:var(--bg-0); }
 .seg button { font:inherit; font-size:12px; padding:4px 10px; background:transparent; color:var(--tx-2); border:none; cursor:pointer; }
@@ -215,7 +235,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .clipgrid { display:grid; grid-template-columns:repeat(4,1fr); gap:5px; }
 .clip { position:relative; display:flex; align-items:stretch; min-height:78px; border-radius:var(--r); border:1px solid var(--line); background:var(--bg-1); cursor:pointer; overflow:hidden; transition:border-color .1s, background-color .1s; }
 .clip.empty { background:transparent; }
-.clip.empty .cidx { position:absolute; top:6px; left:8px; font-size:11px; color:var(--tx-3); font-variant-numeric:tabular-nums; }
+.clip.empty .cidx { position:absolute; top:6px; left:8px; font-size:11px; color:var(--tx-3); font-variant-numeric:tabular-nums; pointer-events:none; }
 .clip.empty .cdrop { margin:auto; font-size:11px; color:#4a463f; }
 .clip.empty:hover { border-color:var(--line-2); background:color-mix(in srgb, var(--tx) 2.5%, transparent); }
 /* 操场空格右上角的「加乐器」按钮:默认描边、hover 充背景 */
@@ -581,6 +601,28 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
   .ax-main { flex-wrap:wrap; }
 }
 
+/* 工作台右上角:Get the bridge 按钮 + 弹层(复用 BridgeInstall 的 popover 变体) */
+.wb-ext { position:relative; display:flex; }
+.wb-get { display:inline-flex; align-items:center; gap:7px; height:31px; padding:0 11px; font:inherit; font-size:12px; color:var(--tx); background:var(--bg-3); border:1px solid var(--line-2); border-radius:var(--r); cursor:pointer; }
+.wb-get:hover { border-color:#544e44; }
+.wb-get img { width:16px; height:16px; border-radius:4px; display:block; }
+.wb-get-cv { color:var(--tx-3); font-size:9px; }
+.wb-ext-pop { position:absolute; top:calc(100% + 7px); right:0; z-index:40; width:300px; background:var(--bg-2); border:1px solid var(--line-2); border-radius:var(--r); box-shadow:0 8px 24px rgba(0,0,0,.5); overflow:hidden; }
+.bx-head { display:flex; align-items:center; gap:10px; padding:13px 14px; }
+.bx-head img { width:30px; height:30px; border-radius:7px; flex:none; display:block; }
+.bx-tt { font-size:13px; color:var(--tx); font-weight:500; }
+.bx-ts { font-size:11px; color:var(--tx-2); margin-top:1px; }
+.bx-dl { display:flex; align-items:center; justify-content:center; gap:7px; margin:0 14px 12px; height:34px; font-size:12.5px; font-weight:500; color:var(--acc-ink); background:var(--acc); border-radius:var(--r); }
+.bx-dl:hover { background:color-mix(in srgb, var(--acc) 88%, #fff); text-decoration:none; }
+.bx-steps { padding:11px 14px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:8px; }
+.bx-step { display:flex; align-items:center; gap:9px; font-size:11.5px; color:var(--tx-2); }
+.bx-n { flex:none; display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:var(--bg-3); color:var(--tx-2); font-size:9px; }
+.bx-step em { font-style:normal; color:var(--tx); font-family:var(--mono); font-size:10.5px; }
+.bx-warn { display:flex; align-items:center; gap:7px; padding:9px 14px; border-top:1px solid var(--line); }
+.bx-warn svg { color:var(--queue); flex:none; }
+.bx-warn p { margin:0; font-size:10.5px; line-height:1.5; color:var(--tx-3); }
+.bx-warn b { color:color-mix(in srgb, var(--queue) 50%, var(--tx-2)); font-weight:500; }
+
 /* —— 项目工作台 —— */
 .wb { max-width:920px; margin:0 auto; padding:36px 24px 80px; }
 .wb-top { display:flex; align-items:center; gap:12px; margin-bottom:24px; }
@@ -596,7 +638,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .proj-del:hover { color:var(--danger); background:var(--bg-2); }
 .proj-del:focus-visible { opacity:1; outline:1px solid var(--line-2); }
 .proj.new { align-items:center; justify-content:center; color:var(--tx-2); border-style:dashed; font-size:13px; }
-.proj.new:hover { color:var(--acc); border-color:var(--acc); }
+.proj.new:hover { color:var(--acc); border-color:var(--acc); border-style:solid; }
 
 /* §25 示例工程卡片:金色左缘 + 右下角 Example 角标 + 状态行(取代旧的左上角生★ + 重复角标) */
 .proj.is-example::before { content:''; position:absolute; left:0; top:1px; bottom:1px; width:2px; background:var(--solo); border-top-left-radius:var(--r); border-bottom-left-radius:var(--r); }

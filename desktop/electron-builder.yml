@@ -1,0 +1,37 @@
+# electron-builder 打包配置。
+# 桌面 = 指向云端 web 的原生客户端 + 内嵌 Suno(见 PRODUCT.md §19,2026-06-22 云端化)。
+# 因此打包很轻:只装外壳(main/preload),不打包 Next 服务、不打包 DB、不打包 Prisma 引擎。
+# prod 运行时 main.js 直接 loadURL 云端(SUNOGRID_URL,默认 https://sunogrid.com)。
+appId: com.sunogrid.desktop
+productName: SunoGrid
+copyright: SunoGrid
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - main.js
+  - preload.js
+  - suno-preload.js # Phase 2:内嵌 suno.com 驱动(interceptor 收口)
+  - package.json
+
+asar: true
+
+mac:
+  category: public.app-category.music
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  # hardenedRuntime: true   # 公证时打开
+  # notarize: true
+
+win:
+  target:
+    - nsis
+
+linux:
+  target:
+    - AppImage
