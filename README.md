@@ -14,6 +14,22 @@
 
 **Style-agnostic**: trap, house, ambient, funk, jazzhiphop… anything Suno can generate works. There is no genre-specific logic in the engine. (The initial use case was jazzhiphop, but the product itself is style-agnostic.)
 
+### Features
+
+- **AI loop generation (any style)** — describe a sound and Suno generates a loop; works for any genre, with no style-specific logic in the engine.
+- **Auto-conditioning + offline warp** — automatic BPM / loop-region detection, snap to whole bars, then time-stretch + pitch-shift offline (WASM) to the project's BPM and key. Playback runs a plain looping source, so it **never glitches**.
+- **Bar-quantized playback** — start/stop align to bar boundaries; seamless looping with no real-time stretching.
+- **Clip editor** — per-clip warp / trim / slice, a snap-to-grid start-offset marker, and tail fade-out.
+- **Arrangement** — a free grid with snap / drag / drop and sub-bar placement; **Live** scene switching plus a **Song** linear mode (with looping) and an XY automation lane.
+- **Collage tool** — chop several samples into pieces, warp each piece independently, rearrange them into one bar-loop, and bake it onto a pad.
+- **Pad-bank loop machine** — classic pad-grid triggering of ready loops.
+- **Stem separation** — a self-hosted Demucs sidecar splits a loop into stems (drums / bass / vocals / …); drums can be split further into kick / snare / toms / cymbals. Stems inherit the parent warp and stay phase-locked.
+- **Mixer + master FX** — per-instrument gain / pan / 3-band EQ and solo; a master send/return FX bus (distortion / delay / reverb).
+- **XY performance pad** — a Kaoss-style master-insert with multiple programs (filter / slicer / delay / brake).
+- **Local sample upload** — bring your own wav / mp3, auto-estimate BPM & key, and add it to your library.
+- **Undo / redo** — snapshot-stack undo covering edits across the project.
+- **Accounts & projects** — username/password auth, normalized persistence with optimistic sync, multi-tenant scoping, and shareable read-only **example projects** (fork-on-open: opening one clones an editable copy into your account).
+
 ### How it works
 
 The core is a **generate → preprocess → ready → quantized playback** pipeline, and the key decision is to **never time-stretch during playback**:
@@ -95,6 +111,22 @@ Reverse-engineering Suno's private endpoints for generation may violate its ToS;
 **SunoGrid** 把"用 AI 生成素材"和"像 groovebox 一样演奏 / 编排"合进同一个浏览器 app。你描述想要的声音 → Suno 生成一段 loop → 自动测速、对齐整小节、离线变速到工程 BPM、钉好循环点 → 拖进网格,踩着小节边界量化启动。
 
 **风格无关**:trap、house、ambient、funk、jazzhiphop…… 任何 Suno 能生成的都行,引擎里没有任何风格专属逻辑。(初始用例是 jazzhiphop,但产品本身风格无关。)
+
+### 功能
+
+- **AI loop 生成(任意风格)** — 描述想要的声音,Suno 生成一段 loop;适用任何曲风,引擎里没有风格专属逻辑。
+- **自动 conditioning + 离线 warp** — 自动测 BPM / 找循环区、snap 到整小节,再离线(WASM)变速 + 变调到工程的 BPM 与调。播放只跑普通循环 source,**绝不爆音**。
+- **小节级量化播放** — 启停对齐小节边界;无缝循环,播放时不做实时变速。
+- **Clip 编辑器** — 逐 clip warp / trim / slice、吸网格的起播刻度、尾部淡出。
+- **编排** — 自由网格(吸附 / 拖移 / 拖放、允许 sub-bar);**Live** 场景切换 + **Song** 线性模式(可循环)+ XY 自动化 lane。
+- **拼贴器** — 把多个样本切成碎片,逐片 warp,重排成一条整小节 loop,烘焙落到 pad。
+- **Pad bank loop 机** — 经典 pad 网格触发就绪 loop。
+- **乐器分离** — 自托管 Demucs sidecar 把 loop 拆成 stem(drums / bass / vocals / …);drums 还能再拆 kick / snare / toms / cymbals。子轨继承父 warp、天然锁相。
+- **混音 + 主总线效果器** — 每件乐器 gain / pan / 三段 EQ + solo;主总线 send/return 效果器(失真 / 延迟 / 混响)。
+- **XY 表演板** — Kaoss 式主总线 insert,多 program(滤波 / slicer / 延迟 / brake)。
+- **本地样本上传** — 上传自己的 wav / mp3,自动估 BPM 与调,入库。
+- **撤销 / 重做** — 快照栈式 undo,覆盖工程内各类编辑。
+- **账户与项目** — 用户名/密码认证、规范化持久化 + 乐观同步、多租户 scoping,以及可共享的只读**示例项目**(进入即 fork:打开就在你账户里克隆出可编辑副本)。
 
 ### 它怎么工作
 
