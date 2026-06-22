@@ -37,6 +37,7 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  // 排除 Next 静态资源;其余(含 / 与 /api/*)都过闸。
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  // 排除 Next 静态资源 + public 里带扩展名的文件(suno.png / suno-bridge.zip 等,
+  // 未登录访客在登录页就要下载,不能被闸门拦);其余(含 / 与 /api/*,均无扩展名)都过闸。
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\..*).*)'],
 };

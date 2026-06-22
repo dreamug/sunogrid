@@ -508,18 +508,78 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .we-compact .we-main { flex:1; min-width:0; padding:10px 12px; }  /* 波形块占满右侧,高度 = 控制块高度 */
 .we-compact .we-stage { flex:1; height:auto; min-height:140px; }  /* 波形铺满整个高度;浮层加宽后高度可矮些 */
 
-/* —— 认证页 —— */
+/* —— 认证页:左品牌(波形 hero)/ 右表单 双栏面板,呼应 pad 已播 fill —— */
 .auth { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
-.auth-card { width:100%; max-width:340px; background:var(--bg-1); border:1px solid var(--line); border-radius:var(--r); padding:28px 26px 24px; }
-.auth-card h1 { font-weight:500; font-size:19px; margin:0 0 4px; }
-.auth-card .sub { color:var(--tx-2); font-size:12.5px; margin:0 0 20px; }
-.field { display:flex; flex-direction:column; gap:5px; margin-bottom:14px; }
-.field label { font-size:11px; letter-spacing:.04em; color:var(--tx-3); }
-.field input { font:inherit; font-size:13px; color:var(--tx); background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); padding:9px 11px; }
-.field input:focus { outline:none; border-color:var(--acc); }
-.auth-err { color:var(--danger); font-size:12px; margin:0 0 12px; min-height:15px; }
-.auth-card .btn { width:100%; margin-top:4px; }
-.auth-alt { margin-top:16px; font-size:12px; color:var(--tx-2); text-align:center; }
+.auth-shell { width:100%; max-width:840px; display:grid; grid-template-columns:1.04fr .96fr;
+  background:var(--bg-1); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+
+/* 左:品牌面板(暖色微染陶土) */
+.auth-brand { position:relative; display:flex; flex-direction:column; justify-content:space-between; gap:28px;
+  padding:30px 30px 28px; background:color-mix(in srgb, var(--acc) 6%, var(--bg-1)); border-right:1px solid var(--line); }
+.ab-mark, .ac-mark { display:flex; align-items:center; gap:9px; }
+.ab-logo { width:24px; height:24px; flex:none; display:flex; align-items:center; justify-content:center; background:var(--acc); border-radius:var(--r); color:var(--acc-ink); }
+.ab-word { font-size:14px; letter-spacing:.01em; color:var(--tx); font-weight:500; }
+.ab-hero h2 { font-weight:500; font-size:25px; line-height:1.18; letter-spacing:-.01em; color:var(--tx); margin:0 0 12px; }
+.ab-hero p { font-size:12.5px; line-height:1.6; color:var(--tx-2); margin:0; max-width:30ch; }
+.ab-foot { display:flex; flex-direction:column; gap:10px; }
+.ab-meta { font-family:var(--mono); font-size:10.5px; letter-spacing:.04em; color:var(--tx-3); }
+
+/* 波形 hero:静态条 + 陶土播放头扫过点亮(同 pad .cwave-fill 语汇) */
+.auth-wave { position:relative; height:72px; }
+.aw-bars { position:absolute; inset:0; display:flex; align-items:center; gap:3px; }
+.aw-bars span { flex:1 1 0; min-width:2px; border-radius:1px; }
+.aw-base span { background:var(--line-2); }
+.aw-fill { clip-path:inset(0 100% 0 0); animation:aw-sweep 5.5s cubic-bezier(.4,0,.2,1) infinite; }
+.aw-fill span { background:var(--acc); }
+.aw-head { position:absolute; top:6px; bottom:6px; left:0; width:1px; background:var(--acc); opacity:.75; box-shadow:0 0 6px rgba(194,114,79,.6); animation:aw-head 5.5s cubic-bezier(.4,0,.2,1) infinite; }
+@keyframes aw-sweep { 0%,4% { clip-path:inset(0 100% 0 0); } 86%,100% { clip-path:inset(0 0 0 0); } }
+@keyframes aw-head { 0%,4% { left:0; opacity:.75; } 86% { left:100%; opacity:.75; } 92%,100% { left:100%; opacity:0; } }
+@media (prefers-reduced-motion: reduce) { .aw-fill { animation:none; clip-path:inset(0 54% 0 0); } .aw-head { animation:none; left:46%; } }
+
+/* 右:表单 */
+.auth-card { display:flex; flex-direction:column; justify-content:center; padding:38px 34px; }
+.ac-mark { display:none; margin-bottom:22px; }
+.auth-card h1 { font-weight:500; font-size:19px; margin:0 0 5px; letter-spacing:-.01em; }
+.auth-card .sub { color:var(--tx-2); font-size:12.5px; margin:0 0 22px; }
+.field { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+.field label { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--tx-3); }
+.field input { font:inherit; font-size:13px; color:var(--tx); background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); padding:10px 12px; transition:border-color .12s, box-shadow .12s; }
+.field input:focus { outline:none; border-color:var(--acc); box-shadow:0 0 0 3px var(--acc-dim); }
+.auth-err { color:var(--danger); font-size:12px; margin:2px 0 12px; min-height:15px; }
+.auth-card .btn { width:100%; height:38px; margin-top:2px; }
+.auth-alt { margin-top:18px; font-size:12px; color:var(--tx-2); text-align:center; }
+
+/* 登录面板 + 插件 block 竖排;.auth 居中此栈 */
+.auth-stack { display:flex; flex-direction:column; gap:14px; width:100%; max-width:840px; }
+
+/* 插件 block:下载 / 安装步骤 / 学习用途风险声明,三段细线分隔 */
+.auth-ext { width:100%; background:var(--bg-1); border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+.ax-main { display:flex; align-items:center; gap:13px; padding:13px 16px; }
+.ax-icon { width:34px; height:34px; flex:none; }
+.ax-icon img { width:34px; height:34px; display:block; border-radius:8px; }
+.ax-t { flex:1; min-width:0; }
+.ax-tt { font-size:13px; color:var(--tx); font-weight:500; }
+.ax-ts { font-size:11px; color:var(--tx-2); margin-top:2px; }
+.ax-dl { flex:none; display:inline-flex; align-items:center; gap:6px; height:31px; padding:0 13px; font-size:12px; font-weight:500; color:var(--tx); background:var(--bg-3); border:1px solid var(--line-2); border-radius:var(--r); cursor:pointer; }
+.ax-dl:hover { border-color:#544e44; color:var(--tx); text-decoration:none; }
+.ax-steps { display:flex; align-items:center; gap:9px; flex-wrap:wrap; padding:11px 16px; border-top:1px solid var(--line); font-family:var(--mono); font-size:10.5px; color:var(--tx-2); }
+.ax-n { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; border-radius:50%; background:var(--bg-3); color:var(--tx-2); font-size:9px; margin-right:5px; }
+.ax-steps em { font-style:normal; color:var(--tx-3); }
+.ax-sep { color:var(--line-2); }
+.ax-warn { display:flex; align-items:center; gap:7px; padding:8px 16px; border-top:1px solid var(--line); }
+.ax-warn svg { color:var(--queue); flex:none; }
+.ax-warn p { margin:0; font-size:10.5px; line-height:1.5; color:var(--tx-3); }
+.ax-warn b { color:color-mix(in srgb, var(--queue) 50%, var(--tx-2)); font-weight:500; }
+
+@media (max-width: 760px) {
+  .auth { padding:16px; }
+  .auth-stack { max-width:380px; }
+  .auth-shell { grid-template-columns:1fr; max-width:380px; }
+  .auth-brand { display:none; }
+  .auth-card { padding:30px 26px; }
+  .ac-mark { display:flex; }
+  .ax-main { flex-wrap:wrap; }
+}
 
 /* —— 项目工作台 —— */
 .wb { max-width:920px; margin:0 auto; padding:36px 24px 80px; }
@@ -537,6 +597,29 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .proj-del:focus-visible { opacity:1; outline:1px solid var(--line-2); }
 .proj.new { align-items:center; justify-content:center; color:var(--tx-2); border-style:dashed; font-size:13px; }
 .proj.new:hover { color:var(--acc); border-color:var(--acc); }
+
+/* §25 示例工程卡片:金色左缘 + 右下角 Example 角标 + 状态行(取代旧的左上角生★ + 重复角标) */
+.proj.is-example::before { content:''; position:absolute; left:0; top:1px; bottom:1px; width:2px; background:var(--solo); border-top-left-radius:var(--r); border-bottom-left-radius:var(--r); }
+.proj-foot { margin-top:auto; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.proj-status { display:inline-flex; align-items:center; gap:5px; font-size:11px; color:var(--tx-3); min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.proj-status.fork { color:var(--solo); }
+.proj-status svg { width:13px; height:13px; flex:none; }
+.proj-badge { display:inline-flex; align-items:center; gap:4px; flex:none; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--solo); background:rgba(227,181,63,.10); border:1px solid rgba(227,181,63,.30); border-radius:999px; padding:2px 8px; }
+.proj-badge svg { width:10px; height:10px; }
+/* 站长 ⋯ 操作菜单 */
+.proj-menu-wrap { position:absolute; top:8px; right:8px; z-index:50; }
+.proj-act { display:flex; align-items:center; justify-content:center; width:26px; height:26px; padding:0; background:none; border:none; border-radius:6px; color:var(--tx-3); cursor:pointer; opacity:0; transition:opacity .1s, color .1s, background .1s; }
+.proj:hover .proj-act, .proj-act.open, .proj-act:focus-visible { opacity:1; }
+.proj-act:hover, .proj-act.open { color:var(--tx); background:var(--bg-2); }
+.proj-act svg { width:16px; height:16px; }
+.proj-menu { position:absolute; top:30px; right:0; width:188px; background:var(--bg-2); border:1px solid var(--line-2); border-radius:var(--r); padding:5px; box-shadow:0 10px 28px rgba(0,0,0,.5); }
+.proj-menu .mi { display:flex; align-items:center; gap:9px; width:100%; text-align:left; font:inherit; font-size:12.5px; color:var(--tx); background:none; border:none; border-radius:var(--r); padding:8px 9px; cursor:pointer; }
+.proj-menu .mi:hover { background:var(--bg-3); }
+.proj-menu .mi svg { width:15px; height:15px; flex:none; color:var(--tx-3); }
+.proj-menu .mi.feat, .proj-menu .mi.feat svg { color:var(--solo); }
+.proj-menu .mi.danger, .proj-menu .mi.danger svg { color:var(--danger); }
+.proj-menu .mi-div { height:1px; background:var(--line); margin:4px 2px; }
+.proj-menu-backdrop { position:fixed; inset:0; z-index:45; }
 
 /* —— 主总线效果器(§17):顶栏最右 FX 按钮 + 下拉浮层(三栏 insert) —— */
 .fx-wrap { position:relative; display:inline-flex; }

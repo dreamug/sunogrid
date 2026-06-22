@@ -31,6 +31,43 @@ import { ClipEditor } from '@/studio/ui/WarpEditor';
 // 客户端生成稳定 id(§15:落库与内存共用同一 id,支撑自动保存,刷新不变)。
 const nid = (p: string) => `${p}-${crypto.randomUUID()}`;
 const cvar = (c: string): CSSProperties => ({ ['--c']: c } as CSSProperties);
+
+// 生成框默认提示词池:都是「整条 beat」(鼓+贝斯+旋律的完整律动),非单乐器;每次进入随机换一条。
+const BEAT_PROMPTS = [
+  'boom bap hip hop beat, dusty drums, jazzy sax loop',
+  'lo-fi hip hop beat, mellow rhodes, vinyl crackle, rain',
+  'trap beat, hard 808s, rolling hi-hats, dark',
+  'drill beat, sliding 808, eerie bells, menacing',
+  'soulful boom bap beat, chopped soul vocal sample, warm bass',
+  'jazzy lo-fi beat, upright bass, brushed drums, smoky',
+  'west coast g-funk beat, talkbox synth, deep bass, sunny',
+  'neo soul beat, lush rhodes chords, live drums, groovy',
+  'phonk beat, cowbell, distorted 808, memphis vocal chops',
+  'afrobeat groove, syncopated percussion, warm bass, bright guitar',
+  'reggaeton beat, dembow rhythm, punchy kicks, latin vibe',
+  'uk garage beat, shuffled 2-step drums, sub bass, soulful chords',
+  'boom bap beat, gritty piano loop, vinyl hiss, headnod',
+  'cinematic trap beat, orchestral strings, hard 808, epic',
+  'funk beat, slap bass, clavinet, tight live drums',
+  'dark lo-fi beat, detuned piano, dusty drums, late night',
+  'house beat, four on the floor, warm pads, groovy bassline',
+  'plugg beat, dreamy bells, bouncy 808, spacey',
+  'jersey club beat, bed squeak, chopped vocals, fast kicks',
+  'dub reggae beat, spring reverb, deep bassline, off-beat skank',
+];
+// 随机挑一条,避开上次那条(localStorage 记 index),保证「每次刷新换一次」。仅客户端调用。
+function pickBeatPrompt(): string {
+  try {
+    const KEY = 'sunogrid:gpIdx';
+    const last = Number(localStorage.getItem(KEY));
+    let i = Math.floor(Math.random() * BEAT_PROMPTS.length);
+    if (BEAT_PROMPTS.length > 1 && i === last) i = (i + 1) % BEAT_PROMPTS.length;
+    localStorage.setItem(KEY, String(i));
+    return BEAT_PROMPTS[i];
+  } catch {
+    return BEAT_PROMPTS[Math.floor(Math.random() * BEAT_PROMPTS.length)];
+  }
+}
 // 拖拽时手里只攥一个小标签(默认会把整块波形当拖拽图,太大)。离屏渲染一个小 pill 当 setDragImage。
 function setDragImage(ev: React.DragEvent, label: string): void {
   const g = document.createElement('div');
@@ -166,7 +203,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [arrangeH, setArrangeH] = useState(0); // chop arrange 浮层实测高度 → 选中 chop 时给操场加底部 padding,底部 pad 不被浮层挡住
   const [confirmState, setConfirmState] = useState<(ConfirmOpts & { resolve: (v: boolean) => void }) | null>(null);
   const [gens, setGens] = useState<GenView[]>([]);
-  const [gp, setGp] = useState('dusty jazz rhodes chords, lo-fi');
+  const [gp, setGp] = useState(BEAT_PROMPTS[0]); // SSR 稳定种子,挂载后随机换(见下方 effect)
+  useEffect(() => { setGp(pickBeatPrompt()); }, []); // 进入/刷新随机换一条 beat 提示词(客户端 only,避 hydration mismatch)
   const [gmode, setGmode] = useState<'sound' | 'advanced'>(genPrefs?.mode ?? 'sound');
   const [gloop, setGloop] = useState(genPrefs?.loop ?? true);
   // 生成 BPM(§4.1):持久化的独立值,可随时改;主 BPM 变化时单向透传一次覆盖(下方 effect)。

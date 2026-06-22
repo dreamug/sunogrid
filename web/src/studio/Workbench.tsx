@@ -11,6 +11,7 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
   const router = useRouter();
   const [projects, setProjects] = useState<ApiProject[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [menuFor, setMenuFor] = useState<string | null>(null); // 哪张卡片的 ⋯ 菜单展开(站长发布/删除)
   const [confirmState, setConfirmState] = useState<(ConfirmOpts & { resolve: (v: boolean) => void }) | null>(null);
   // 通用确认弹窗:const ok = await askConfirm({...}); if (ok) ...
   const askConfirm = (opts: ConfirmOpts) => new Promise<boolean>((resolve) => setConfirmState({ ...opts, resolve }));
@@ -86,45 +87,91 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
           <button className="proj new" onClick={create} disabled={busy}>＋ New project</button>
           {projects.map((p) => {
             const readOnlyExample = p.isExample && !p.owned;
+            const publishedMaster = isSuperAdmin && p.owned && p.isExample;
+            const isExampleCard = readOnlyExample || publishedMaster;
+            const adminOwned = isSuperAdmin && p.owned; // 站长在自己项目上有 ⋯ 菜单(发布/取消 + 删除)
+            const menuOpen = menuFor === p.id;
             return (
-              <div key={p.id} className="proj" onClick={() => open(p)} style={readOnlyExample ? { borderStyle: 'dashed' } : undefined}>
+              <div key={p.id} className={isExampleCard ? 'proj is-example' : 'proj'} onClick={() => open(p)}>
                 <div className="pn">{p.name}</div>
                 <div className="pm">{p.masterBpm} BPM · {p.quantize}</div>
 
-                {/* 角标:只读示例 / 已发布母版(站长自己看) */}
-                {readOnlyExample && (
-                  <span style={badgeStyle} title="Read-only example — opening creates your own copy">Example · read-only</span>
-                )}
-                {isSuperAdmin && p.owned && p.isExample && (
-                  <span style={{ ...badgeStyle, color: '#b8860b' }} title="Published as an example for everyone">★ Example</span>
+                {/* 示例卡片底栏:左=状态行(站长看"对所有人可见" / 用户看"打开即建副本"),右=金色 Example 角标 */}
+                {isExampleCard && (
+                  <div className="proj-foot">
+                    {publishedMaster ? (
+                      <span className="proj-status" title="Published as an example for everyone">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" />
+                        </svg>
+                        Visible to all
+                      </span>
+                    ) : (
+                      <span className="proj-status fork" title="Opening creates your own editable copy">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                        </svg>
+                        Opens a copy
+                      </span>
+                    )}
+                    <span className="proj-badge">
+                      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" />
+                      </svg>
+                      Example
+                    </span>
+                  </div>
                 )}
 
-                {/* 站长:在自己拥有的项目上切换示例母版 */}
-                {isSuperAdmin && p.owned && (
+                {/* 控制:站长拥有的项目 → ⋯ 菜单(发布/取消 + 删除);其余 → 单按钮(删除 / 从列表移除) */}
+                {adminOwned ? (
+                  <div className="proj-menu-wrap" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className={menuOpen ? 'proj-act open' : 'proj-act'}
+                      title="Actions"
+                      aria-label={`Actions for ${p.name}`}
+                      aria-haspopup="menu"
+                      aria-expanded={menuOpen}
+                      onClick={() => setMenuFor(menuOpen ? null : p.id)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" />
+                      </svg>
+                    </button>
+                    {menuOpen && (
+                      <div className="proj-menu" role="menu">
+                        <button role="menuitem" className="mi feat" onClick={() => { setMenuFor(null); toggleExample(p); }}>
+                          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" />
+                          </svg>
+                          {p.isExample ? 'Unpublish example' : 'Publish as example'}
+                        </button>
+                        <div className="mi-div" />
+                        <button role="menuitem" className="mi danger" onClick={() => { setMenuFor(null); remove(p); }}>
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" />
+                          </svg>
+                          Delete project
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
                   <button
-                    className="proj-star"
-                    title={p.isExample ? 'Unpublish example' : 'Publish as example'}
-                    aria-label={p.isExample ? `Unpublish ${p.name}` : `Publish ${p.name} as example`}
-                    onClick={(e) => { e.stopPropagation(); toggleExample(p); }}
-                    style={starStyle}
+                    className="proj-del"
+                    title={readOnlyExample ? 'Remove from my list' : 'Delete project'}
+                    aria-label={readOnlyExample ? `Remove ${p.name} from my list` : `Delete ${p.name}`}
+                    onClick={(e) => { e.stopPropagation(); remove(p); }}
                   >
-                    {p.isExample ? '★' : '☆'}
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M3 6h18" />
+                      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                      <path d="M10 11v6" /><path d="M14 11v6" />
+                    </svg>
                   </button>
                 )}
-
-                <button
-                  className="proj-del"
-                  title={readOnlyExample ? 'Remove from my list' : 'Delete project'}
-                  aria-label={readOnlyExample ? `Remove ${p.name} from my list` : `Delete ${p.name}`}
-                  onClick={(e) => { e.stopPropagation(); remove(p); }}
-                >
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M3 6h18" />
-                    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                    <path d="M10 11v6" /><path d="M14 11v6" />
-                  </svg>
-                </button>
               </div>
             );
           })}
@@ -132,16 +179,8 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
         </div>
       )}
 
+      {menuFor && <div className="proj-menu-backdrop" onClick={() => setMenuFor(null)} />}
       {confirmState && <ConfirmDialog {...confirmState} onConfirm={() => { confirmState.resolve(true); setConfirmState(null); }} onCancel={() => { confirmState.resolve(false); setConfirmState(null); }} />}
     </main>
   );
 }
-
-const badgeStyle: React.CSSProperties = {
-  position: 'absolute', left: 10, bottom: 8, fontSize: 10, letterSpacing: 0.3,
-  opacity: 0.7, textTransform: 'uppercase', pointerEvents: 'none',
-};
-const starStyle: React.CSSProperties = {
-  position: 'absolute', top: 6, left: 8, background: 'none', border: 'none',
-  cursor: 'pointer', fontSize: 15, lineHeight: 1, color: '#b8860b', padding: 2,
-};

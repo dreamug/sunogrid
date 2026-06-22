@@ -3,7 +3,7 @@ import { AuthForm } from '@/ui/AuthForm';
 
 export default function RegisterPage() {
   return (
-    <Suspense fallback={<main className="auth"><div className="auth-card">…</div></main>}>
+    <Suspense fallback={<main className="auth" />}>
       <AuthForm mode="register" />
     </Suspense>
   );
