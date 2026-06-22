@@ -1,8 +1,15 @@
 // 注册:用户名 + 密码 + 确认密码。成功即建会话(自动登录)。
 import { db } from '@/lib/db';
 import { hashPassword, createSession } from '@/lib/auth';
+import { rateLimit, clientIp } from '@/lib/rateLimit';
 
 export async function POST(req: Request) {
+  // 限流:同 IP 10 次/小时,挡批量注册刷号。
+  const rl = rateLimit(`register:${clientIp(req)}`, 10, 60 * 60_000);
+  if (!rl.ok) {
+    return Response.json({ error: 'Too many attempts. Try again later.' }, { status: 429, headers: { 'retry-after': String(rl.retryAfterSec) } });
+  }
+
   const b = (await req.json().catch(() => ({}))) as { username?: string; password?: string; confirm?: string };
   const username = (b.username ?? '').trim();
   const password = b.password ?? '';

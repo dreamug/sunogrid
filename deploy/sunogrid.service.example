@@ -1,0 +1,22 @@
+# systemd 常驻 web 进程样例。
+# 安装:把 <...> 换掉 → 拷到 /etc/systemd/system/sunogrid.service →
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sunogrid
+# 配套见仓库根 DEPLOY.md §4。
+
+[Unit]
+Description=SunoGrid web (Next.js)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=<部署用户>
+WorkingDirectory=<仓库路径>/web
+Environment=NODE_ENV=production
+Environment=PORT=3000
+# Environment=STEM_SERVICE_URL=http://127.0.0.1:8008
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

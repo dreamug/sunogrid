@@ -1014,3 +1014,43 @@ WAV 可达数十 MB,base64 over JSON 膨胀 ~33% 不划算 → 新端点收 `mul
 
 ### 29.7 落地顺序
 ① 本节设计(doc-first)。② sidecar:`app.py` 双模型 + `model` 路由 + 归一化;README 写 drumsep 安装。③ 后端:`stems.ts` 开缝 + 传 `model`;两 GET 路由嵌第二层。④ 前端:三处 collect 递归 + LoopManager 鼓件渲染/「Split kit」+ STEM_LABEL/clipColor。⑤ typecheck。⑥ 实测:分全混→拖 drums 旁点 Split kit→出 4 鼓件孙轨→拖 kick 到 pad 锁相→重拆/失败态→删全混连带清孙。**坑**:改 `app.py` 重启 sidecar;装了 drumsep checkpoint 才有 drum 模型。
+
+## 30. 示例项目跨环境打包/导入(export → import 母版)—— 📐 设计 · 2026-06-22
+
+**一句话**:上线前要把**本地做好的一个项目**变成**线上的示例母版**(§25 `isExample`)。难点不是「标记」——`isExample` 只是 `Project` 上一个布尔(super admin 在 UI ★Example 开关或 `PATCH /api/projects/:id { isExample }` 一翻即可)。难点是**跨环境搬数据**:本地和线上是**两个 MySQL + 两个 `web/storage/`**,要把这个项目依赖的整张子图(行)+ 它引用的**音频字节**一起搬过去,并把所有权改成线上站长。本质 = **跨库版的 [`forkProject`](web/src/lib/forkProject.ts) + 额外搬 `Asset` 字节**。
+
+**为什么不能只导 `Project` 一行 / 为什么 fork 不够**:`forkProject`(§25)是**同库**深克隆,`Asset`(sha256 内容寻址)与音频字节**全局共享**,所以它直接沿用 `assetId/bakedAssetId` **不复制字节**(forkProject.ts:8/88)。**跨环境恰恰相反**:线上 DB 没有这些 `Asset` 行、线上磁盘没有这些 `.mp3`([`storage.ts`](web/src/lib/storage.ts) 是纯本地文件系统,`/storage/` 还在 .gitignore)。**fork 白嫖的那部分,正是跨环境必须手动搬的部分** —— 漏了就:行能导进去,但每个 clip 播放 404。这是本节第一坑。
+
+### 30.1 依赖子图(= forkProject 的走法,权威清单)
+搬什么由 [`forkProject.ts:33-44`](web/src/lib/forkProject.ts) 定死,照搬:
+- `Project` 标量(name/masterBpm/masterKey/quantize/beatsPerBar/genPrefs/gridPrefs/fx/loopSong/playMode/showAutomation)。
+- `StudioSession → StudioInstrument → Clip` 整棵树(全列含 sends/extra/各 mixer 列/xyAuto)。
+- `PadClip`(老 pad 布局,若有)。
+- 被引用的 `Sound` + **stem parent 链**(`loadSoundsWithParents` 向上爬 + 拓扑父在前;kick→drums→全混整条,§29 任意深度)。
+- 每个 `Sound.assetId` / `Clip.assetId` / `PadClip.assetId` / collage `StudioInstrument.bakedAssetId` 指向的 `Asset` 行 **+ `web/storage/<asset.path>` 的真实文件**。
+- **不带**:`Gen` 生成历史(母版要干净,同 fork 的 `genId=null`,forkProject.ts:76)、`WarpRender`(线上按需重渲)、`ExampleDismissal`、其它项目/用户。
+
+### 30.2 Bundle 格式
+一个目录(可 tar):`bundle.json`(子图所有行,原样;每个 Asset 带 `sha256/kind/contentType/bytes/path`)+ `audio/<sha256>.mp3`(引用到的全部 Asset 字节)。内容寻址 → 文件名即 sha256,天然去重、可重复导入幂等。
+
+### 30.3 `scripts/export-example.mjs`(本地跑)
+入参:本地项目 id。① 照 30.1 拉子图(复用 forkProject 的 include/`loadSoundsWithParents` 逻辑)。② 收齐全部引用 `assetId`(含 `bakedAssetId`、stem 的 asset)→ 查 `Asset` 行 → 从 `storageAbs(asset.path)` 读文件进 `audio/`。③ 落 `bundle.json`。**只读本地,不改任何东西。**
+
+### 30.4 `scripts/import-example.mjs`(线上直连 DB+FS 跑)
+入参:bundle 路径 + 目标 super-admin username。一个事务外先落文件、事务内写行(同 forkProject 的「读在外、写进事务」):
+1. **Asset 按 sha256 去重落地**:每个 bundle Asset → 线上 `db.asset.findUnique({sha256})`,**有则复用**,无则把 `audio/<sha256>.mp3` 写进线上 `web/storage/audio/`(复用 [`putAudioAsset`](web/src/lib/storage.ts:17) 语义)+ 建 `Asset` 行。建 `sha256 → 线上 assetId` 映射。
+2. **建 `Sound`**:新 id、`userId=线上 super admin`、`originProjectId=新项目`、`genId=null`、父→子顺序(接 `parentSoundId`),`assetId` 走 sha256 映射。建 `母版 soundId → 新 soundId` 映射。
+3. **建 `Project`**:`userId=线上 super admin`、`isExample=true`、`forkedFromExampleId=null`。
+4. **建 Session 树 + PadClip**:嵌套 create 自动新 id;`soundId` 走 sound 映射、`assetId`/`bakedAssetId` 走 sha256 映射。
+5. 成品 = 一个**属于线上站长、已标 `isExample`** 的母版,所有人列表里天生可见(§25)。
+
+### 30.5 三个不漏的坑
+- **`Asset.id` 两库不同 → 必须靠 sha256 重映射,绝不能直接搬 id**(`assetId`/`bakedAssetId` 全过映射)。
+- **`bakedAssetId`(collage 烘焙)和 stem 的 asset 是独立 `Asset` 行**,别只搬源音频 —— 否则 collage 上线要重 bake、stem 轨丢字节。
+- **先把站长那条 `User` 提成 SUPER_ADMIN**(`node scripts/promote-admin.mjs <username>`)再导,否则导进去的母版没人 own、UI 也没 ★Example 开关。
+
+### 30.6 §15/§16/§25 合规
+导入是**一次性运维脚本**(非用户交互)→ 不进 undo、不走 §15 ops。产物落在既有规范化表 + 全局 `Asset`,**口径不扩**(同 §25 结论)。导入后线上对该母版的一切(用户 fork、编辑、dismiss)走 §25 既有链路,**forkProject/autosave/undo 一行不用改**。
+
+### 30.7 落地顺序
+① 本节设计(doc-first)。② `export-example.mjs`:子图 + 收 Asset 文件 → bundle。③ `import-example.mjs`:sha256 去重落字节 + 所有权重写 + `isExample=true`。④ 实测:本地导出 → 线上空库导入 → 站长列表见母版 → 别的用户进入 fork 出副本 → 音频不 404、collage 不重 bake、stem 锁相 → 重复导入幂等(sha256 复用、`@@unique([userId,forkedFromExampleId])` 不撞)。**坑**:线上 import 前先 promote 站长;线上 `web/storage/` 要是持久卷(别落进会被重建清掉的临时目录)。

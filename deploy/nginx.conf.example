@@ -1,0 +1,40 @@
+# SunoGrid 反向代理样例(nginx)。把 your-domain.example 换成你的域名。
+# 配套见仓库根 DEPLOY.md §6。TLS 推荐用 certbot 自动签发,或直接用 Caddy 省事。
+
+server {
+    listen 80;
+    server_name your-domain.example;
+    # certbot 会自动加 80→443 跳转;手动的话:
+    # return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name your-domain.example;
+
+    ssl_certificate     /etc/letsencrypt/live/your-domain.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.example/privkey.pem;
+
+    # ⚠️ 关键:生成的 mp3 以 base64 POST 到 /api/sounds(比原文件大 ~33%),
+    # 加上用户上传样本(§27)。默认 1m 会直接拦掉生成落库 —— 调大。
+    client_max_body_size 50m;
+
+    # 音频(模拟 CDN)带 immutable 长缓存,交给 nginx/上层 CDN 缓存。
+    location /api/cdn/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_cache_valid 200 30d;
+        add_header X-Cache-Status $upstream_cache_status;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;   # 对应 next start 的 PORT
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
