@@ -33,10 +33,10 @@ export const Wave = memo(function Wave({ peaks, className }: { peaks: number[]; 
   return <svg className={className} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d={d} fill="currentColor" /></svg>;
 });
 
-// 主电平表配色:归一窗口 [-54,0]dBFS。≥-3dBFS(逼近 -1 限制器)→ 红 · ≥-6 → 琥珀 · 其余 → 绿。
-function meterColor(v: number): string { return v >= 0.944 ? '#e5564b' : v >= 0.889 ? '#e0a32e' : '#5dcaa5'; }
+// 主峰值表配色:归一窗口 [-48,0]dBFS。peak ≥-3dBFS(逼近软削波天花板)→ 红 · ≥-6 → 琥珀 · 其余 → 绿。
+function meterColor(v: number): string { return v >= 0.9375 ? '#e5564b' : v >= 0.875 ? '#e0a32e' : '#5dcaa5'; }
 
-/** 顶栏主 L/R 电平表:自驱动,抽真实总线(master,post-FX/post 主音量/pre-limiter)。 */
+/** 顶栏主 L/R 峰值表:自驱动每帧抽真实总线(master,post-FX/post 主音量/pre-软削波)的 peak(引擎内做快攻慢落弹道)。 */
 export function MasterMeter({ engine, playing }: { engine: StudioEngine | null; playing: boolean }) {
   useFrame(playing && !!engine);
   const [l, r] = playing && engine ? engine.masterLevel() : [0, 0];
@@ -90,26 +90,10 @@ export function CollageHead({ engine, id, playing }: { engine: StudioEngine | nu
 
 /** §20 场景播放态(自驱动,类 pad 播放头但无波形):
  *  Live —— 卡内一条线随 loop 一直扫(period = 本场 bar 数);Song —— 线在"当前第几遍"那格内扫 + 该格柔和同色高亮,逐格推进。 */
-export function SessionPlayhead({ engine, mode, startBar, barsPerRep, repeats, playing, cardW = 168, cellW = 40 }: { engine: StudioEngine | null; mode: 'live' | 'song'; startBar: number; barsPerRep: number; repeats: number; playing: boolean; cardW?: number; cellW?: number }) {
+export function SessionPlayhead({ engine, mode, startBar, barsPerRep, repeats, playing, cardW = 168, cellW = 40, px }: { engine: StudioEngine | null; mode: 'live' | 'song'; startBar: number; barsPerRep: number; repeats: number; playing: boolean; cardW?: number; cellW?: number; px?: number }) {
   useFrame(playing && !!engine && barsPerRep > 0);
   const ref = useRef<HTMLDivElement>(null);
-  // 播放时横向滚动跟随播放头:独立 rAF 循环(只要 playing 就每帧读 DOM 把播放头保持在视口内,边缘留白触发滚动),不依赖重渲时机。
-  useEffect(() => {
-    if (!playing) return;
-    let raf = 0;
-    const tick = () => {
-      const line = ref.current;
-      const sc = line?.closest('.lane-scroll') as HTMLElement | null;
-      if (line && sc && sc.scrollWidth > sc.clientWidth + 1) {
-        const l = line.getBoundingClientRect(), s = sc.getBoundingClientRect(), m = 90;
-        if (l.left < s.left + m) sc.scrollLeft -= (s.left + m - l.left);
-        else if (l.right > s.right - m) sc.scrollLeft += (l.right - (s.right - m));
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [playing]);
+  // §26 播放与横向滚动完全解耦:播放头不再带动 scrollLeft(用户手动滚动;播放头自由扫,可滚出视口)。
   if (!playing || !engine || barsPerRep <= 0) return null;
   const pos = engine.songPosBars();
   const frac = (x: number) => ((x % barsPerRep) + barsPerRep) % barsPerRep / barsPerRep; // loop 内相位 0..1
@@ -124,6 +108,11 @@ export function SessionPlayhead({ engine, mode, startBar, barsPerRep, repeats, p
   }
   const rel = pos - startBar;
   if (rel < 0) return null;
+  if (px != null) { // §26 比例式 song:整块连续定位(无 cardW 前缀、无定宽格)
+    const total = barsPerRep * repeats;
+    const x = Math.max(0, Math.min(total, rel)) * px;
+    return (<><div className="ph" style={{ left: 0, width: x }} aria-hidden="true" /><div ref={ref} className="sphead" style={{ left: x }} aria-hidden="true" /></>);
+  }
   const idx = Math.max(0, Math.min(repeats - 1, Math.floor(rel / barsPerRep)));
   return (
     <>
@@ -131,6 +120,15 @@ export function SessionPlayhead({ engine, mode, startBar, barsPerRep, repeats, p
       <div ref={ref} className="sphead" style={{ left: cardW + idx * cellW + frac(rel) * cellW }} aria-hidden="true" />
     </>
   );
+}
+
+/** §26.9 列级播放头:song 模式整条时间轴(标尺+块)穿一条线。
+ *  left = (blockStartBars + (songPosBars − blockTransportStart)) × px;减 blockTransportStart 使 loopSong 循环后(songPosBars 无限增长)仍定位到视觉块内。 */
+export function SongPlayhead({ engine, playing, px, blockStartBars, blockTransportStart }: { engine: StudioEngine | null; playing: boolean; px: number; blockStartBars: number; blockTransportStart: number }) {
+  useFrame(playing && !!engine);
+  if (!playing || !engine) return null;
+  const x = Math.max(0, (blockStartBars + (engine.songPosBars() - blockTransportStart)) * px);
+  return <div className="song-ph" style={{ left: x }} aria-hidden="true" />;
 }
 
 /** tile launch 键的电平填充(竖向):自驱动读 voiceLevel。 */

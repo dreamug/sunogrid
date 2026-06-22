@@ -1,7 +1,7 @@
 'use client';
 // 左列:Suno 生成(控件)+ 素材库(两级卡片:一级=全混变体,二级=分离出的乐器轨,凹陷一层、可折叠)。
-import { useState } from 'react';
-import type { GenView } from '../useLoopMachine';
+import { useState, Fragment } from 'react';
+import type { GenView } from '@/contracts/studioViews';
 import { SunoStatus, type SunoConnState } from '@/studio/ui/SunoStatus';
 import { TransportIcon } from '@/studio/ui/glyphs';
 
@@ -23,6 +23,7 @@ interface Props {
   onGenBpm: (n: number) => void;
   onGenKey: (k: string) => void;
   onGenerate: () => void;
+  onUpload?: (files: FileList) => void;  // §27 本地样本上传(wav/mp3)
   onSelect: (id: string) => void;
   onAudition: (id: string) => void;
   onDragSound?: (id: string) => void;  // 拖一条素材开始(studio 用:轨内占位块按真实长度画/判重叠)
@@ -37,15 +38,20 @@ interface Props {
 
 const STEM_LABEL: Record<string, string> = {
   drums: 'Drums', bass: 'Bass', other: 'Other', vocals: 'Vocals', guitar: 'Guitar', piano: 'Keys',
+  kick: 'Kick', snare: 'Snare', toms: 'Toms', cymbals: 'Cymbals', hihat: 'Hats', // §29 鼓二段拆
 };
-const GEN_STATUS: Record<string, string> = { generating: 'Generating…', streaming: 'Rendering…', complete: 'Done', failed: 'Failed' };
+const GEN_STATUS: Record<string, string> = { generating: 'Generating…', streaming: 'Rendering…', uploading: 'Uploading…', detecting: 'Detecting…', complete: 'Done', failed: 'Failed' };
 // ② 生成阶段条:Suno 私有接口阶段 → 生成 → 渲染 → 到达(变体流式入库)。
 const GEN_PHASES: { key: string; label: string }[] = [{ key: 'generating', label: 'Generate' }, { key: 'streaming', label: 'Render' }, { key: 'complete', label: 'Done' }];
 const GEN_ORDER: Record<string, number> = { generating: 0, streaming: 1, complete: 2 };
+// §27 上传阶段条(平行于生成):上传 → 检测 → 到达。
+const UPLOAD_PHASES: { key: string; label: string }[] = [{ key: 'uploading', label: 'Upload' }, { key: 'detecting', label: 'Detect' }, { key: 'complete', label: 'Done' }];
+const UPLOAD_ORDER: Record<string, number> = { uploading: 0, detecting: 1, complete: 2 };
 const fmtBars = (b: number) => (Number.isInteger(b) ? `${b}` : b.toFixed(2).replace(/0+$/, '').replace(/\.$/, ''));
 const fmtDur = (s: number) => (s >= 10 ? Math.round(s) + 's' : s.toFixed(1) + 's');
 // 生成块头部参数行:模式 · 生成BPM · 调 · Loop(advanced 无 loop 概念)。
 function genParams(g: GenView): string {
+  if (g.source === 'upload' && (g.status === 'uploading' || g.status === 'detecting')) return 'Detecting tempo + key…';
   const parts = [g.mode === 'advanced' ? 'Song' : 'Sound'];
   if (g.bpm) parts.push(g.bpm + ' BPM');
   parts.push(g.musicalKey || 'Any');
@@ -160,16 +166,29 @@ export function LoopManager(p: Props) {
       </section>
 
       <section className="br-sec" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <div className="br-h"><span className="sec-l">Library</span><span className="n">{gens.length}</span></div>
+        <div className="br-h">
+          <span className="sec-l">Library</span>
+          <span className="n">{gens.length}</span>
+          {p.onUpload && (
+            <label className="up-btn" title="Upload your own wav / mp3 — we'll detect tempo + key">
+              <input type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" multiple hidden onChange={(e) => { if (e.target.files?.length) p.onUpload!(e.target.files); e.target.value = ''; }} />
+              <span className="up-ic" aria-hidden="true">⬆</span> Upload
+            </label>
+          )}
+        </div>
         <div className="lib-list">
           {gens.length === 0 && <div className="muted small" style={{ padding: '6px 2px' }}>Nothing yet — hit Generate above</div>}
           {gens.map((g) => {
-            const busy = g.status === 'generating' || g.status === 'streaming';
+            const isUp = g.source === 'upload';
+            const busy = g.status === 'generating' || g.status === 'streaming' || g.status === 'uploading' || g.status === 'detecting';
+            const phases = isUp ? UPLOAD_PHASES : GEN_PHASES;
+            const order = isUp ? UPLOAD_ORDER : GEN_ORDER;
             return (
-              <div key={g.id} className="gencard">
+              <div key={g.id} className={'gencard' + (isUp ? ' up' : '')}>
                 <div className="gc-head">
                   <div className="gc-top">
                     <span className={'gdot ' + g.status} title={GEN_STATUS[g.status]} />
+                    {isUp && <span className="up-tag" title="Uploaded sample" aria-hidden="true">⬆</span>}
                     <span className="gc-prompt" title={g.prompt}>{g.prompt}</span>
                   </div>
                   <div className="gc-params">{genParams(g)}</div>
@@ -178,8 +197,8 @@ export function LoopManager(p: Props) {
                 {busy && (
                   <div className="gen-busy" aria-busy="true">
                     <div className="gstep">
-                      {GEN_PHASES.map((ph, i) => {
-                        const cur = GEN_ORDER[g.status] ?? 0;
+                      {phases.map((ph, i) => {
+                        const cur = order[g.status] ?? 0;
                         return (
                           <span key={ph.key} className="gstep-i">
                             {i > 0 && <i className="gsep">›</i>}
@@ -191,8 +210,12 @@ export function LoopManager(p: Props) {
                     <div className="gb-bar"><i /></div>
                     <div className="gvar-row">
                       <span className="sg-spin sm" aria-hidden="true" />
-                      <span>{g.sounds.length > 0 ? `${g.sounds.length}/2 variants in` : 'Generating 2 variants…'}</span>
-                      {p.onCancelGen && <button className="gb-btn danger gcancel" onClick={() => p.onCancelGen!(g.id)} title="Cancel & discard this generation">Cancel</button>}
+                      <span>{
+                        g.status === 'uploading' ? 'Uploading file…'
+                          : g.status === 'detecting' ? 'Detecting tempo + key…'
+                          : g.sounds.length > 0 ? `${g.sounds.length}/2 variants in` : 'Generating 2 variants…'
+                      }</span>
+                      {p.onCancelGen && <button className="gb-btn danger gcancel" onClick={() => p.onCancelGen!(g.id)} title={isUp ? 'Cancel & discard this upload' : 'Cancel & discard this generation'}>Cancel</button>}
                     </div>
                   </div>
                 )}
@@ -201,7 +224,7 @@ export function LoopManager(p: Props) {
                     <div className="gb-err" title={g.error}>{g.error || 'Generation failed'}</div>
                     {(p.onRetryGen || p.onDeleteGen) && (
                       <div className="gb-acts">
-                        {p.onRetryGen && <button className="gb-btn" onClick={() => p.onRetryGen!(g.id)}>↻ Retry</button>}
+                        {p.onRetryGen && !isUp && <button className="gb-btn" onClick={() => p.onRetryGen!(g.id)}>↻ Retry</button>}
                         {p.onDeleteGen && <button className="gb-btn danger" onClick={() => p.onDeleteGen!(g.id)}>Delete</button>}
                       </div>
                     )}
@@ -254,20 +277,51 @@ export function LoopManager(p: Props) {
                               onClick={(e) => { e.stopPropagation(); p.onSeparate(s.id); }}
                             >↻</button>
                           </div>
-                          {open && stems.map((st) => (
-                            <div
-                              key={st.id}
-                              className={'srow' + (p.selectedLoopId === st.id ? ' vsel' : '')}
-                              style={{ ['--c']: st.color } as React.CSSProperties}
-                              {...drag(st.id)}
-                              onClick={() => p.onSelect(st.id)}
-                              title="Stem · drag to track / pad"
-                            >
-                              <button className={'pl' + (p.warmingId === st.id || (p.selectedLoopId === st.id && p.previewing) ? ' on' : '')} title="Preview" onClick={(e) => { e.stopPropagation(); p.onAudition(st.id); }}>{playInner(st.id)}</button>
-                              <span className="sdot" />
-                              <span className="sname">{STEM_LABEL[st.stemKind ?? ''] ?? st.stemKind}</span>
-                            </div>
-                          ))}
+                          {open && stems.map((st) => {
+                            // §29:只有 drums stem 能再拆 → kick/snare/toms/hihat 孙轨
+                            const isDrums = st.stemKind === 'drums';
+                            const kit = st.stems ?? [];
+                            const hasKit = kit.length > 0;
+                            const kitSep = st.stemStatus === 'separating';
+                            const canKit = isDrums && !hasKit && !kitSep && st.stemStatus !== 'failed' && p.stemServiceUp !== false;
+                            return (
+                              <Fragment key={st.id}>
+                                <div
+                                  className={'srow' + (canKit ? ' can-sep' : '') + (p.selectedLoopId === st.id ? ' vsel' : '')}
+                                  style={{ ['--c']: st.color } as React.CSSProperties}
+                                  {...drag(st.id)}
+                                  onClick={() => p.onSelect(st.id)}
+                                  title="Stem · drag to track / pad"
+                                >
+                                  <button className={'pl' + (p.warmingId === st.id || (p.selectedLoopId === st.id && p.previewing) ? ' on' : '')} title="Preview" onClick={(e) => { e.stopPropagation(); p.onAudition(st.id); }}>{playInner(st.id)}</button>
+                                  <span className="sdot" />
+                                  <span className="sname">{STEM_LABEL[st.stemKind ?? ''] ?? st.stemKind}</span>
+                                  {canKit && <button className="vsep sm" title="Split drum kit (kick / snare / toms / cymbals)" onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>Split kit</button>}
+                                  {hasKit && <button className="re" disabled={kitSep || p.stemServiceUp === false} title={p.stemServiceUp === false ? 'Separation service not running' : 'Re-split kit'} onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>↻</button>}
+                                </div>
+                                {kitSep && (
+                                  <div className="srow-busy" aria-busy="true"><span className="sg-spin sm" aria-hidden="true" /><span>Splitting kit · local Demucs</span></div>
+                                )}
+                                {!kitSep && st.stemStatus === 'failed' && !hasKit && (
+                                  <div className="srow-note" title="Tap to retry" onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>Kit split failed · tap to retry</div>
+                                )}
+                                {hasKit && kit.map((k) => (
+                                  <div
+                                    key={k.id}
+                                    className={'srow srow-sub' + (p.selectedLoopId === k.id ? ' vsel' : '')}
+                                    style={{ ['--c']: k.color } as React.CSSProperties}
+                                    {...drag(k.id)}
+                                    onClick={() => p.onSelect(k.id)}
+                                    title="Drum piece · drag to track / pad"
+                                  >
+                                    <button className={'pl' + (p.warmingId === k.id || (p.selectedLoopId === k.id && p.previewing) ? ' on' : '')} title="Preview" onClick={(e) => { e.stopPropagation(); p.onAudition(k.id); }}>{playInner(k.id)}</button>
+                                    <span className="sdot" />
+                                    <span className="sname">{STEM_LABEL[k.stemKind ?? ''] ?? k.stemKind}</span>
+                                  </div>
+                                ))}
+                              </Fragment>
+                            );
+                          })}
                         </div>
                       )}
                     </div>

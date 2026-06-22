@@ -13,7 +13,15 @@ export async function GET(req: Request) {
         where: { trashed: false, parentSoundId: null }, // 只列顶层;stem 嵌在父下
         include: {
           asset: true,
-          stems: { where: { trashed: false }, include: { asset: true }, orderBy: { createdAt: 'asc' } },
+          // 嵌两层:drums stem 的 kick/snare/toms/hihat 孙轨(§29)也要带出
+          stems: {
+            where: { trashed: false },
+            include: {
+              asset: true,
+              stems: { where: { trashed: false }, include: { asset: true }, orderBy: { createdAt: 'asc' } },
+            },
+            orderBy: { createdAt: 'asc' },
+          },
         },
         orderBy: { createdAt: 'asc' },
       },
@@ -35,6 +43,7 @@ export async function POST(req: Request) {
       userId: user.id,
       projectId: b.projectId,
       mode: b.mode ?? 'sound',
+      source: b.source === 'upload' ? 'upload' : 'suno', // §27
       prompt: b.prompt ?? '',
       bpm: b.bpm ?? 90,
       musicalKey: b.key || null,

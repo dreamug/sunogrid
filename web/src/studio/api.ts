@@ -11,7 +11,7 @@ const del = (p: string) => fetch(p, { method: 'DELETE' }).then(J);
 
 export interface ApiGenPrefs { mode: 'sound' | 'advanced'; loop: boolean; bpm: number }
 export interface ApiGridPrefs { arrange: number; warp: number; snap: boolean }
-export interface ApiProject { id: string; name: string; masterBpm: number; masterKey: string | null; genPrefs: ApiGenPrefs | null; gridPrefs: ApiGridPrefs | null; fx: FxConfig | null; quantize: string; beatsPerBar: number; loopSong: boolean; isExample: boolean; owned: boolean }
+export interface ApiProject { id: string; name: string; masterBpm: number; masterKey: string | null; genPrefs: ApiGenPrefs | null; gridPrefs: ApiGridPrefs | null; fx: FxConfig | null; quantize: string; beatsPerBar: number; loopSong: boolean; playMode: string; showAutomation: boolean; isExample: boolean; owned: boolean }
 export interface ApiAsset { id: string; path: string; contentType: string }
 export interface ApiSound {
   id: string; name: string; mode: string; sourceBpm: number; musicalKey: string | null;
@@ -24,7 +24,7 @@ export interface ApiPad {
   sourceSoundId: string | null; assetId: string; warp: unknown; label: string | null; gainDb: number;
   asset?: ApiAsset; sourceSound?: ApiSound;
 }
-export interface ApiGen { id: string; status: string; mode: string; prompt: string; bpm: number; musicalKey?: string | null; loop?: boolean; error: string | null; sunoClipIds: unknown; sounds?: ApiSound[] }
+export interface ApiGen { id: string; status: string; mode: string; source?: string; prompt: string; bpm: number; musicalKey?: string | null; loop?: boolean; error: string | null; sunoClipIds: unknown; sounds?: ApiSound[] }
 
 export const cdnUrl = (assetId: string) => `/api/cdn/${assetId}`;
 
@@ -42,6 +42,14 @@ export const api = {
     create: (b: Record<string, unknown>): Promise<ApiGen> => post('/api/gens', b),
     patch: (id: string, b: Record<string, unknown>): Promise<ApiGen> => patch(`/api/gens/${id}`, b),
     remove: (id: string): Promise<{ ok: boolean }> => del(`/api/gens/${id}`),
+  },
+  // §27 本地样本上传:multipart 把 wav/mp3 字节落成 Asset,回 assetId(再走 sounds.create)。
+  uploads: {
+    create: (file: File): Promise<{ assetId: string; contentType: string; bytes: number }> => {
+      const fd = new FormData();
+      fd.append('file', file);
+      return fetch('/api/uploads', { method: 'POST', body: fd }).then(J);
+    },
   },
   sounds: {
     list: (): Promise<ApiSound[]> => fetch('/api/sounds').then(J),

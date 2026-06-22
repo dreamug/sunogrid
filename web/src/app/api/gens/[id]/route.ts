@@ -23,7 +23,7 @@ export async function PATCH(req: Request, { params }: P) {
   if (!(await ownsGen(id))) return new Response('not found', { status: 404 });
   const b = await req.json();
   const data: Record<string, unknown> = {};
-  for (const k of ['status', 'error', 'sunoBatchId', 'sunoClipIds', 'trashed'] as const) if (k in b) data[k] = b[k]; // trashed:撤销恢复整组(§16 口径⑦)
+  for (const k of ['status', 'error', 'sunoBatchId', 'sunoClipIds', 'trashed', 'bpm', 'musicalKey', 'mode'] as const) if (k in b) data[k] = b[k]; // trashed:撤销恢复整组(§16 口径⑦);bpm/musicalKey/mode:§27 上传检测完回填卡头
   const gen = await db.gen.update({ where: { id }, data });
   return Response.json(gen);
 }

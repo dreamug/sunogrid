@@ -4,7 +4,8 @@
 import { api, type ApiSound } from '@/studio/api';
 import { clipColor } from '@/studio/clipColor';
 import { detectLoop } from '@/audio/conditioning';
-import type { GenStatus, GenView, LoopView } from '@/studio/useLoopMachine';
+import { estimateTempo, estimateKey } from '@/audio/detect';
+import type { GenStatus, GenView, LoopView } from '@/contracts/studioViews';
 
 let _gctx: AudioContext | null = null;
 const gctx = () => (_gctx ??= new AudioContext());
@@ -41,6 +42,7 @@ export async function loadGens(projectId: string): Promise<GenView[]> {
   const list = await api.gens.list(projectId);
   return list.map((g) => ({
     id: g.id, prompt: g.prompt, mode: g.mode,
+    source: (g.source === 'upload' ? 'upload' : 'suno') as 'suno' | 'upload',
     status: (g.status === 'queued' ? 'generating' : g.status) as GenStatus,
     error: g.error || undefined,
     bpm: g.bpm, musicalKey: g.musicalKey ?? '', loop: g.loop ?? true, // 留给「重试」复用原参数
@@ -92,12 +94,9 @@ async function runGeneration(genId: string, params: GenParams, h: GenHooks, sign
         const audio = await gctx().decodeAudioData(base64ToArrayBuffer(b64));
         const channels: Float32Array[] = [];
         for (let ch = 0; ch < audio.numberOfChannels; ch++) channels.push(audio.getChannelData(ch).slice());
-        const totalS = channels[0].length;
         const analysis = detectLoop(channels, audio.sampleRate, bpm);
-        const barSamples = ((4 * 60) / bpm) * audio.sampleRate;
-        const defBars = Math.max(1, adv ? 2 : Math.min(analysis.bars, 4));
-        const defEnd = Math.min(totalS, analysis.startSample + Math.round(defBars * barSamples));
-        const warp = { startSample: analysis.startSample, endSample: defEnd, bars: defBars, semitones: 0, warpedBy: 'auto' };
+        // 落地即「包裹整段」:默认 warp = detectLoop 整段区间(用户进编辑器再裁),不按生成/上传猜该截多短。
+        const warp = { startSample: analysis.startSample, endSample: analysis.endSample, bars: analysis.bars, semitones: 0, warpedBy: 'auto' };
         await api.sounds.create({
           originProjectId: projectId, genId, name: `${prompt.slice(0, 16)} #${n}`, mode, sourceBpm: bpm, key,
           durationSec: audio.duration, sampleRate: audio.sampleRate, channels: audio.numberOfChannels,
@@ -142,4 +141,58 @@ export async function retryGen(genId: string, params: GenParams, h: GenHooks): P
   const ctrl = new AbortController(); // 重试同样可被取消
   h.register?.(genId, ctrl);
   await runGeneration(genId, params, h, ctrl.signal);
+}
+
+/** §27 上传管线:multipart 落 Asset(uploading) → 解码 + 估速估调(detecting) → 入库(complete)。镜像 runGeneration。 */
+async function runUpload(genId: string, projectId: string, file: File, h: GenHooks, signal?: AbortSignal): Promise<void> {
+  const stopped = () => !!signal?.aborted;
+  try {
+    // ① 传输:把字节落成共享 Asset(WAV 走 multipart,不 base64)。
+    h.patch(genId, { status: 'uploading', error: undefined });
+    await api.gens.patch(genId, { status: 'uploading', error: null });
+    const { assetId } = await api.uploads.create(file);
+    if (stopped()) return;
+    // ② 检测:本地解码 → 从零估速 + 估调 → 喂回 detectLoop 拿 bars/loop 区/warp 种子。
+    h.patch(genId, { status: 'detecting' });
+    await api.gens.patch(genId, { status: 'detecting' });
+    const audio = await gctx().decodeAudioData(await file.arrayBuffer());
+    if (stopped()) return;
+    const channels: Float32Array[] = [];
+    for (let ch = 0; ch < audio.numberOfChannels; ch++) channels.push(audio.getChannelData(ch).slice());
+    const { bpm } = estimateTempo(channels, audio.sampleRate);
+    const { key } = estimateKey(channels, audio.sampleRate);
+    const mode = audio.duration > 20 ? 'advanced' : 'sound'; // 仅卡片标签;warp 不再据此截短
+    const analysis = detectLoop(channels, audio.sampleRate, bpm);
+    // 落地即「包裹整段」:默认 warp = detectLoop 整段区间(用户进编辑器再裁)。
+    const warp = { startSample: analysis.startSample, endSample: analysis.endSample, bars: analysis.bars, semitones: 0, warpedBy: 'auto' };
+    const name = file.name.replace(/\.[^.]+$/, '').slice(0, 24) || 'Upload';
+    if (stopped()) return; // 取消后别再落库(对齐 runGeneration:否则取消已软删 gen,这条 sound 仍以 trashed:false 建出 → 库里留孤儿)
+    await api.sounds.create({
+      originProjectId: projectId, genId, name, mode, sourceBpm: bpm, key: key || '',
+      durationSec: audio.duration, sampleRate: audio.sampleRate, channels: audio.numberOfChannels,
+      analysis, warp, assetId,
+    });
+    if (stopped()) return;
+    // 把检测结果回填到 gen 卡头(genParams 读 bpm/key/mode);完成。
+    await api.gens.patch(genId, { status: 'complete', bpm: Math.round(bpm), musicalKey: key, mode, error: null });
+    await h.reload();
+  } catch (e) {
+    if (stopped()) return;
+    const msg = conciseError(e);
+    try { await api.gens.patch(genId, { status: 'failed', error: msg }); } catch { /* ignore */ }
+    h.patch(genId, { status: 'failed', error: msg });
+  } finally {
+    h.release?.(genId);
+  }
+}
+
+/** 上传一个本地音频文件 → 进库(§27)。建 upload gen 行 → 立刻出卡 → 跑管线。 */
+export async function uploadToLibrary(projectId: string, file: File, h: GenHooks): Promise<void> {
+  if (!projectId || !file) return;
+  // 建 gen 行(source=upload;bpm/key 检测前留空,prompt=文件名)。
+  const gen = await api.gens.create({ projectId, source: 'upload', mode: 'sound', prompt: file.name, bpm: 0, key: '', loop: true });
+  const ctrl = new AbortController(); // 上传/检测可被取消(干掉整条)
+  h.appear({ id: gen.id, source: 'upload', prompt: file.name, mode: 'sound', status: 'uploading', sounds: [], bpm: 0, musicalKey: '', loop: true });
+  h.register?.(gen.id, ctrl);
+  await runUpload(gen.id, projectId, file, h, ctrl.signal);
 }

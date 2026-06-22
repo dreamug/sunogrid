@@ -1,10 +1,12 @@
 // /api/studio/ops —— 细粒度持久化(§15.C)。POST { projectId, ops[] }。
 // 事务内按序应用 session/instrument/clip 的 add/upd/del,每个写操作都按“归属当前用户的这个项目”作用域 ——
 // updateMany/deleteMany 用关系把 where 锁到 projectId(不属于则影响 0 行);create 前校验父在本项目内。
+import { Prisma } from '@prisma/client';
 import { db } from '@/lib/db';
 import { getCurrentUser, unauthorized } from '@/lib/auth';
-import type { Op, NInstrument, NClip } from '@/studio/sync';
+import type { Op, NSession, NInstrument, NClip } from '@/studio/sync';
 
+const SESS_COLS = ['name', 'index', 'repeats', 'color', 'xyAuto'] as const;
 const INST_COLS = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'] as const;
 const CLIP_COLS = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'] as const;
 
@@ -26,6 +28,12 @@ function clipData(row: Partial<NClip>, ownedSounds: Set<string>): Record<string,
 function instData(row: Partial<NInstrument>): Record<string, unknown> {
   const d = pick(row as NInstrument, INST_COLS);
   if ('sends' in d) d.sends = (d.sends ?? { dist: 0, delay: 0, reverb: 0 }) as object;
+  return d;
+}
+// §26 xyAuto 是可空 Json 列:null 要写成 Prisma.DbNull(直接传字面 null 会被 Prisma 拒)。
+function sessData(row: Partial<NSession>): Record<string, unknown> {
+  const d = pick(row as NSession, SESS_COLS);
+  if ('xyAuto' in d) d.xyAuto = d.xyAuto == null ? Prisma.DbNull : (d.xyAuto as object);
   return d;
 }
 
@@ -64,11 +72,11 @@ export async function POST(req: Request) {
       for (const op of ops) {
         switch (op.t) {
           case 'sess.add':
-            await tx.studioSession.create({ data: { id: op.row.id, projectId, name: op.row.name, index: op.row.index, repeats: op.row.repeats ?? 1, color: op.row.color ?? null } });
+            await tx.studioSession.create({ data: { id: op.row.id, projectId, ...sessData(op.row) } as never });
             liveSessions.add(op.row.id);
             break;
           case 'sess.upd':
-            await tx.studioSession.updateMany({ where: { id: op.id, projectId }, data: pick(op.fields, ['name', 'index', 'repeats', 'color']) });
+            await tx.studioSession.updateMany({ where: { id: op.id, projectId }, data: sessData(op.fields) });
             break;
           case 'sess.del':
             await tx.studioSession.deleteMany({ where: { id: op.id, projectId } });

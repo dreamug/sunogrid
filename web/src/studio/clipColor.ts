@@ -3,6 +3,8 @@
 const STEM: Record<string, string> = {
   drums: '#d8754f', bass: '#4f8fd0', other: '#9b6fc8',
   vocals: '#d56f9b', guitar: '#46b88a', piano: '#d6a84a',
+  // §29 鼓二段拆:鼓件用 drums 同色相(暖橙)的邻近变体,既同族又可区分
+  kick: '#c85a3a', snare: '#e08a52', toms: '#b8704a', cymbals: '#e6a878', hihat: '#e6a878',
 };
 const PALETTE = ['#d8754f', '#4f8fd0', '#9b6fc8', '#46b88a', '#d6a84a', '#d56f9b', '#4fbcc4', '#c98a5a'];
 

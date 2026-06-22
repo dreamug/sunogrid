@@ -12,7 +12,15 @@ export async function GET(req: Request) {
     where: { userId: user.id, trashed: false, parentSoundId: null, ...(originProjectId ? { originProjectId } : {}) },
     include: {
       asset: true,
-      stems: { where: { trashed: false }, include: { asset: true }, orderBy: { createdAt: 'asc' } },
+      stems: {
+        where: { trashed: false },
+        // 嵌两层:stem(如 drums)自己的 stem(kick/snare/toms/hihat 孙轨,§29)也要带出
+        include: {
+          asset: true,
+          stems: { where: { trashed: false }, include: { asset: true }, orderBy: { createdAt: 'asc' } },
+        },
+        orderBy: { createdAt: 'asc' },
+      },
     },
     orderBy: { createdAt: 'desc' },
   });
@@ -23,8 +31,18 @@ export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return unauthorized();
   const b = await req.json();
-  if (!b.audioB64) return Response.json({ error: 'audioB64 required' }, { status: 400 });
-  const asset = await putAudioAsset(base64ToBuffer(b.audioB64), { kind: 'source', sourceUrl: b.sourceUrl });
+  // 字节来源二选一:audioB64(Suno 下载)或 assetId(§27 上传已 multipart 落过 Asset,直接引用)。
+  let assetId: string;
+  if (b.assetId) {
+    const asset = await db.asset.findUnique({ where: { id: b.assetId }, select: { id: true } });
+    if (!asset) return Response.json({ error: 'asset not found' }, { status: 404 });
+    assetId = asset.id;
+  } else if (b.audioB64) {
+    const asset = await putAudioAsset(base64ToBuffer(b.audioB64), { kind: 'source', sourceUrl: b.sourceUrl });
+    assetId = asset.id;
+  } else {
+    return Response.json({ error: 'audioB64 or assetId required' }, { status: 400 });
+  }
   const sound = await db.sound.create({
     data: {
       userId: user.id,
@@ -39,7 +57,7 @@ export async function POST(req: Request) {
       channels: b.channels ?? 2,
       analysis: b.analysis ?? undefined,
       warp: b.warp ?? undefined,
-      assetId: asset.id,
+      assetId,
     },
     include: { asset: true },
   });

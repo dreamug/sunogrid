@@ -398,6 +398,7 @@ model Instrument {
 - 2026-06-19:主 BPM 改成可编辑(§12),按本节铁律②**显式扩口径**纳入 `bpm`(snapshot 抓 / applyEntry 还原 + 反向 `api.projects.update`)。
 - 2026-06-20:效果器(§17)。① 全局 return 设置 `Project.fx`(口径外标量集)按铁律②**显式扩口径**纳入 —— `HistEntry` 加 `fx`,snapshot 抓 `fxRef.current`,applyEntry 比 JSON 不同则 `setFx` 回引擎 + setFx 回 state(浮层跟随)+ 反向 `api.projects.update({fx})`;FxRack 旋钮拖动**开始**(及 chip/电源点击前)调一次 `pushHistory`(经 `onStart` prop),连续拖只压一帧。② per-乐器 send 在 `sessions` 树里(`Instrument.sends`)→ 本就在口径,`changeSends` 同 `changeMixer` 走 `pushHistory`+树更新,免费可撤。③ **顺带修了 undo/redo 机制隐患**:`pushHistory`/`undo`/`redo` 原把 `snapshot()`/`applyEntry()` 等副作用写在 `setState` updater **内部** → React StrictMode(dev,Next15 默认开)双调 updater 时副作用重复跑、把 past/future 栈搞乱(表现:redo 还原不出来,bpm/warps/fx 同病)。改为 `pastRef`/`futureRef` 读最新栈、副作用在 updater **外**只跑一次 → undo+redo 都正常(DB 实测 fx 切换 → 撤销 → 重做 往返正确)。
 - 2026-06-20(undo 整体 review 补缺):①**跨 session 静默 bug** —— 改动在 A、切到 B 再 ⌘Z 时,旧实现用当前 `sessionIdx` reconcile,Verse 的还原看不到。扩口径⑤ `sessionId`:snapshot 抓活动 session id,applyEntry 跳回该 session,`undo`/`redo` 给对侧 snapshot 携带改动归属 id(否则切过 session 后 redo 跳错)。②**quantize 口径不对称** —— bpm 可撤、同级的 quantize 不可撤。扩口径⑥(照 bpm 模板:snapshot 抓 / applyEntry `setQuantize`+引擎+反向 PATCH;`commitQuantize` 改前 pushHistory)。③**库删除不可撤** —— 生成组 `DELETE` 原**硬删** gen 行(无法恢复)。改为全软删(`Gen.trashed` 新列 + db push)+ 扩口径⑦(restore-only + trashable 白名单,绝不误删之后生成的)。验证:tsc 0 错;gen 软删/恢复 API 往返实测(删 → 列表消失、行仍在且 trashed、PATCH 恢复 → 回列表);quantize 改 → ⌘Z → ⌘⇧Z 往返 UI 实测正确,无 console/server 报错。**未端到端 UI 实测**(库为空、无 Suno 插件):库删除→undo 的整链、跨 session undo(项目仅一个 session)—— 但其服务端原语已测、客户端接线 tsc 通过。
+- 2026-06-22(undo 全功能复核 —— 接线完整性 + 空步整治):两路独立审计(接线 / 正确性)交叉确认 **7 项口径的所有持久化改动都已 `pushHistory`,无漏接**(会话/乐器 CRUD·移位·开关·标签·色·copy/paste/duplicate、乐器级 + collage 片级 mixer/sends、三条 clip 编辑路径 sample/预调 warp/collage 含 timeMul、collage 全部编排 加片/落素材/落乐器/移/Alt 复制/⌘D/删/loop 拉杆、XY automation 加删拖点 + repeat 缩放、bpm/quantize/fx/XY 配置/库删除);每个拖拽都在**拖起**只压一帧。核心机器(跨 session 跳转、fx 与 bpm 的 ctxRef 同步时序差异、库 restore-only、solo/XY/audition/Song 待推进的瞬态清理、不可变更新无快照串改)复核**无误**。**唯一缺陷=空 undo 步(phantom)**:共享 `Knob`/`Fader`/chip 在 **pointerdown / 无变化重置 / 重选同值** 时无条件 `onStart→pushHistory`,造成「⌘Z 像没反应」且把 50 上限的真历史挤掉。**两层修复**:① 源头——`Knob`/`XYPad`/`MixerStrip` 把 `onStart` 推迟到**首次真移动**(对齐 AutomationLane/pad gain 线既有写法)、双击复位加 `value!==def` 守门、FxRack 字符/sync chip 与 XYPad program/mode 加**等值守门**、`renameSession`/`setSessionColor` 同值早退;② 兜底——`undo`/`redo` 用 `histDataKey`(6 项数据口径稳定串、`` 分隔、**不含活动 sessionId**)**透明丢弃空步**(拖回原位等净零变化也吃掉):只可能因 JSON 键序差异「多留空步」(退回原行为,安全),**绝不会把真改动误判为空**(无 false-positive)。验证:`tsc --noEmit` 0 错;history/collageDoc/xyAutomation 纯逻辑单测全过。
 
 ## 17. 主总线效果器(Master FX 总线 / insert 效果器)—— 2026-06-20
 
@@ -578,13 +579,16 @@ voice 按乐器 id 唯一 → 新旧场景的 voice 可**短暂共存**于 `voic
 ```
 - splice:原 `master.connect(masterClip)` 改为 `master → xy.input`、`xy.output → masterClip`。一切先汇到 master(§17 已定),故 XY 吃到完整最终 mix。电平表仍抽 master(XY 前),表头反映"送进 XY 的电平",不随滤波/gate 抖动。
 
-**XY insert 结构(干/湿交叉淡入,防爆音)**:
+**XY insert 结构 —— 🔁 v2(2026-06-22):4 效果常驻串联**(v1 是「单 program 可切换、一个全局干/湿交叉淡」;改版起因 = §26 要「一段挂 4 种独立自动化、同时发声」,见 §26.2):
 ```
-input ─┬─ dry(Gain) ───────────────┐
-       └─ [当前 program] ─ wet(Gain) ─┴─► output
+input ─► [filter] ─► [slicer] ─► [delay] ─► [brake] ─► output
+          每个效果节点 = ┬─ dry ──────────┐
+                         └─ effect ─ wet ─┴─►   (active→wet 渐入、inactive→纯 dry 透明旁路)
 ```
-- `engage`(手按下)= `wet→e·mix`、`dry→1-e·mix`(15ms rampTo);`release`(松手)= 回 `dry=1,wet=0`。`mix` = WET 旋钮(engaged 时的湿量;mix=1 → 纯效果)。**没演奏且非锁定时恒为旁路(直通干声)**。
-- 单板**同时只一个 program 激活**;切 program = dispose 旧、build 新、重连 input/wet(重的 `PitchShift` 只在 brake 选中才建)。
+- 4 效果**常驻链上**(不再 dispose/build 切换);每个有独立 **active** 态:active=处理(wet 15ms 渐入)、inactive=硬旁路(dry=1、透明)。**多个可同时 active**(filter 扫 + delay 进 + slicer 切 叠加)。重的 `PitchShift`(brake)仍只在被 active 过才惰性建。
+- 一个效果 active 的来源:**该效果的自动化 on(§26 Song 回放)** 或 **手动板正演奏它**;都无→旁路。驱动**统一由 §26.4 的单一 coordinator** 下达——手动板与回放都**不再各自直调引擎**(这正是修掉 v1「双驱动抢同一 insert→一干一湿/接管不了」的根)。
+- **手动板一次只演奏一个效果**(顶栏选中的 program),即对该效果做手动 override;其余 3 个继续各自自动化/旁路。
+- v2 每效果 NEUTRAL≈透明、强度由各自 Y(depth)给 → **去掉全局 WET 交叉淡**;spring/latch 仍在(松手=该效果交还/回旁路 vs 粘住,见 §26.4 交还滑行)。
 
 **四个 program(X/Y 映射 + 算法)**:
 | program | X 轴 | Y 轴 | 算法 |
@@ -609,7 +613,7 @@ input ─┬─ dry(Gain) ───────────────┐
 
 **UI(`studio/ui/XYPad.tsx` + `globals.css` §21 块)**:顶栏 FX 按钮旁一个 `XY` 按钮(`.fx-btn`,armed=陶土),点开浮层(同 `.fx-pop` 范式、点外/Esc 关)。左=XY 方块(grid + 十字准星 + 圆点,Slicer/Delay 显吸附竖线),右栏=状态条 + X/Y 读数(两列 `.we-box`)+ 模式分段(`.seg`)+ WET 旋钮(沿用 FxRack Knob 画法)。program 用 `.fx-chip`。
 
-**v1 范围**:纯实时表演(不录进 loop);单 program;四效果全做(刹车近似)。v2:录手势/自动化、真 tape-stop、多 program 同开。
+**v1(已发)**:纯实时表演(不录进 loop)、**单 program**、四效果全做(刹车近似)。**🔁 v2(2026-06-22,设计中)**:4 效果常驻链**同时开** + §26 per-effect 自动化 + 单一 coordinator 仲裁接管(本节结构已按 v2 写;落地与 §26 v2 合并做)。真 tape-stop / 录手势进 loop 仍 v2+。
 
 ## 22. 采样器乐器(Sampler / Drum Rack —— MPC 式 pad 触发)—— 📐 设计 · 2026-06-21
 
@@ -771,3 +775,242 @@ pad 复音池(每 pad: source → ampEnv Gain →[pad gain/pan])─┐
 **v1 不做**:跨用户协作/共享编辑;副本"重置到母版最新";dismiss 的恢复 UI;示例分类/排序/封面。示例靠并集天然对所有人可见,无需注册时给每人复制实体(省存储、母版可中心化更新)。
 
 **落地顺序**:① schema(role/isExample/forkedFromExampleId/ExampleDismissal)+ `db push` + 重启 next + 提站长为 admin。② `lib/forkProject.ts` 深克隆(连库)。③ 后端:列表并集 + `PATCH isExample`(admin 网关)+ `POST :id/fork` + `POST :id/dismiss` + 项目页 fork 兜底。④ 前端:Workbench 示例角标 + 点击 fork + dismiss + admin ★Example 开关;`api.ts` 加 fork/dismiss + ApiProject 加 isExample/owned。⑤ 测:新用户见示例→进入生成副本→编辑落库→母版不变→重进 resume→dismiss 消失→admin 标记/取消。
+
+## 26. Song XY 自动化(比例时间轴 + 内联自动化 lane)—— 🚧 实现中 · 2026-06-21 ·（🔁 v2:per-effect 多条 + 单一仲裁接管 · 🔁 v3:去激活开关,激活=线非平自动判定 · 2026-06-22）
+
+把 §21 XY 表演板的"录手势/自动化"v2 落地,**仅 Song 模式**:用户在每个 session block 下**画直线断点**自动化 XY 的效果;Song 播到该块时一只"幽灵手"按位置驱动 XY,**手抓真 pad 即接管、松手恢复**。
+
+> **🔁 v2 改版(2026-06-22,用户拍板)**:v1 是「per-session **单** `xyAuto`(一个 program)」,导致**顶栏点别的效果=替换当前那条**(复用同一组点 → 把 filter 斜线当 slicer 重画的怪台阶,filter 丢失)。v2 改成**一段挂最多 4 条独立自动化(每效果一条),同时发声**;连带把「§21 单 insert 可切」升级成「§21.v2 4 效果常驻链」、把「双驱动幽灵手/手动板」收敛成「单一 coordinator 仲裁接管」。**与 §21.v2、手动接管一并做**(都是 XY 引擎层,一次理清)。下文 26.2–26.5 已是 v2 目标态;旧阶段 ①②③(契约/回放/视图)已发但要按 v2 改。
+
+> **🔁 v3 微调(2026-06-22,用户拍板)**:去掉「激活/失效」开关——4 效果**永远存在**(默认中性平直线,压在 0 线/中线上),**激活 = 自动判定**:某效果的 X 或 Y 线一旦「**多出点**」或「**点离开 0 线**」(非平)就算激活 → 回放驱动 + 在 block 上亮标识;拉回「**只有首尾两点、且都在 0 线**」= 未激活(从 `xyAuto` 移除)。顶栏原 4 个 toggle 键改成**右侧「4 选 1」单选**(配 X/Y + zoom 一排),只切「**整个 song 当前显示/编辑哪条 lane**」(选中=该效果色、其余灰);**session 上的单字母方块改纯标识**(显示该块已激活了哪些效果,不可点)。`XYAutomation` 去 `on` 字段;`xyAuto` map **只存非平(激活)的效果**。下文 26.2/26.3/26.7 已按 v3 写。
+
+### 26.1 先决:§20 Song 视图改成"按比例 arrange 时间轴"(用户拍板 2026-06-21)
+
+现状 §20 的 sstrip 是"定宽 scard-in + N 个定宽 rcell",显示宽度 ≠ 真实时长 → 自动化无处画(格子太短、长度悬殊却同宽)。改造(纯**视图**层,引擎早已按绝对小节 `enterSongBlock(startBar,endBar=bars×reps)` 播,时序无需动):
+
+- **全连续 + 按比例**:所有 block 首尾相接;`block 宽 = bars × reps × pxPerBar`。
+- **一个 block 一整段**:不再画 N 张重复卡,块内用**竖刻度线**标每遍 loop 边界(`reps-1` 条)+ 可选每 bar 细线。repeat 增减 = 拖右缘 / ± 按钮(沿用现有)。
+- **zoom(`pxPerBar`)+ 横滚**:解决长度悬殊(拉大编辑、拉小总览);极短段给最小宽兜底。播放头 `SessionPlayhead`(live.tsx)改用 `pxPerBar` 定位。
+- **标签/工具**:名字块内截断;复制/删除/repeat 移到 hover 浮出 / 选中块工具条。拖拽重排几何按比例段适配。
+
+### 26.2 数据模型 v2(§15:JSON 逃生口,挂 Session)—— per-effect 最多 4 条,互不耦合
+
+`Session.xyAuto: XYAutoSet | null`(null=无任何激活的自动化,时间轴干净)。
+```ts
+type AutoPoint = { bar: number; v: number };               // bar=块内偏移 0..bars×reps(跨全部 reps);v∈0..1
+interface XYAutomation { x: AutoPoint[]; y: AutoPoint[]; }  // §26.v3 去 on;program 由 map 键给,不存值里
+type XYAutoSet = Partial<Record<XYProgram, XYAutomation>>;  // 每效果一条,最多 4(filter/slicer/delay/brake),各自独立
+```
+- **每效果一条独立 automation**(各自 x/y),**互不覆盖**——这正是修掉「点 slicer 替换 filter」的根:v1 单 `xyAuto` 共享一组点,v2 按 program 分键。
+- **§26.v3 激活 = 自动判定,无 `on` 字段**:某效果「激活」⇔ 它的 X 或 Y 线**非平**(`isActiveAuto`:点数 ≠ 2、或任一点 v ≠ NEUTRAL)。`xyAuto` map **只存非平的效果**;一条线被拉回「首尾两点、都在 0 线」即从 map 移除(回未激活)。所以 `program in xyAuto` ⟺ 激活——回放驱动、block 标识、coordinator 都看 map presence(热路径不重算 isActiveAuto;`changeXyAuto`/`normalizeXyAuto` 这两个入口守「只进非平」)。
+- **bar 锚定**(非归一 t):点按 bar 偏移,改 repeat 只延长/截断该段、**不拉伸**;**跟着 session 走**(重排/复制免疫)。直线插值 + 端点 hold。
+- **离散参数台阶**:`slicer/delay` 的 X(rate 四档)零阶保持(step);`filter/brake` 的 X 与所有 Y 线性。纯逻辑 `studio/xyAutomation.ts` 的 `sampleAuto/sampleXY` **签名:program 作入参传入**(不读 `auto.program`)。
+- **中性默认**:4 效果**永远存在**,默认 = 中性平直线(filter x=0.5 全开;X/Y 都压 0.5 中线;见 NEUTRAL),压在 bypass 参考线上、不改音色、不算激活(不入 map)。
+- **迁移**:DB/内存里的老形状 `{program,on,x,y}` / `{[p]:{on,x,y}}` → load 归一成 `{[p]:{x,y}}`,并**丢弃平直线条目**(老 `on` 不再有意义:非平=激活、平=未激活)。`normalizeXyAuto` 守一道,脏点逐元素清洗。
+
+### 26.3 插入/编辑交互 v3(画线即激活,顶栏 4 选 1 只切显示)
+
+- **无激活开关**:不再点按钮激活/失效。4 效果永远在,默认中性平直线;**在 lane 上画(令其非平)即激活**(进 `xyAuto` map + 亮标识),**拉平(删到首尾两点、都回 0 线)即失效**(出 map + 标识消失)。
+- **顶栏右侧「4 选 1」单选(配 X/Y + zoom 一排)**:`Filter/Slicer/Delay/Brake` 单选,只切「**整个 song 当前显示/编辑哪条效果的 lane**」(不带「显示」文案)。选中 = 该效果色填充,其余 = 灰(未选)。不负责激活。
+- **lane 一次只显示一条**(顶栏选中的 program),选中块永远可画(没触碰过=中性平直线照样能编辑);X/Y 切轴只为编辑方便。
+- **session 标题栏单字母方块 = 纯标识(不可点)**:该 block 已激活(线非平)的效果各显一个单字母色块,只表「这块挂了哪些效果」。选哪条编辑去顶栏 4 选 1。
+- 画:**双击空白加断点**(X 吸拍线)、**拖动移点**、**双击节点删点**;离散参数(slicer/delay X)画台阶。
+- 失效 = 把该条拉平(无独立删除键);`changeXyAuto` 检测到平直线即从 map 删该键,全空 → `xyAuto=null`。
+
+### 26.4 回放 + 手动接管 v2 —— 单一仲裁 coordinator(同时吃 §21 手动 + §26 自动化 + 接管)
+
+**问题根**(v1):回放 rAF 与手动板**各自直调引擎瞬态接口**(`xyMove/xyEngage`),抢同一 insert → 双驱动每帧喂不同值 → 一干一湿、手动接管不了。
+
+**v2:全引擎驱动收敛到唯一一处**——一个 coordinator rAF 独占,**逐效果(per-effect)仲裁**:
+- 手动板**退化成纯输入**:只把当前手势写进 ref `{down, program, x, y}`(不再直调引擎;它的 spring 只管圆点视觉)。
+- coordinator 每帧,对**每个效果**算目标态:
+  1. `manual.down && manual.program===该效果` → **手动**驱动(x/y + active);
+  2. 否则 Song 播放中 && 该效果在当前块的 `xyAuto` map 里(`set[effect]` 存在=非平=激活,§26.v3) → **自动化**驱动(`sampleXY(effect, set[effect], 块内bar)`);
+  3. 否则 → **旁路**(inactive)。
+- **优先级 手动 > 自动化 > 旁路,且逐效果独立**:手动接管 filter 时,delay/slicer 的自动化**继续跑**(这是 4 效果同开的关键)。
+- **交还滑行(合并 §21 spring 回中 + §26 自动化恢复 = 同一机制)**:手动松开某效果 → springMs 内把该效果值从手位**滑回它的「地面」**(有自动化→自动线当前值;无→NEUTRAL 然后旁路),滑完 settle。`latch`=粘住不滑。
+- coordinator 把每效果的目标下达给引擎:`xy.setXY(effect, x, y)` + `xy.setActive(effect, on)`(15ms rampTo,帧粒度够)。
+- pad 上 `AUTO/MANUAL` 角标按「当前选中效果」的来源显;没手按时圆点跟自动化(只读 ghost)。
+- **状态边界**:停 Song / 切出 / 卸载 / undo → coordinator 令所有效果 release 回旁路 + `setFx` 还原(不变式同 §18 solo / §21 release,避免卡 wet)。
+
+### 26.5 持久化(§15)/ undo(§16)—— 机制不变,值从单对象变 map
+
+- `Session.xyAuto Json?` 列**已加(2026-06-22 单形状版已落地+真机验)**;v2 只是存的形状从 `XYAutomation` 变 `XYAutoSet`(map)。sync(`NSession.xyAuto`/`SESS_FIELDS`,`eq` 按 JSON 比→改即存)、`/api/studio` GET/ops(`sessData`,null 写 `Prisma.DbNull`)**已就位、无需再动**;load 加一道「老单形状→map」归一即可。
+- **在 sessions 树里 → 天然进快照口径①**:画点/插入/移除/toggle 走 `pushHistory`+`patchSession`(不可变),自动可撤。**coordinator 实时驱动=瞬态**(直驱引擎),不进 undo/不落库。
+
+### 26.6 落地顺序 v1(已发 ①②③⑤;④及单 program 模型被 v2 取代)
+
+① 契约 + 纯模块 `xyAutomation.ts`(+单测)✅。② 回放幽灵手(rAF→xyMove/engage)✅。③ 比例时间轴视图(§26.1)+ 内联 lane 编辑器(§26.3)✅。⑤ 持久化(单形状)✅。④ 手动接管 ❌(从未做,直接进 v2)。同期还做了 session block 改版 + per-session 色 + 标题栏色点/automation chip + 键盘删复(见 [[song-xy-automation]] 记忆)。
+
+### 26.7 落地顺序 v2(per-effect + coordinator + §21.v2 引擎链 —— 一并做,每步 typecheck)
+
+① **契约**:`XYAutomation` 去 `program`、`Session.xyAuto: XYAutoSet`;`xyAutomation.ts` 的 `sampleAuto/sampleXY` 改 program 入参;单测更新。② **引擎 §21.v2**:`XYPad` 改 4 效果常驻链 + per-effect `active`/旁路 + `setXY(effect,x,y)`/`setActive(effect,on)`;去全局 WET。③ **coordinator**:一个 rAF 替换现回放 effect + 手动板退化成 `{down,program,x,y}` ref;per-effect 仲裁(手动>自动化>旁路)+ 交还滑行(合并 spring/恢复)。④ **UI**:顶栏/标题栏 chip 改 per-effect(点=新增/切到、不替换),lane 切到选中效果编辑,移除单条;`AUTO/MANUAL` 角标。⑤ **持久化**:存 `XYAutoSet` + load 老形状→map 归一(sync/api 已就位)。⑥ **测**:filter+delay 两条共存 → 播放两个都动 → 手抓 filter 接管(delay 继续跑)→ 松手 filter 交还滑回 → 改 repeat 截断 → 刷新 resume → undo。
+
+### 26.8 落地顺序 v3(去激活开关 + 自动判定 + 4 选 1 显示器 —— 一并做,每步 typecheck)
+
+①②③④⑤⑥(v2)已发 + 真机验。v3 在其上做减法:① **契约**:`XYAutomation` 去 `on`(`{x,y}`)。② **纯模块**:`defaultAutomation` 去 `on` 参;新增 `isActiveAuto(program,auto)`(非平判定);`normalizeXyAuto` 去 `on`、丢平直线条目;单测改。③ **顶栏**:删左侧 toggle 组 + `toggleXyProgram`/`insertXyAuto`;右侧加「4 选 1」单选(`setAutoProgram`,选中带色)与 X/Y、zoom 同排。④ **判定接线**:`changeXyAuto` 非平才入 map、平则删键(=激活/失效);coordinator + 起播 prime 看 map presence(去 `.on`);标题栏方块改纯标识(`<span>` 不可点、`PROG_ORDER.filter(p=>autoSet[p])`、字母实黑 uniform)。⑤ **测**:画线→标识亮+回放驱动;拉平→标识灭+旁路;切 4 选 1 换 lane;undo/刷新 resume。
+
+### 26.9 时间轴导航 v4 —— 滚轮平移 / Alt 缩放 / 全局 bar 标尺(播放头延伸 + 引导线 + 喇叭跳播)· 🚧 设计 2026-06-22
+
+**一句话**:给 §26.1 的比例时间轴补三件导航料 —— ① 滚轮左右平移、② Alt+滚轮以光标为支点缩放(`songZoom`)、③ block 排**上方加一条全局 bar 标尺**:标 bar 号、播放头**向上延伸穿过标尺**、hover 出**按 bar 吸附的引导线** + **喇叭光标**、**点哪个 bar 就从该 bar 所在的 repeat 起播**。①② 直接照搬 `CollageEditor` 已验证的滚轮/缩放;③ 复用 `enterSongBlock` + `setTransportPosition`,**不新增引擎 API**。
+
+**布局重构(命门)**:现状 Song 轴 = `HScroll` 包 `.srail.song`(一排 `.sblock`);播放头 `SessionPlayhead` 在**每块内部**绝对定位,块 `overflow:hidden` 且标尺在块**上方** → 块内播放头**够不到标尺**。故把 song 模式的滚动容器换成 song 专用 wrapper(扩 `HScroll` 或新建 `SongTimeline`),scroll 内容里建一个 `position:relative`、`width=total×songZoom` 的列容器:
+```
+.lane-scroll (scrollRef, overflow-x:auto)
+  .song-content (relative, width = totalBars*songZoom)
+    .song-ruler   ← 全宽标尺(第一行,随内容横滚)
+    .srail.song   ← 现有 block 排(原样作 children 塞入,flex order 拖拽不变)
+    .song-ph      ← 列级单条播放头(绝对,整列高,穿标尺+块)
+    .song-guide   ← hover 引导线(绝对,整列高)
+```
+`total = Σ sessionBars(i)×sessionRepeats(i)`;`cumBars[i] = Σ_{j<i}(...)`(数组序 = 视觉序,除拖拽预览的瞬间)。标尺/播放头/引导线全用 `cumBars` 算 → 与块内刻度对齐(`.sblock` 的 `margin-right:-1px` 边框折叠只是亚像素装饰,不参与 bar 定位)。
+
+**26.9.1 滚轮平移 + Alt 缩放(照搬 `CollageEditor`)**:scroll 容器挂**非 passive** `wheel`:
+- 无 Alt:`scrollLeft += |deltaX|>|deltaY| ? deltaX : deltaY`(竖滚轮也横移;触控板横扫本就原生可用)。
+- Alt:`preventDefault` → `contentBar=(scrollLeft+cx)/songZoom` → `setSongZoom(clamp(songZoom*exp(-deltaY*0.0015), 10, 72))` → 用 `zoomApply` ref 在 `useEffect([songZoom])` 把 `scrollLeft` 回正到 `contentBar*songZoom - cx`(光标钉住那一 bar)。
+- `songZoom` 仍 own 在 StudioApp(标尺/块/lane/播放头都读它),容器只收 `zoom`+`setZoom`+`zoomApply` 逻辑。顶栏 range 滑块保留、min/max 同步放宽到 10–72。
+
+**26.9.2 全局 bar 标尺**:`.song-ruler` 宽 `total×songZoom`,内容:每 bar 细刻度(repeating-linear-gradient,同 collage lane)、每块边界 `cumBars[i]×songZoom` 处粗线、bar 号按缩放疏密显示(zoom 足够每 bar、否则每 2/4 bar;号 = 全局 1-based)。
+
+**26.9.3 播放头延伸**:song 模式**废掉块内 `SessionPlayhead`**(live 模式保留),改列级单条自驱动 rAF 线(新 `SongPlayhead` 或扩 live.tsx):`left = (cumBars[playingIdx] + (songPosBars() − songBlockStart))×songZoom`,高度铺满标尺+块。减 `songBlockStart` 是为了 `loopSong` 循环后 `songPosBars` 无限增长仍定位正确(等价现块内 `rel=pos−startBar`,只是抬到列级)。块内「已播色块 fill」(`.ph`)song 模式默认去掉(单线即够;要保再说)。
+
+**26.9.4 hover 引导线 + 喇叭光标**:`.song-ruler` `pointermove` → `bar=clamp(floor((scrollLeft+cx)/songZoom),0,total-1)` → `.song-guide` `left=bar×songZoom`(整列高、虚线、瞬态直改 DOM 不进 state);`pointerleave` 隐藏。标尺 `cursor: url("data:image/svg+xml,…喇叭…") hx hy, pointer`(喇叭 SVG 内联 data-URI 带热点;表「点此从这里放」)。
+
+**26.9.5 点击跳播(从该 bar 所在 repeat 起)**:`.song-ruler` `click` → `B=floor((scrollLeft+cx)/songZoom)` → 映射 + 起播,**全复用现有机器**:
+1. `bi` = 最后一个 `cumBars[i] ≤ B`(`B≥total` 夹到末块);`local=B−cumBars[bi]`;`rep=clamp(floor(local/bars_bi), 0, reps_bi−1)`;`repStart=cumBars[bi]+rep×bars_bi`。
+2. 在播 → 先停(干净);`sessionIdx=playingIdx=bi`、`viewFollows=true`;`loadSession(块 bi)`;automation prime 在 `localBar=rep×bars_bi`(不是 0)。
+3. `setTransportPosition('${repStart}:0:0')` → `startTransport()`(voice 当下相位 0 fire,干净)→ `enterSongBlock(块.id, cumBars[bi])`。末推进排在 `cumBars[bi]+reps×bars`(块**真正**末尾)→ 从第 rep 遍起、播完剩余遍再进下一块;播放头 `rel=songPos−songBlockStart=rep×bars` 正好落第 rep 遍。✅(决策:播放中点标尺 = 停+从该 repeat 重起,可预测;中途无缝跳块留后续。)
+
+**26.9.5b 主 Play 按钮 = 从头(block 0)起播**:Song 模式下 `startPlayback` 永远从**第一个 block**(`startIdx=0`)起,不再从「当前选中/查看块」起——因为播放中视图跟随(`viewFollows`)会把 `sessionIdx` 带到停下时那块,否则「停→播」会从那块续播而非从头。起播时把 `sessionIdx`/`playingIdx` 一并归 0(视图也回头块)。「从某处起播」只走 26.9.5 的点标尺(`startPlayFromBar`)。Live 模式不变(从选中场景起)。
+
+**26.9.6 §15/§16 合规**:`songZoom`/`scrollLeft`/hover 引导 = **纯瞬态**(不落库、不进 undo);跳播 = **播放态**(同起播,不进 undo)。引擎、contracts、持久化、undo 口径**全不动**。
+
+**26.9.7 落地顺序(每步 typecheck)**:① `HScroll`→song 容器:`wheel` 平移/Alt 缩放 + `zoomApply` 回正 + `.song-content` 列 + `.song-ruler`。② 列级 `SongPlayhead`(替 song 模式块内 head),`cumBars[playingIdx]` 透传。③ `cumBars`/`total` helper + 标尺 bar 号/刻度/块边界。④ hover 引导线 + 喇叭 cursor。⑤ `startPlayFromBar(B)`:映射 + 复用 `loadSession`/`setTransportPosition`/`startTransport`/`enterSongBlock`(prime 在 `rep×bars`)。⑥ CSS:`.song-ruler/.song-guide/喇叭 cursor/列级 .sphead`。⑦ 测:滚轮平移、Alt 缩放光标钉住、标尺 bar 号对齐块刻度、播放头穿到标尺、hover 出引导线+喇叭、点 bar 从该 repeat 起播(含末块/循环/正在播时点)、改 zoom/repeat 后仍对齐。
+
+### 26.10 automation UI 可见性 toggle + 模式/可见性持久化 · 2026-06-22
+
+**toggle(Song 顶栏,zoom **左**侧,大小同 X/Y seg=20px 高)**:`showAutomation` 开关。控制「automation 相关 UI」整组显隐——开=全显,关=收起:① 顶栏 4 选 1 + X/Y(`{showAutomation && …}`);② 每个 block 的 `.sblock-auto` lane;③ block 标题的 F/S/D/B 单字母标识。block 因 lane 去留而自适应高度。toggle 本身、zoom、标尺、播放头、repeat、名字/色块**始终在**。
+
+> ⚠ **纯 UI 层隐藏**:`xyAuto` 数据、coordinator、起播 prime、引擎**全不碰** → 隐藏时效果照常回放,只是看不见。仅在渲染处加 `showAutomation &&` 门。
+
+**持久化(Project 列,仿 `loopSong`:乐观落库、**不进 undo**)**:
+- `Project.playMode String @default("live")`(live | song)——`changePlayMode` 时 `api.projects.update(projectId,{playMode})`。
+- `Project.showAutomation Boolean @default(true)`——toggle 时 `api.projects.update(projectId,{showAutomation})`。
+- 接线:schema 加两列(`db push` 后**重启 next**,见 [[prisma-stale-client-restart]])→ `ApiProject` + PATCH 白名单加这两键 → `page.tsx` 透传给 `StudioApp`(`propPlayMode`/`propShowAutomation`)→ 两个 `useState` 用 prop 初始化。GET 整 project 直传,自动带上。Live 模式无 automation UI,toggle 只在 Song 顶栏出现。
+
+## 27. 本地样本上传(web ingest:wav/mp3 → 检测 → 入库)—— 🚧 设计 · 2026-06-21
+
+**一句话**:库里除了 Suno 生成,允许用户**直接上传 wav/mp3**;上传成功后**先一次性检测速度(BPM)+ 调式(key)**,再落进同一个用户库,卡片样式与生成稍作区别(`⬆` 角标 + 文件名 + `Upload › Detect › Done` 文案;**全走系统暖色,不另起色相**)。这是 §19.3「统一 ingest」的 **web 上传臂**先落地(desktop 选夹臂复用同一管线,后置)。
+
+### 27.0 复用现状(只补两块新料)
+入库脊梁已就绪:`putAudioAsset`([`lib/storage.ts`](web/src/lib/storage.ts),sha256 去重、源无关)、`POST /api/sounds`(吃 `{sourceBpm,key,analysis,warp,…}` 建 Sound)、生成卡 UI([`LoopManager.tsx:166-209`](web/src/studio/ui/LoopManager.tsx),busy/failed/complete 三态全由 `Gen.status` 驱动)、管线形状 [`runGeneration`](web/src/studio/studioGens.ts) 本就是 `拿字节 → decodeAudioData → 分析 → api.sounds.create`。上传只在「字节从哪来」「靠什么填 BPM/调」两处不同。
+
+### 27.1 ⚠️ 命门:`detectLoop` 需要 BPM 锚,上传没有
+[`detectLoop`](web/src/audio/conditioning.ts) 的算法是**「输入 BPM 是母」** —— 锚定已知 BPM 定 N 小节,自相关只在 ±12% 窄窗里算**置信度**,**不从零估速**。生成时 BPM 是用户填的;**上传没有这个锚**。且**全仓没有任何调式检测**。所以上传必须新增一个**纯客户端检测模块**(决策:客户端 DSP,不上 sidecar —— 对齐 §19.3「解码/分析留客户端」、不引服务依赖;精度够用,错了有 ClipEditor 兜底改):
+
+- **`web/src/audio/detect.ts`(纯函数,仿 conditioning.ts)**:
+  - `estimateTempo(channels, sampleRate): { bpm, confidence }` —— 复用 `novelty()` 包络(从 conditioning.ts 导出),在 ~70–180 BPM 对应的 lag 区间做**宽域自相关**找峰 + 抛物线插值;**倍频消歧**(优先 80–160 主带,比对半速/倍速峰强)。这是上传唯一从零估速的地方。
+  - `estimateKey(channels, sampleRate): { key: MusicalKey|null, confidence }` —— 12 维 **chroma**(Goertzel 逐音级 / FFT bin→音级累加)对 **Krumhansl–Schmuckler** 大/小调模板做 24 次旋转相关,取最优 → `MusicalKey`('C' / 'Am')。~80 行,**零新依赖**。
+- **接力既有机制**:估出 `bpm` 后**喂回** `detectLoop(channels, sr, bpm)` 拿 bars/loop 区/onsets/confidence。**默认 warp 种子 = 整段**(`startSample…endSample` 全长、`bars=analysis.bars`)—— 落地即「包裹整段音乐」,用户进 ClipEditor 再裁,**不按生成/上传猜该截 2/4 小节**(生成 loop 本就短,整段≈短 loop;长素材才真整段,故同一条路统一处理)。即检测=「新估速估调 → 复用全部既有 conditioning」。
+- **检测只看头部一个段落**(`ANALYZE_SECONDS=30`,从 conditioning 导出,单一来源):`estimateTempo`/`detectLoop` 的 novelty·自相关·瞬态、`estimateKey` 的 chroma 一律截到前 30s,长素材不全量扫(整段时长/小节数仍按全长算 —— 纯算术,不吃这刀)。
+
+### 27.2 状态机:复用 `Gen` 当通用 ingest job(加一列 `source`)
+一次上传 = 一条 `Gen` 行(`source:'upload'`、`prompt`=文件名、`bpm/musicalKey` 检测前留空)。状态流 `uploading → detecting → complete`(平行于生成的 `generating → streaming → complete`),失败 → `failed` 带重试/删除。**白拿**整套状态卡 UI、软删、undo 口径。库列表保持同质(gen 卡 + 其下变体)。
+
+- **数据模型增量(§15.A:列)**:`Gen` 加 `source String @default("suno") // suno | upload`([schema.prisma:110](web/prisma/schema.prisma))。其余 Suno 专属列(`sunoClipIds/sunoBatchId/instrumental`)上传留 null。Sound 模型**不动**(`sourceBpm/musicalKey/analysis/warp/assetId` 全够用)。`db push` 后**重启 next**(否则 Prisma client 旧、ops 报 Unknown arg)。
+
+### 27.3 传输:multipart `POST /api/uploads`(决策:不用 audioB64)
+WAV 可达数十 MB,base64 over JSON 膨胀 ~33% 不划算 → 新端点收 `multipart/form-data`:`getCurrentUser` 鉴权 → 校验 mime(`audio/wav|audio/x-wav|audio/mpeg`)+ 体积上限(~50MB)→ `putAudioAsset(buf,{kind:'source',contentType})` → 回 `{ assetId, contentType, bytes }`。**「uploading」态 = 这趟字节传输**。配套:`POST /api/sounds` 增收 `assetId`(给了就跳过 `putAudioAsset`,直接引用),取代生成路径的 `audioB64`。
+
+### 27.4 抽 `ingestAudio` + `uploadToLibrary`(§19.3 的收口)
+抽客户端 `ingestAudio(bytes, meta)` = 解码 + 检测 + 落库(Suno/上传/desktop 三源共用,§19.3 早点名)。新增 [`studioGens.ts`] 旁的 `uploadToLibrary(projectId, file, h)`,镜像 `generateToLibrary`:
+1. `api.gens.create({ source:'upload', mode, prompt:file.name, bpm:0, status:'uploading' })` → `h.appear` 立刻出卡(uploading)。
+2. `file.arrayBuffer()` → 同一 buffer 双路:① multipart `POST /api/uploads` → `assetId`;② 本地 `decodeAudioData`(检测要)。
+3. patch Gen `detecting` → `estimateTempo`+`estimateKey`+`detectLoop`+warp 种子。
+4. `api.sounds.create({ assetId, genId, sourceBpm:估速, key:估调, analysis, warp, … })` → patch Gen `complete` → `reload`。
+5. 任一步抛错 → Gen `failed` + `conciseError`;失败可重试(字节已在 Asset,重试 = 纯重跑检测,不必重传)。
+- **mode 标签**:按时长自动给个卡片标签 —— 短(≲ 20s)→ `sound`、长 → `advanced` —— **仅作展示**,**不再据此截短 warp**(默认一律整段,见 27.1)。one-shot vs loop 的切片触发是 §22 采样器的活。
+
+### 27.5 UI:和生成稍作区别
+- **入口**:生成窗口(`gen-body`)底部加 `⬆ Upload` 按钮 + 拖放区(`<input type=file accept=".wav,.mp3,audio/*" multiple>` / drag-drop;多选 = 逐文件各起一条 upload job)。
+- **卡片(⚠️ 不引入新色相 —— 全用既有暖色 token)**:`gc-prompt` 显示文件名 + `⬆` 角标(`--tx-2` 中性)区别生成;参数行检测前显 `Detecting…`,完成后回填 `BPM · Key`。busy 阶段条按 `source` 切文案:`Upload › Detect › Done`(对 `Generate › Render › Done`),**进度态沿用既有琥珀 `--queue`**(同生成 in-progress:`gdot.uploading/detecting`、阶段条高亮都走 `--queue`,不另起色);`GEN_PHASES`/`GEN_ORDER` 做 source 变体。上传按钮(Library 标题条右侧、`margin-left:auto`)走 `.gb-btn` 中性语汇(`--tx-2` + `--line-2`,hover `--acc`)。**早期试过冷蓝 `--up` 被否**(`#5b93c4` 与整套暖土陶/琥珀调系冲突)→ 区别只靠 ⬆ 角标 + 文件名 + 文案,不靠色相。细控件用私有类名(`up-*`),避开历史 `.led/.sel/.on` 撞名坑(见 §4.1)。
+
+### 27.6 持久化(§15)/ undo(§16)合规
+- §15:`source` 规范化落列;其余走生成同款乐观 appear + 后台 patch + `reload`,**零新机制**。
+- §16:上传产物落在既有 gens/sounds **库存活集(口径⑦)**,软删可撤 —— **不扩 7 项口径**(同 §23/§25 结论)。瞬态 `uploading/detecting` **不入 history**(镜像生成,生成也不把中途态推栈)。
+
+### 27.7 落地顺序(每步 typecheck)
+① schema 加 `Gen.source` + `db push` + 重启 next;`/api/sounds` 增收 `assetId`;新建 `POST /api/uploads`(multipart)。② `audio/detect.ts`(estimateTempo/estimateKey + 单测几条已知 BPM/调的样本)+ 从 conditioning 导出 `novelty`。③ 抽 `ingestAudio` + `uploadToLibrary`(+ `api.ts` 加 `uploads` 客户端、`ApiGen` 加 `source`)。④ UI:Upload 按钮(Library 标题条右侧)+ 上传卡 ⬆ 角标(暖色系、不另起色相)+ 阶段条 source 变体 + 失败重试。⑤ 测:拖 wav/mp3 → 见 uploading→detecting→入库 → BPM/调合理 → ClipEditor 可改 → 软删/undo → 刷新 resume → 错类型/超大被挡。
+
+## 28. Clip 波形「起播刻度 + 设起止」(ClipEditor 内)—— 🚧 设计 · 2026-06-21
+
+**一句话**:在 [`WarpCanvas`](web/src/studio/ui/WarpEditor.tsx) 波形上加一条**跟手、吸网格的起播线**:鼠标在 trim 内移动 → 出一条对齐网格的竖线(指明"下次从哪起播");**点波形 = 从这条线起播**(不再从头);**trim 外无线、不可播**;**右键 = 设为开始 / 设为结束**。复用既有 trim 提交链路(落库 + undo),引擎只加一个起播偏移。
+
+### 28.1 起播线(hover,网格吸附,仅 trim 内)
+`onMove`(非拖动时)按 `snapGrid(ob)`(既有,原点=trimStart、粒度=当前网格)算吸附位,**仅当落在 [trimStart, trimEnd) 内**才显示一条 `.we-hover` 竖线(直接改 DOM `left`/`display`,瞬态、不进 React state、不落库);出 trim / `onPointerLeave` → 隐藏。与播放线 `.we-playhead` 并存(前者=将从哪起,后者=正放到哪)。
+
+### 28.2 从线起播(引擎加 startSec 偏移)
+- **引擎**:[`StudioEngine.audition`](web/src/audio/studioEngine.ts:514) 加尾参 `startSec=0` → `p.start(t, off)` + `auditionStart = t - off`(播放线相位天然带上初始偏移,自由/量化都对)。off 夹 `[0, dur-1e-3]` 防越界。**loop 区不变**(整段),线只是入点:从线放到尾,再回头循环整段(= entry-offset,非"只循环线→尾")。
+- **透传**:`ClipPreview.toggle(startPhase?)` + `WarpCanvas.onPreviewToggle(region, startPhase?)`。**点波形身体** → `onUp` 带 `startPhase=(snapOb-trimStart)/loopLen` → host 从该相位**起播/重起**;**▶ 按钮**(无 startPhase)= 从头播 / 停 的开关。host:`auditionSound`/`previewCollagePiece` 把 `startPhase*buf.duration` 喂给 `audition`。
+- **同线再点=停**(用户要求):`activeStartRef` 记当前预览从哪条起播线起(▶ 从头=null);点波形若 `previewing && |sp-activeStartRef|<1e-4` → 发**无 startPhase** 的 `onPreviewToggle(region)`(host 当 toggle 关),否则从 sp 重起;`previewing→false` 的 effect 清 `activeStartRef`。
+- **菜单开着冻结起播线**(用户要求):scrim 上的 pointermove 仍冒泡到 stage,故 `onMove` 开头 `if(menu)return` → 起播线停在右键点(= set 起止的落点),不再跟手。
+- **范围(三处 ClipEditor 全覆盖)**:库预调 `auditionSound`、**单 sample 乐器** `previewInst`→`previewInstrument`、**chop/collage 片** `previewCollagePiece` —— 三者都是 `audition`(`previewInstrument` 也是抓乐器 voice 的 buffer 走 audition,580 行),全部透传 `startPhase*buf.duration` 偏移。**前提**(既有设计):乐器 clip 预览**只在总走带停**时可用(`canPreview={!playing}`,走带一跑就禁预览)→ 走 audition 的非量化路,偏移天然生效。⚠ 早期版误把单 sample 当 live voice 排除,实为 audition,已补齐(2026-06-21 用户指出)。
+
+### 28.3 trim 外:无线、不可播
+`onDown` 的身体分支:仅当 `snapGrid(ob)∈[trimStart,trimEnd)` 才设 `clickCand{startPhase}`;否则 `clickCand=null` → `onUp` 不触发预览。波形拖出(drag→pad/轨)走原生 dragstart,与此无关、照常。
+
+### 28.4 右键:设为开始 / 设为结束
+`onContextMenu`(`preventDefault`)在光标处开一个 `.we-menu`(scrim 接外点关闭):
+- **Set as start** → **整体平移**(起点=snapOb,终点跟过去 `snapOb + loopLen`、保 loop 长,**同拖起始线**);故**可越过原终点**(终点跟着走,不夹)。(2026-06-21 用户更正:不是独立移起点。)
+- **Set as end** → `setTrimEndBar(max(trimStart+gridBars, min(snapOb, maxBars 上限)))` + 夹 fade(同既有 trimEnd 拖拽)—— **不能落在起点之前**(夹到 `start+gridBars`;与"设起点可越过终点"不对称,正是因为终点会跟起点走)。
+- 两者只改 `trimStart/EndBar` state → 既有防抖 `useEffect`([:561](web/src/studio/ui/WarpEditor.tsx:561),deps 含 trimStart/EndBar)**自动 emit `onChange`** → host 落库 + 进 undo,**零新提交链路**。菜单文案随 app 用英文。
+
+### 28.5 §15/§16 合规
+起播线 / 起播偏移 = **纯瞬态**(直连 DOM/引擎,不落库、不进 undo)。设起止 = 走既有 `onChange`(库预调落 `Sound.warp`、乐器 clip 走 doc/undo),**口径不扩**(同拖 trim)。
+
+### 28.6 落地顺序
+① 引擎 `audition` 加 `startSec`(2 处:量化/即时)。② `WarpCanvas`:hover 线 + 网格吸附 + trim 内门控 + `clickCand.startPhase` + `onContextMenu` 菜单 + 设起止。③ `ClipPreview.toggle(startPhase?)` 透传 + 3 个 host adapter + `auditionSound`/`previewCollagePiece` 喂偏移。④ CSS:`.we-hover`/`.we-menu`。⑤ 测:trim 内出线吸格 → 点波形从线起播 → trim 外无线不播 → 右键设起止落库可 undo → ▶ 仍从头/停。
+
+## 29. 鼓二段分离(Drum kit split / drumsep)—— 🚧 实现 · 2026-06-22
+**一句话**:已分离出的 **drums stem 可以再拆一层** —— 用专训鼓模型(drumsep)把鼓轨分成 **kick / snare / toms / cymbals** 四件孙 Sound。**只有鼓能再拆**(bass/other/vocals/guitar/piano 不行);拆出来的孙轨与父鼓轨逐样本对齐 → 继续继承同一条 warp → 仍**天然锁相**,可单独拖 pad/轨。
+
+> 实测(2026-06-22):inagoy/drumsep checkpoint 167MB,内部 sources 是西语 `['bombo','redoblante','platillos','toms']`,归一化为 `kick/snare/cymbals/toms`。真实两段链路验证:四件帧数与父鼓轨**完全相等**(逐样本对齐 ✓)、四件残差仅占鼓轨能量 **3.9%**(近乎完整覆盖)。
+
+### 29.1 为什么二段式、为什么只鼓
+- **二段式**:第一段 `htdemucs_6s` 已把全混分成 6 轨;drum kit 分离是把 drums 轨再喂给一个**专门训练在鼓上**的模型。这是成熟方向(drumsep / LarsNet),不是从全混直接出 kick。
+- **drumsep = Demucs checkpoint**,能直接落进现有 sidecar(同一套 `apply_model`),集成成本最低 —— 选它做 v1。质量上限更高的 LarsNet(分 5 件带 cymbals、非 Demucs 框架)后置。
+- **只鼓**:其它 stem 再拆没有现成专模型、价值低;鼓拆 kick/snare 干净、对 loop 机隔离单件价值最高(hihat/cymbal/tom 会糊,可接受)。门在后端硬控(见 29.4)。
+
+### 29.2 数据模型(§15 合规)—— **零 schema 改动**
+`Sound.parentSoundId` 是**自关联**(`SoundStems`,`onDelete: Cascade`),天然支持任意深度。drums 子 Sound 直接当 kick/snare 孙 Sound 的 `parent`;`stemKind`/`stemStatus` 两列对**任何 Sound** 通用,`Asset.kind='stem'` 复用。
+- 孙 Sound:`parentSoundId=drums子.id`、`stemKind∈{kick,snare,toms,cymbals}`、`stemStatus=null`、`name='<父名> · kick'`(父名已是 `'loop · drums'` → 孙 = `'loop · drums · kick'`)。
+- **继承**:孙轨复制**父鼓轨**的 `analysis/warp`(父鼓轨又继承自全混 → 同 BPM/小节/loop 区)→ 逐样本对齐 → 锁相。
+- **多租户**:孙轨 `userId` 继承父鼓轨(= 全混的 userId);separate 路由仍校验 `findFirst({id,userId})`,鼓轨有 userId 故成立。
+- **cascade**:relationMode 默认 foreignKeys → MySQL 级 `ON DELETE CASCADE`。删全混 → 删 drums 子 → 连带删 kick/snare 孙(`deleteMany({parentSoundId})` 重分时也连孙一起清,干净)。Asset(sha256 去重、全局)不删。
+- **fork(§25)**:`loadSoundsWithParents` 沿 `parentSoundId` 向上爬 + 拓扑父在前,**已支持任意深度** → 孙轨被 clip 引用时,kick→drums→全混 整条链都会克隆进副本库。**无需改 forkProject。**
+
+### 29.3 sidecar:双模型(stem-service/app.py)
+- 启动加载**两个** Demucs 模型常驻:`MODEL`(全混 `htdemucs_6s`,现状)+ `DRUM`(鼓模型,`load_model(DRUM_CKPT)`,`demucs.states.load_model` 直读 `.th`)。`DRUM` **可选**:checkpoint 没装则 `DRUM=None` + 日志告警,**不影响现有全混分离**。
+- `/separate` 入参加 `model: 'full' | 'drums'`(默认 `'full'` → 向后兼容)。`'drums'` 走 `DRUM`;`DRUM is None` 时回明确错误「drum 模型未安装,见 stem-service/README」。
+- **源标签动态读** `model.sources`(同现状 `SOURCES=list(MODEL.sources)`)+ 一张**归一化映射**(英/西多语:bombo→kick、redoblante/caja→snare、platillos→cymbals、tom→toms…),DB 落归一化后的英文 `stemKind`;未知源 passthrough 小写。robust 到不管 checkpoint 内部标签是什么语言。
+- **torch 2.6+ 坑**:drumsep 老 checkpoint 序列化了整个 HDemucs 对象,`torch.load` 默认 `weights_only=True` 会拒 → 用 `weights_only=False` 自读 package(可信本地文件)再喂 `load_model` 的 dict 分支。
+- `/health` 同时报两模型 sources;近静音过滤(`peak<0.01`)沿用 → 没 tom 的鼓自动不建 tom 孙轨。
+
+### 29.4 后端(web/src/lib/stems.ts)—— 开一道窄缝
+- 现状第 28 行 `if (parent.parentSoundId) throw`(一刀切禁止 stem 再拆)→ 改为:
+  - 顶层(`parentSoundId==null`)→ 允许,`model='full'`。
+  - **drums 子轨**(`parentSoundId!=null && stemKind==='drums'`)→ 允许,`model='drums'`。
+  - 其它 stem → 仍 throw「只有鼓轨能再拆」。
+- `/separate` body 带上 `model`;其余流程(健康检查→标 separating→删旧子→建子 Sound 继承父 analysis/warp→跳近静音→标 done/failed)**完全复用**,父子两层走同一函数。
+- GET 路由(`api/sounds`、`api/gens`)的 `stems` include **加第二层**(嵌孙),否则孙轨不出现在 API 响应。
+
+### 29.5 前端 —— collect 改递归 + UI 多嵌一层
+- **collect 递归**(三处只吃一层 → 改成收全部后代):`useLoopMachine.ts` flatten(`soundsRef`)、`realLibrary.ts` 全库 Map、`StudioApp.setStemStatus`/`markStem` 乐观标记(孙轨 id 嵌在 `s.stems[].stems[]`,要递归找)。`soundToLoop` 已递归、`ApiSound.stems` 已递归类型 —— 不动。
+- **UI(LoopManager)**:配角分级 —— 全混=主角,stem=配角(暗底凹一层),**鼓件=配角的配角**(再凹一层、更小更暗,`srow-sub`)。drums 的 `srow` 加 hover 出的 **「Split kit」** chip(仅 `stemKind==='drums'` && 无孙 && 服务在跑);点 → 同一个 `onSeparate(drumsStemId)`。drums 轨 separating 出内联 mini spinner;done 展开 kick/snare/toms/cymbals 孙行(各 ▶ + 拖拽 + 选中);失败「Kit split failed · tap to retry」;有孙时给 ↻ 重拆。
+- **STEM_LABEL / clipColor**:加 Kick/Snare/Toms/Cymbals 标签 + drums 同色相邻近色(暖橙族)。
+
+### 29.6 §16 合规
+分离(含二段拆)= **外部副作用、不进 undo**(§16 litmus 归"生成"类,与现状一致;重分对旧子轨是硬删,同现状)。孙轨作为 Sound 仍受**库存活集⑦**软删覆盖(用户主动 Del 删孙轨可撤)。**口径不扩。**
+
+### 29.7 落地顺序
+① 本节设计(doc-first)。② sidecar:`app.py` 双模型 + `model` 路由 + 归一化;README 写 drumsep 安装。③ 后端:`stems.ts` 开缝 + 传 `model`;两 GET 路由嵌第二层。④ 前端:三处 collect 递归 + LoopManager 鼓件渲染/「Split kit」+ STEM_LABEL/clipColor。⑤ typecheck。⑥ 实测:分全混→拖 drums 旁点 Split kit→出 4 鼓件孙轨→拖 kick 到 pad 锁相→重拆/失败态→删全混连带清孙。**坑**:改 `app.py` 重启 sidecar;装了 drumsep checkpoint 才有 drum 模型。

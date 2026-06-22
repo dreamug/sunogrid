@@ -16,9 +16,9 @@ function Knob({ label, value, min, max, def = 0, fmt, onStart, onChange }: { lab
   const down = (e: React.PointerEvent) => {
     e.preventDefault();
     try { (e.target as Element).setPointerCapture?.(e.pointerId); } catch { /* 合成事件/无效 pointerId */ }
-    onStart();
     st.current = { y: e.clientY, v };
-    const move = (ev: PointerEvent) => { const dv = ((st.current.y - ev.clientY) / 140) * (max - min); onChange(Math.max(min, Math.min(max, st.current.v + dv))); };
+    let started = false, last = v; // §16:值**真变了**才压栈/emit;纯点击的合成 pointermove(零位移)不产生空 undo 步、不挤掉撤销栈
+    const move = (ev: PointerEvent) => { const dv = ((st.current.y - ev.clientY) / 140) * (max - min); const nv = Math.max(min, Math.min(max, st.current.v + dv)); if (nv === last) return; if (!started) { onStart(); started = true; } onChange(nv); last = nv; };
     const up = (ev: PointerEvent) => { (e.target as Element).releasePointerCapture?.(ev.pointerId); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -30,7 +30,7 @@ function Knob({ label, value, min, max, def = 0, fmt, onStart, onChange }: { lab
   const valLarge = ang - a0 > 180 ? 1 : 0;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, userSelect: 'none' }}>
-      <svg width="32" height="32" viewBox="0 0 48 48" onPointerDown={down} onDoubleClick={() => { onStart(); onChange(def); }} style={{ cursor: 'ns-resize', touchAction: 'none' }}>
+      <svg width="32" height="32" viewBox="0 0 48 48" onPointerDown={down} onDoubleClick={() => { if (v !== def) { onStart(); onChange(def); } }} style={{ cursor: 'ns-resize', touchAction: 'none' }}>
         <circle cx="24" cy="24" r="17" fill="#2a2825" stroke="#48433b" strokeWidth="1" />
         <path d={`M ${sx} ${sy} A 17 17 0 1 1 ${ex} ${ey}`} fill="none" stroke={TRACK} strokeWidth="3" strokeLinecap="round" />
         <path d={`M ${sx} ${sy} A 17 17 0 ${valLarge} 1 ${vx} ${vy}`} fill="none" stroke={CLAY} strokeWidth="3" strokeLinecap="round" />
@@ -59,7 +59,7 @@ function Fader({ value, min, max, def = 0, getLevel, live, onStart, onChange }: 
   };
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'stretch', height: 90 }}>
-      <div ref={trackRef} onPointerDown={down} onDoubleClick={() => { onStart(); onChange(def); }} style={{ position: 'relative', width: 22, cursor: 'ns-resize', touchAction: 'none' }}>
+      <div ref={trackRef} onPointerDown={down} onDoubleClick={() => { if (value !== def) { onStart(); onChange(def); } }} style={{ position: 'relative', width: 22, cursor: 'ns-resize', touchAction: 'none' }}>
         <div style={{ position: 'absolute', left: 9, width: 4, top: 0, bottom: 0, background: TRACK, borderRadius: 2 }} />
         <div style={{ position: 'absolute', left: 9, width: 4, bottom: 0, height: `${norm * 100}%`, background: CLAY, borderRadius: 2 }} />
         <div style={{ position: 'absolute', left: 2, width: 18, height: 11, top: `calc(${(1 - norm) * 100}% - 5.5px)`, background: '#cfc9bd', border: '1px solid #7d776c', borderRadius: 2 }} />

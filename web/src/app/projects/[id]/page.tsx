@@ -33,6 +33,8 @@ export default async function ProjectStudioPage({ params }: P) {
       quantize={project.quantize as Quantize}
       beatsPerBar={project.beatsPerBar}
       loopSong={project.loopSong}
+      playMode={project.playMode === 'song' ? 'song' : 'live'}
+      showAutomation={project.showAutomation}
     />
   );
 }

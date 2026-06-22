@@ -126,6 +126,14 @@ export interface XYConfig {
 }
 export const DEFAULT_XY: XYConfig = { on: true, program: 'filter', wet: 1, mode: 'spring', springMs: 300 };
 
+/** §26 Song XY 自动化:断点(直线插值,端点 hold)。bar=session 内 bar 偏移(0..bars×reps,跨全部 reps),v=参数值 0..1。
+ *  统一 bar 度量(全曲 1 bar 等宽);改 repeat 次数=按比例缩放点重分布(rescaleAuto)。 */
+export interface AutoPoint { bar: number; v: number; }
+/** §26.v3 一条效果的自动化:X/Y 两条断点序列。无 `on`——激活=线非平(isActiveAuto);program 由 XYAutoSet 的键给(不存值里)。 */
+export interface XYAutomation { x: AutoPoint[]; y: AutoPoint[]; }
+/** §26.v3 一个 session 的 XY 自动化:每效果一条,最多 4(filter/slicer/delay/brake),互相独立、可同时发声。**只存非平(激活)的效果**——`program in xyAuto` ⟺ 激活。挂 Session.xyAuto(JSON,§15)。 */
+export type XYAutoSet = Partial<Record<XYProgram, XYAutomation>>;
+
 export interface FxConfig {
   distortion: FxDistortion;
   delay: FxDelay;

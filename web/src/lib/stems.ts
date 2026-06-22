@@ -21,11 +21,25 @@ export async function stemServiceHealth(): Promise<StemHealth | null> {
   }
 }
 
-/** 分离一个 Sound → 建 6 个 stem 子 Sound(重分会先删旧 stem)。 */
+/**
+ * 分离一个 Sound → 建 stem 子 Sound(重分会先删旧 stem)。
+ * 两层共用此函数(§29):
+ *   - 顶层 Sound(无 parent)→ model='full' → 6 轨 drums/bass/other/vocals/guitar/piano。
+ *   - drums 子轨(stemKind==='drums')→ model='drums' → kick/snare/toms/cymbals 四件孙轨。
+ *   - 其它 stem → 拒绝(只有鼓能再拆)。
+ */
 export async function separateSound(soundId: string) {
   const parent = await db.sound.findUnique({ where: { id: soundId }, include: { asset: true } });
   if (!parent) throw new Error('sound not found');
-  if (parent.parentSoundId) throw new Error("This is already a stem — can't separate it further");
+  // 开一道窄缝:鼓轨能二段拆,其它 stem 不行。
+  let model: 'full' | 'drums';
+  if (!parent.parentSoundId) {
+    model = 'full';
+  } else if (parent.stemKind === 'drums') {
+    model = 'drums';
+  } else {
+    throw new Error("Only the drums stem can be split further");
+  }
 
   const health = await stemServiceHealth();
   if (!health) throw new Error('分离服务没在跑:到 stem-service/ 执行 ./run.sh');
@@ -38,10 +52,14 @@ export async function separateSound(soundId: string) {
     const res = await fetch(`${STEM_URL}/separate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ inputPath: storageAbs(parent.asset.path), outDir }),
+      body: JSON.stringify({ inputPath: storageAbs(parent.asset.path), outDir, model }),
       signal: AbortSignal.timeout(10 * 60 * 1000),
     });
-    if (!res.ok) throw new Error(`分离失败 HTTP ${res.status}`);
+    if (!res.ok) {
+      // 透传 sidecar 的错误原因(如 drum 模型未安装),别只回个 HTTP 码
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(body?.error ? `分离失败:${body.error}` : `分离失败 HTTP ${res.status}`);
+    }
     const { stems } = (await res.json()) as { stems: { kind: string; path: string; peak: number; rms: number }[] };
     // 跳过近静音 stem(如这首没吉他时的 guitar 轨),不建无用 Sound/pad
     const SILENT_PEAK = 0.01;

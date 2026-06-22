@@ -62,6 +62,8 @@ model Project {
   gridPrefs   Json?    // 编辑器网格偏好 {arrange,warp,snap} —— UI 偏好,JSON 逃生口(PRODUCT §15.A),记住不重置
   fx          Json?    // 主总线效果器 {distortion,delay,reverb} —— 固定小配置,JSON 逃生口(PRODUCT §15.A/§17)
   loopSong    Boolean  @default(false) // §20 Song 线性模式:播到时间线末尾后循环整首
+  playMode       String  @default("live") // §26 上次进的播放模式 live | song(UI 偏好,乐观持久化)
+  showAutomation Boolean @default(true)   // §26 Song automation UI 是否显示(纯 UI 层隐藏,不影响效果回放)
 
   // —— §25 示例项目 ——
   isExample           Boolean @default(false) // SUPER_ADMIN 标记:全局共享只读母版
@@ -114,6 +116,7 @@ model Gen {
   projectId    String
   project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   mode         String // sound | advanced
+  source       String   @default("suno") // suno | upload —— §27 ingest 来源(上传样本)
   prompt       String   @db.Text
   bpm          Int
   musicalKey   String? // 'Am' 等
@@ -220,6 +223,7 @@ model StudioSession {
   index       Int
   repeats     Int                @default(1) // §20 Song 线性模式:本场景连播次数(Live 模式忽略)
   color       String?            // §20 场景标识色(rail 彩色卡)
+  xyAuto      Json?              // §26 Song 模式 XY 自动化(per-session 单效果,直线断点;null=无)
   instruments StudioInstrument[]
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt

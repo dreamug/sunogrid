@@ -1,5 +1,5 @@
 'use client';
-// Studio 音频引擎 —— 区别于 ToneAudioEngine(loop 机那条),studio 走这条:
+// Studio 音频引擎 —— 当前 studio app 唯一的引擎(旧 pad 机的 ToneAudioEngine 已退场):
 // 在 M1 的"量化 launch/stop"基础上,每件乐器多挂一条 mixer 链 Player → EQ(low shelf / mid peaking / high shelf) → Panner → (volume) → dest。
 // EQ = 三段串联 biquad(lowshelf@200 + peaking@1k(Q0.7) + highshelf@4k,频点见 contracts EQ_BANDS),与 realLibrary 离线 bake 路径同算法,听感一致;
 // 用串联(每颗 biquad 0dB 时透明)而非 Tone.EQ3(三段分频后求和)—— 后者会在交叉点相位抵消产生梳状染色,即使 0/0/0 也变味,故弃用。
@@ -42,6 +42,10 @@ function softClipCurve(T: number, ceil: number, n = 2048): Float32Array {
   return c;
 }
 
+// 主峰值表弹道(见 masterLevel):窗口短 → 抓得到瞬态;归一窗收窄 → 短表条上动态可见;慢落 → 余辉而不闪。
+const METER_FLOOR_DB = -48;   // 峰值表归一下限(dBFS):窗口 [-48,0] 铺满短表条,鼓点动态吃满量程
+const PEAK_RELEASE = 0.88;    // 慢落系数(每 rAF 帧 ×0.88;~60fps 下视觉余辉约 300ms,落到 37% ≈130ms)
+
 export class StudioEngine {
   private voices = new Map<string, Voice>();
   private beatsPerBar = 4;
@@ -54,7 +58,8 @@ export class StudioEngine {
   private quantize: Quantize = '1bar';                              // 启停量化粒度(顶栏 Quantize 选择器);launch/stop/audition 用 nextBoundary 读它
   private soloIds = new Set<string>();                              // §18 独奏集(隔离式+多选,瞬态);仅经 setSolo 改 + clearAll 清;UI soloRef 是 authority
   private master?: Tone.Volume; private masterClip?: Tone.WaveShaper; // 主总线:汇总(FX链+节拍器)→ 主音量(master Volume)→ 软削波天花板(memoryless)→ destination
-  private split?: Tone.Split; private meterL?: Tone.Meter; private meterR?: Tone.Meter; // 总输出 L/R 电平表(抽 master = post-FX/post 主音量/pre-软削波 的真实总线电平)
+  private split?: Tone.Split; private analyserL?: Tone.Analyser; private analyserR?: Tone.Analyser; // 总输出 L/R 峰值表(抽 master = post-FX/post 主音量/pre-软削波;waveform analyser,masterLevel 自算 peak)
+  private peakHold: [number, number] = [0, 0];                     // 峰值表弹道状态:快攻(瞬时跳上)慢落(每帧 ×PEAK_RELEASE),masterLevel 每帧推进一次
   private clickSynth?: Tone.Synth; private clickVol?: Tone.Volume;  // 节拍器:click synth → 音量节点 → master(随主音量+限制器,但不进 FX)
   private fx?: FxBus; private fxCfg?: FxConfig;                     // 主总线效果器(§17):各乐器 panner → fx.input → 失真→延迟→混响 → master;节拍器不进
   private xy?: XYPad;                                              // §21 XY 表演板:主总线 insert,串在 master 与软削波天花板之间(吃完整最终 mix)
@@ -75,7 +80,7 @@ export class StudioEngine {
       //   改用 **memoryless 软削波**(WaveShaper):无时间常数 → 物理上不可能抽吸/咔;阈下纯净直通,超阈 tanh 平滑饱和
       //   到天花板内(轻微谐波暖色,适合 lofi/hiphop),0dBFS 永不硬削。4× 过采样抗混叠。
       this.master = new Tone.Volume(0);
-      this.masterClip = new Tone.WaveShaper(softClipCurve(0.72, 0.96)); // 阈 ~-2.9dBFS 起软饱和,天花板 ~-0.35dBFS
+      this.masterClip = new Tone.WaveShaper(softClipCurve(0.72, 0.96)); // 阈 T=0.72(~-2.9dBFS)起软饱和;x=1 处实际输出≈0.92(~-0.7dBFS)=真实天花板(|x|>1 取曲线端点,永不到 0dBFS)
       this.masterClip.oversample = '4x';
       // §21 XY 表演板:主总线 insert 串在 master → 天花板 之间(吃干声 + 所有 FX return 湿声的最终和;电平表抽在 master=XY 前)。
       this.xy = new XYPad(bpm);
@@ -85,13 +90,15 @@ export class StudioEngine {
       // 总输出 L/R 电平表:抽在 master(post-FX、post 主音量、pre-软削波)= 真实总线电平,
       // 能反映 delay/reverb 尾巴、失真、主音量与"逼近限制器"的过载(旧实现抽各 voice panner=pre-FX,测不到这些)。
       this.split = new Tone.Split();
-      this.meterL = new Tone.Meter(); this.meterR = new Tone.Meter();
+      // 峰值表:waveform analyser(短窗 256 samples ≈5ms@48k)→ masterLevel 自算 peak=max|x|,而非 Tone.Meter 的 RMS。
+      // RMS 把瞬态(鼓击)在窗口内一平均就抹平 → 表跟不动节拍;peak 每个鼓点都顶一下 = 真正"跟手"。
+      this.analyserL = new Tone.Analyser('waveform', 256); this.analyserR = new Tone.Analyser('waveform', 256);
       this.master.connect(this.split);
-      this.split.connect(this.meterL, 0, 0);
-      this.split.connect(this.meterR, 1, 0);
-      // 节拍器:click → 音量 → master(随主音量+限制器一起走,但不进 FX:click 不该带混响/失真)。
+      this.split.connect(this.analyserL, 0, 0);
+      this.split.connect(this.analyserR, 1, 0);
+      // 节拍器:click → 音量 → 软削波天花板(不经 master→XY:click 是监听辅助,不该被 XY 表演插入 brake/slicer/filter/delay 切改,也不进 FxBus 混响/失真;音量走独立 clickVol,不随主音量推子)。
       this.clickVol = new Tone.Volume(-8);
-      this.clickVol.connect(this.master);
+      this.clickVol.connect(this.masterClip);
       this.clickSynth = new Tone.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.001, decay: 0.045, sustain: 0, release: 0.02 } }).connect(this.clickVol);
       // 主总线效果器:乐器汇入 fx.input → 失真→延迟→混响 → master(节拍器不经此)。
       this.fx = new FxBus(bpm, this.master);
@@ -104,17 +111,25 @@ export class StudioEngine {
   /** 应用主总线效果器配置(§17)+ XY 表演板配置(§21:program/wet/on)。 */
   setFx(cfg: FxConfig): void { this.fxCfg = cfg; this.fx?.setAll(cfg); if (cfg.xy) this.xy?.setXy(cfg.xy); }
 
-  // --- §21 XY 表演板:瞬态演奏(UI 直连,不进 undo/不落库;对标 §18 Solo)---
-  xyEngage(): void { this.xy?.engage(); }
-  xyMove(nx: number, ny: number): void { this.xy?.move(nx, ny); }
-  xyRelease(): void { this.xy?.release(); }
+  // --- §21.v2 / §26.4 XY 多效果链:per-effect 瞬态驱动(coordinator 独占,不进 undo/不落库;对标 §18 Solo)---
+  xySetValue(program: import('@/contracts').XYProgram, nx: number, ny: number, immediate = false): void { this.xy?.setValue(program, nx, ny, immediate); }
+  xySetActive(program: import('@/contracts').XYProgram, active: boolean): void { this.xy?.setActive(program, active); }
+  xyReleaseAll(): void { this.xy?.releaseAll(); }
 
-  // --- 主输出:主音量(master Volume,在限制器之前) + L/R 电平 ---
+  // --- 主输出:主音量(master Volume,在限制器之前) + L/R 峰值电平 ---
   setMasterVolume(db: number): void { if (this.master) this.master.volume.value = db; }
-  // 归一窗口收窄到 [-54,0]dBFS(1.0=0dBFS):危险区铺在表顶,UI 据此上红(逼近限制器即变红)。
+  // L/R 峰值电平 0..1(供顶栏电平表):从 waveform analyser 取窗口峰值 peak=max|x|,做快攻(瞬时跳上)慢落
+  // (每帧 ×PEAK_RELEASE)弹道,再以 [METER_FLOOR_DB,0]dBFS 线性归一。⚠ 含状态推进,约定**每帧只调一次**
+  // (顶栏唯一 MasterMeter 叶子,见 live.tsx)。改 RMS→peak:鼓点瞬态不再被窗口平均抹平,表跟得动节拍。
   masterLevel(): [number, number] {
-    const norm = (m?: Tone.Meter): number => { const v = m?.getValue(); const db = typeof v === 'number' ? v : Array.isArray(v) ? v[0] : -Infinity; return isFinite(db) ? Math.max(0, Math.min(1, (db + 54) / 54)) : 0; };
-    return [norm(this.meterL), norm(this.meterR)];
+    const ch = (a: Tone.Analyser | undefined, i: 0 | 1): number => {
+      let peak = 0;
+      if (a) { const buf = a.getValue() as Float32Array; for (let k = 0; k < buf.length; k++) { const x = Math.abs(buf[k]); if (x > peak) peak = x; } }
+      const held = this.peakHold[i] = Math.max(peak, this.peakHold[i] * PEAK_RELEASE); // 攻=Math.max 瞬时,落=×release 衰减
+      const db = held > 1e-5 ? 20 * Math.log10(held) : -Infinity;
+      return isFinite(db) ? Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / -METER_FLOOR_DB)) : 0;
+    };
+    return [ch(this.analyserL, 0), ch(this.analyserR, 1)];
   }
 
   // --- 节拍器 ---
@@ -266,8 +281,9 @@ export class StudioEngine {
     if (this.retempoSchedId != null) { t.clear(this.retempoSchedId); this.retempoSchedId = undefined; } // 作废上一次还没到的改速
     this.retempoTarget = newBpm;
     this.retempoSchedId = t.scheduleOnce((time) => {
-      this.retempoSchedId = undefined; this.retempoTarget = undefined; this.retempoBuilds = undefined; // 边界已触发,应用归本回调
+      this.retempoSchedId = undefined; this.retempoTarget = undefined; // 边界已触发,应用归本回调
       t.bpm.value = newBpm; this.fx?.setBpm(newBpm); this.xy?.setBpm(newBpm); // B 处翻新速(此前老 buffer 老速正常播,无 drift)
+      const bridge = new Map<string, Promise<AudioBuffer | null>>(); // 边界时仍未渲完(顶速桥接 / off 未渲)的 voice → 留住其 build 句柄,供 stopTransport 兜底就地换;否则桥接中途停走带 → 残留旧长 buffer 配新速度 = 漂移
       for (const [id, v] of this.voices) {
         if (v.state !== 'on' || v.player.disposed) continue;
         const oldDur = (v.loopDur && v.loopDur > 0) ? v.loopDur : v.player.buffer.duration;
@@ -281,10 +297,12 @@ export class StudioEngine {
           const effDur = oldDur / ratio;
           v.startTime = time - phase * effDur;
           v.loopDur = effDur;
-          builds.get(id)?.then((b) => { if (b && gen === this.retempoGen) this.swapBuffer(id, b, v.bars); }); // 就绪后在循环边界补换;期间又改速/停走带(gen 变)则丢弃这迟到的旧速 buffer(swapBuffer 建新 player→自动复位 rate)
+          const p = builds.get(id);
+          if (p) { bridge.set(id, p); p.then((b) => { if (b && gen === this.retempoGen) this.swapBuffer(id, b, v.bars); }); } // 就绪后在循环边界补换;期间又改速/停走带(gen 变)则丢弃这迟到的旧速 buffer(swapBuffer 建新 player→自动复位 rate)
         }
       }
-      this.voices.forEach((v, id) => { if (v.state !== 'on') builds.get(id)?.then((b) => { if (b && gen === this.retempoGen) this.replaceBufferInPlace(v, b); }); }); // 没出声的:就地换(gen 变则丢弃迟到 buffer)
+      this.voices.forEach((v, id) => { if (v.state !== 'on') { const p = builds.get(id); if (!p) return; if (!ready.has(id)) bridge.set(id, p); p.then((b) => { if (b && gen === this.retempoGen) this.replaceBufferInPlace(v, b); }); } }); // 没出声的:就地换(gen 变则丢弃迟到 buffer);未渲完的也登记进 bridge,停走带兜底
+      this.retempoBuilds = bridge.size ? bridge : undefined; // 仍有未渲完桥接 → 留给 stopTransport 兜底;全渲完则清空(普通停走带不再多做)
     }, this.nextBoundary());
   }
   /** 就地把 voice 的 buffer 换成新的(没在出声时用):复位顶速、对齐 loop 点。 */
@@ -314,7 +332,7 @@ export class StudioEngine {
   /** voice 输出电平 0..1(-48dB..0dB 归一);没在响→0。 */
   voiceLevel(id: string): number {
     const v = this.voices.get(id);
-    if (!v || v.state !== 'on') return 0;
+    if (!v || (v.state !== 'on' && v.state !== 'stopping')) return 0; // stopping(量化停止前那一小节)仍在出声 → 电平表别提前熄灭(与 voicePhase 口径一致)
     const raw = v.meter.getValue();
     const db = typeof raw === 'number' ? raw : raw[0];
     if (!isFinite(db)) return 0;
@@ -389,13 +407,24 @@ export class StudioEngine {
   /** 设置独奏集(§18,隔离式 + 多选):替换 soloIds 后重算所有 voice 的"跑 + 听"。 */
   setSolo(ids: Iterable<string>): void {
     this.soloIds = new Set(ids);
-    this.voices.forEach((v, id) => this.reconcileVoice(id, v));
+    this.voices.forEach((v, id) => this.reconcileForSolo(id, v));
   }
 
   /** 按当前 wantOn + soloIds 重算单个 voice:muteGain 遮罩(即时、保相位)+ player 跑/停(量化)。 */
   private reconcileVoice(id: string, v: Voice): void {
     v.muteGain.gain.rampTo(this.isAudible(id, v) ? 1 : 0, 0.015); // 遮罩即时跟随,不动 player → 保相位、清 solo 原相位接回
     this.setRunning(v, this.shouldRun(id, v));
+  }
+
+  /** §20 solo 专用重算:遮罩照常,但只对"已在跑 / 被显式 solo 点起"的 voice 动 player 起停。
+   *  走带在跑时引擎里除了当前出声块,还驻着下一块的 lookahead 预载 voice(state=off、wantOn=enabled)。
+   *  若用通用 reconcileVoice(shouldRun=wantOn||solo),会把这些 off 预载 voice 在边界点响 = 别块声音泄漏 ——
+   *  连正常 solo/取消 solo 当前块都会触发(setSolo 重算的是全引擎,不分块)。这里加 running||soloed 闸:
+   *  预载/未被 solo 的 off voice 一律不碰(留给换场边界 swapVoicesAt 起);solo 显式点起一件关着的乐器(§18)仍生效。 */
+  private reconcileForSolo(id: string, v: Voice): void {
+    v.muteGain.gain.rampTo(this.isAudible(id, v) ? 1 : 0, 0.015);
+    const running = v.state === 'on' || v.state === 'queued' || v.state === 'stopping';
+    if (running || this.soloIds.has(id)) this.setRunning(v, this.shouldRun(id, v));
   }
 
   /** player 跑/停:走带在跑→量化进/出(UI 等边界);没起走带→只记意图、不出声。
@@ -440,10 +469,13 @@ export class StudioEngine {
   }
   stopTransport(): void {
     const t = Tone.getTransport();
-    // 改速边界前就停 → 仍把 transport 落到目标速 + 把在渲的新 buffer 就地兜底换上(否则重启后旧长度 buffer 配新速度 = drift);scheduleOnce 由下面 t.cancel() 清掉。
+    // 改速边界前停(retempoTarget 还在)→ 把 transport 落到目标速;边界后停(顶速桥接中)→ target 已清、bpm 已是新速。scheduleOnce 由下面 t.cancel() 清掉。
     if (this.retempoTarget != null) { t.bpm.value = this.retempoTarget; this.fx?.setBpm(this.retempoTarget); this.xy?.setBpm(this.retempoTarget); }
-    if (this.retempoBuilds) { for (const [id, p] of this.retempoBuilds) p.then((b) => { const v = this.voices.get(id); if (v && b) this.replaceBufferInPlace(v, b); }); }
-    this.retempoSchedId = undefined; this.retempoTarget = undefined; this.retempoBuilds = undefined; this.retempoGen++; // 停走带 → 作废改速边界回调里"就绪后补换"的迟到 swapBuffer(本函数已就地兜底,别再让它在停后/重启后盖上去)
+    // 把在渲/桥接的新 buffer 就地兜底换上(否则重启后旧长度 buffer 配新速度 = drift):边界前停=全部在渲;边界后停=retempoBuilds 只剩顶速桥接那几个。
+    const pendingBuilds = this.retempoBuilds;
+    this.retempoSchedId = undefined; this.retempoTarget = undefined; this.retempoBuilds = undefined;
+    const g = ++this.retempoGen; // 停走带代号:作废边界回调里"就绪后补换"的迟到 swapBuffer;下面兜底的 replaceBufferInPlace 也据此判废(之后再改速会 ++,让这批迟到 buffer 失效)
+    if (pendingBuilds) { for (const [id, p] of pendingBuilds) p.then((b) => { if (this.retempoGen !== g) return; const v = this.voices.get(id); if (v && b) this.replaceBufferInPlace(v, b); }); }
     t.stop();
     t.cancel();
     this.voices.forEach((v) => {
@@ -509,7 +541,7 @@ export class StudioEngine {
   //   {mixer}     = collage 片:按片自己的 gain/pan/3 段 EQ 现搭一条常驻片链(audEq),听感与离线 bake 一致(片预览);
   // 不给(库素材裸试听,没有乐器 mixer)→ 直连 destination。
   // quantize 且走带在跑 → 排到下一小节边界再起(跟随 bar);否则立即自由循环。
-  audition(id: string, buffer: AudioBuffer, through?: { eq: ShelfEq; gainDb: number } | { mixer: Mixer }, quantize = false): void {
+  audition(id: string, buffer: AudioBuffer, through?: { eq: ShelfEq; gainDb: number } | { mixer: Mixer }, quantize = false, startSec = 0): void {
     this.stopAudition();
     const p = new Tone.Player(buffer);
     if (through && 'mixer' in through) { p.volume.value = through.mixer.gainDb; p.connect(this.auditionChain(through.mixer)); this.auditionUsesChain = true; }
@@ -519,6 +551,7 @@ export class StudioEngine {
     this.auditionPlayer = p;
     this.auditionId = id;
     this.auditionDur = buffer.duration;
+    const off = Math.max(0, Math.min(startSec, buffer.duration - 1e-3)); // §28 从起播线偏移入点(夹防越界);auditionStart 反推偏移 → 播放线相位正确
     const t = Tone.getTransport();
     if (quantize && t.state === 'started') {
       this.auditionQueued = true;
@@ -526,14 +559,14 @@ export class StudioEngine {
       this.auditionSchedId = t.scheduleOnce((time) => {
         this.auditionSchedId = undefined;
         if (p.disposed) return;
-        p.start(time);
-        this.auditionStart = time;
+        p.start(time, off);
+        this.auditionStart = time - off;
         this.auditionQueued = false;
         this.onChange?.(); // 边界:预览 queued→playing,通知上层(波形呼吸收掉)
       }, this.nextBoundary());
     } else {
-      p.start();
-      this.auditionStart = Tone.now();
+      p.start(undefined, off);
+      this.auditionStart = Tone.now() - off;
       this.auditionQueued = false;
     }
   }
@@ -571,10 +604,10 @@ export class StudioEngine {
   /** 该 id 的预览正排队等小节边界(还没出声)→ true;UI 据此让波形背景呼吸。 */
   auditionQueuedFor(id: string): boolean { return this.auditionId === id && this.auditionQueued; }
   /** 预览某乐器当前已加载的 warp 产物(自由循环,不挂主走带);仅走带停时用。过该乐器自己的 gain/eq/pan。 */
-  previewInstrument(id: string): void {
+  previewInstrument(id: string, startPhase = 0): void {
     const v = this.voices.get(id);
     const buf = v?.player.buffer?.get?.() as AudioBuffer | undefined;
-    if (v && buf) this.audition(id, buf, { eq: v.eq, gainDb: v.player.volume.value });
+    if (v && buf) this.audition(id, buf, { eq: v.eq, gainDb: v.player.volume.value }, false, startPhase * buf.duration); // §28 单 sample 乐器 clip 预览(总走带停时)也走起播线偏移
   }
   /** collage 片预览的常驻 mixer 链(lowshelf/peaking/highshelf → panner → destination,频点同离线 bake 的 EQ_BANDS)。
    *  懒建一次复用,每次按片的 dB 刷 gain/pan,返回入口节点(audEq.low)。裸到 destination(不过主总线,同库素材试听口径),只补上片自己的 gain/eq/pan。 */
@@ -623,8 +656,8 @@ export class StudioEngine {
     this.fx?.dispose(); this.fx = undefined;
     this.xy?.dispose(); this.xy = undefined;
     // 主总线 + 节拍器 + 电平表节点(常驻、随实例销毁;旧实现漏清这些)
-    [this.clickSynth, this.clickVol, this.split, this.meterL, this.meterR, this.master, this.masterClip].forEach((n) => { try { n?.dispose(); } catch { /* */ } });
-    this.clickSynth = this.clickVol = undefined; this.split = this.meterL = this.meterR = undefined; this.master = undefined; this.masterClip = undefined;
+    [this.clickSynth, this.clickVol, this.split, this.analyserL, this.analyserR, this.master, this.masterClip].forEach((n) => { try { n?.dispose(); } catch { /* */ } });
+    this.clickSynth = this.clickVol = undefined; this.split = this.analyserL = this.analyserR = undefined; this.master = undefined; this.masterClip = undefined;
   }
 
   private fire(v: Voice, time: number): void {

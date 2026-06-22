@@ -37,7 +37,7 @@ export interface Clip {
 
 /** Sound 上的"原始 warp"种子:与 Clip 同形的 sample 域子集(soundId/assetId 来自 Sound、gainDb 属乐器层,故不在内)+ 出身标记。
  *  入库自动建(warpedBy:'auto')、预调改它(→'manual')、建乐器时与 Sound 合成一条独立 Clip 副本(realLibrary.soundToClip)。
- *  注:仍以 JSON 存在 `Sound.warp`(非独立表)—— 老 pad 机也读这块 JSON(pads route / useLoopMachine),不能挪走。 */
+ *  注:仍以 JSON 存在 `Sound.warp`(非独立表)—— 后端 pads route(/api/pads)仍读这块 JSON,不能挪走。 */
 export type SampleWarp = Pick<Clip, 'startSample' | 'endSample' | 'bars' | 'timeMul' | 'semitones' | 'fadeOutBars' | 'fadeSilenceBars'> & { warpedBy?: 'auto' | 'manual' };
 
 /** 乐器通用外壳的 mixer:gain + pan + 三段 EQ(low shelf / mid peaking / high shelf)。 */
@@ -111,6 +111,8 @@ export interface Session {
   repeats: number;
   /** §20 场景标识色(rail 彩色卡;null = 默认色)。 */
   color: string | null;
+  /** §26.v2 Song 模式 XY 自动化:每效果一条(filter/slicer/delay/brake),同时发声;null=无。仅 Song 模式回放。 */
+  xyAuto?: import('./models').XYAutoSet | null;
   instruments: Instrument[];
 }
 

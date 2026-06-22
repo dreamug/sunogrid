@@ -29,7 +29,7 @@ export interface WarpRegion {
 export interface ClipPreview {
   previewing: boolean;
   getPhase: () => number | null;
-  toggle: () => void;
+  toggle: (startPhase?: number) => void; // §28 startPhase 0..1=从该相位起播;省略=从头/切换
   queued?: boolean; // 量化预览正等小节边界(还没出声)→ 波形背景呼吸
   warming?: boolean; // ⑥ 正在 build buffer(出声前)→ 播放键转圈;命中缓存不传
 }
@@ -76,7 +76,7 @@ export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, 
       channels={audio.channels} sampleRate={audio.sampleRate} analysis={analysis}
       nativeBpm={sound.sourceBpm} targetBpm={targetBpm} beatsPerBar={beatsPerBar} initSemitones={clip.semitones}
       initFadeOut={clip.fadeOutBars} initFadeSilence={clip.fadeSilenceBars}
-      previewing={preview.previewing} queued={preview.queued} warming={preview.warming} getPhase={preview.getPhase} onPreviewToggle={() => preview.toggle()}
+      previewing={preview.previewing} queued={preview.queued} warming={preview.warming} getPhase={preview.getPhase} onPreviewToggle={(_r, sp) => preview.toggle(sp)}
       onChange={(r) => onChange({ ...clip, startSample: r.startSample, endSample: r.endSample, bars: r.bars, semitones: r.semitones, fadeOutBars: r.fadeOutBars || undefined, fadeSilenceBars: r.fadeSilenceBars || undefined })}
       hideHead compact compactHeader={header} compactMixer={mixer} canPreview={canPreview} onDragOut={onDragOut} maxBars={maxBars}
       initGridBars={initGridBars} initSnap={initSnap} onGridChange={onGridChange}
@@ -97,7 +97,7 @@ interface Props {
   initFadeSilence?: number;       // §24 载入时的静音尾(距尾小节数);空=0
   previewing: boolean;            // 受控:由上层(库▶ / 编辑器播放键)统一管
   getPhase: () => number | null;  // 预览播放线相位 0..1(引擎按真实起播算);null=没在播
-  onPreviewToggle: (r: WarpRegion) => void; // 播放/暂停
+  onPreviewToggle: (r: WarpRegion, startPhase?: number) => void; // 播放/暂停;startPhase=从该相位起播(§28)
   onChange: (r: WarpRegion) => void;        // region 变更 → 自动应用(上层持久化 + 即调即听)
   onReset?: () => void;                     // 退回自动检测默认(上层提供;无则不显示重置键)
   hideHead?: boolean;                       // 隐藏内置「片段/Warp」标题栏(播放键由上层通栏提供)
@@ -179,14 +179,17 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const [barsVisible, setBarsVisible] = useState(init.N + 2);
   const [vStart, setVStart] = useState(0);
   const [armed, setArmed] = useState(false); // 光标在波形身体(非 trim 锚 / 非 Shift)→ 波形可拖出乐器
+  const [menu, setMenu] = useState<{ x: number; y: number; ob: number } | null>(null); // §28 右键菜单(设起止);x/y=视口坐标
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
+  const hoverRef = useRef<HTMLDivElement>(null); // §28 起播线(瞬态,直改 DOM)
+  const activeStartRef = useRef<number | null>(null); // §28 当前预览从哪条起播线起(phase);"同线再点=停"用,▶从头起=null
   const rafRef = useRef<number | null>(null);
   const playRef = useRef({ trimStartBar: 1, loopLen: 1 }); // 正在播放那段的几何(起播 / 提交时锁定;拖动中不变)→ 播放线按真正在响的 loop 算,不随未提交的 loopLen 漂
   const drag = useRef<DragSnap | null>(null);
-  const clickCand = useRef<{ x: number; y: number } | null>(null); // 空白区「点击试听」候选:松手时若没怎么动 → 触发一次预览
+  const clickCand = useRef<{ x: number; y: number; startPhase?: number } | null>(null); // 「点击试听」候选;startPhase=§28 从起播线相位起播
   const sbDrag = useRef<{ x0: number; v0: number } | null>(null);
   const semiDrag = useRef<{ y0: number; v0: number } | null>(null);
   // 播放线/自动应用用的最新值镜像
@@ -406,6 +409,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
 
   const commitNow = () => setCommitTick((t) => t + 1);
   const onDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return; // §28 只接左键;右键交给 onContextMenu(否则右键也会起 trim 拖拽/试听候选)
     const stage = stageRef.current!;
     const rectB = stage.getBoundingClientRect();
     const W = stage.clientWidth, Hpx = stage.clientHeight;
@@ -423,11 +427,14 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     else if (Math.abs(x - xStart) <= ANCHOR_HIT) mode = 'trimStart';
     else if (e.shiftKey) mode = 'stretch';
     else {
-      // 空白/身体区不平移波形(起播位置只由绿色起始线决定);记为点击候选,松手没怎么动 = 试听一次。
-      // 可拖出时身体区永不夺指针捕获 —— 捕获会压住原生 HTML5 拖拽。轻点(按下没动)仍走 clickCand 试听,一动就起原生 drag。
-      // 不再看异步的 armed:否则「按太快 armed 还没就位 → draggable=false → 拖不出去」(经常拖不上 pad 的根因)。
+      // 空白/身体区不平移波形;记为点击候选,松手没怎么动 = 从起播线试听一次。
+      // §28:仅当落点(吸格)在 trim 内才记 clickCand(带 startPhase);trim 外 = null → 点了不出声。
+      // 可拖出时身体区永不夺指针捕获(捕获会压住原生 HTML5 拖拽);轻点走 clickCand 试听,一动就起原生 drag。
       if (!onDragOut) (e.target as Element).setPointerCapture(e.pointerId);
-      clickCand.current = { x: e.clientX, y: e.clientY };
+      const sob = snapGrid(ob), loop = trimEndBar - trimStartBar;
+      clickCand.current = sob >= trimStartBar && sob < trimEndBar && loop > 0
+        ? { x: e.clientX, y: e.clientY, startPhase: (sob - trimStartBar) / loop }
+        : null;
       return;
     }
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -482,6 +489,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     }
   };
   const onMove = (e: React.PointerEvent) => {
+    if (menu) return; // §28 右键菜单开着时冻结起播线(光标不再跟手移动)
     if (drag.current) { applyDrag(e.clientX); return; }
     const cc = clickCand.current; // 移动超过阈值 → 不是点击,取消试听候选
     if (cc && (Math.abs(e.clientX - cc.x) > 4 || Math.abs(e.clientY - cc.y) > 4)) clickCand.current = null;
@@ -500,6 +508,12 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
       const canDrag = !!onDragOut && !nearAnchor && !nearFadeDot && !e.shiftKey; // 身体区可拖出(避开 trim 锚 / fade 点 / Shift 变速)→ 切到 draggable
       if (canDrag !== armed) setArmed(canDrag);
       stage.style.cursor = nearFadeDot || nearAnchor || e.shiftKey ? 'ew-resize' : canDrag ? 'grab' : '';
+      // §28 起播线:吸网格、仅 trim 内显示(瞬态直改 DOM,不进 state)
+      if (hoverRef.current) {
+        const sob = snapGrid(vStart + x / pxPerBar);
+        if (sob >= trimStartBar && sob < trimEndBar) { hoverRef.current.style.display = 'block'; hoverRef.current.style.left = (((sob - vStart) * pxPerBar) / stage.clientWidth) * 100 + '%'; }
+        else hoverRef.current.style.display = 'none';
+      }
     }
   };
   // 波形身体拖出:HTML5 drag(目标 pad/轨复用现成 text/plain 落点)。
@@ -512,9 +526,34 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     onDragOut(e);
   };
   const onUp = () => {
-    if (clickCand.current) { clickCand.current = null; if (canPreview) onPreviewToggle(region); return; } // 空白区轻点 = 试听一次(不提交)
+    if (clickCand.current) { // §28 trim 内轻点 = 从起播线试听
+      const sp = clickCand.current.startPhase; clickCand.current = null;
+      if (canPreview && sp != null) {
+        if (previewing && activeStartRef.current != null && Math.abs(sp - activeStartRef.current) < 1e-4) { activeStartRef.current = null; onPreviewToggle(region); } // 还在原起播线上点 → 停(无 startPhase = host 当 toggle 关)
+        else { activeStartRef.current = sp; onPreviewToggle(region, sp); } // 其余 → 从这条线起播/重起
+      }
+      return;
+    }
     const wasFade = drag.current?.mode === 'fadeStart' || drag.current?.mode === 'fadeEnd';
     drag.current = null; draggingRef.current = false; if (wasFade) setFadeDragging(false); if (compact) commitNow();
+  };
+  // §28 右键:设为开始/结束。改 trim state → 既有防抖 useEffect 自动 emit onChange(落库 + undo),零新链路。
+  const onContext = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const stage = stageRef.current; if (!stage) return;
+    const pxPerBar = stage.clientWidth / barsVisible;
+    const ob = vStart + (e.clientX - stage.getBoundingClientRect().left) / pxPerBar;
+    setMenu({ x: e.clientX, y: e.clientY, ob: snapGrid(ob) });
+  };
+  // §28 设起点 = 整体平移(终点跟过去、保 loop 长,同拖起始线);故可越过原终点(终点跟着走,不夹)。
+  const setAsStart = () => { if (!menu) return; const ns = Math.max(0, menu.ob); setTrimEndBar(ns + (trimEndBar - trimStartBar)); setTrimStartBar(ns); setMenu(null); };
+  const setAsEnd = () => {
+    if (!menu) return;
+    const cap = maxBars != null ? trimStartBar + maxBars : Infinity;
+    const ne = Math.max(trimStartBar + gridBars, Math.min(menu.ob, cap));
+    setTrimEndBar(ne);
+    const nm = (ne - trimStartBar) / 2; setFadeOutBars((f) => Math.min(f, nm)); setFadeSilenceBars((f) => Math.min(f, nm));
+    setMenu(null);
   };
 
   // 变调值框:上下拖(≈6px / 半音)+ 滚轮 ±1,clamp ±12。换掉原来的滑杆,贴 Live 的数字框交互。
@@ -537,7 +576,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   // 播放线:相位由引擎按音频真实起播时刻 + loop 时长给(自由/量化都精确,重播即归零)。
   useEffect(() => {
     stopPlayhead();
-    if (!previewing) return;
+    if (!previewing) { activeStartRef.current = null; return; } // §28 预览停 → 清"当前起播线"(下次同位点是起播而非停)
     playRef.current = { trimStartBar: viewRef.current.trimStartBar, loopLen: viewRef.current.loopLen }; // 起播:锁定当前在响的 loop 几何
     const animate = () => {
       const stage = stageRef.current;
@@ -637,10 +676,20 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const main = (
       <div className="we-main">
         <div className={'we-stage' + (previewing && queued ? ' is-queued' : '')} ref={stageRef}
-          draggable={!!onDragOut} onDragStart={onStageDragStart} onPointerLeave={() => { if (armed) setArmed(false); if (fadeHover) setFadeHover(null); }}
-          onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}>
+          draggable={!!onDragOut} onDragStart={onStageDragStart} onPointerLeave={() => { if (armed) setArmed(false); if (fadeHover) setFadeHover(null); if (hoverRef.current) hoverRef.current.style.display = 'none'; }}
+          onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onContextMenu={onContext}>
           <canvas ref={canvasRef} />
+          <div className="we-hover" ref={hoverRef} style={{ display: 'none' }} />
           <div className="we-playhead" ref={playheadRef} style={{ display: previewing ? 'block' : 'none' }} />
+          {menu && (
+            <>
+              <div className="we-menu-scrim" onPointerDown={(ev) => { ev.stopPropagation(); setMenu(null); }} onContextMenu={(ev) => { ev.preventDefault(); setMenu(null); }} />
+              <div className="we-menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(ev) => ev.stopPropagation()}>
+                <button type="button" onClick={setAsStart}>Set as start</button>
+                <button type="button" onClick={setAsEnd}>Set as end</button>
+              </div>
+            </>
+          )}
           {onDragOut && (
             <div style={{ position: 'absolute', left: 8, top: 8, zIndex: 5, pointerEvents: 'none', display: 'flex', alignItems: 'center', gap: 4, padding: '2px 7px', borderRadius: 'var(--r)', fontSize: 10,
               background: 'color-mix(in srgb, var(--acc) 20%, var(--bg-1))', border: '1px solid color-mix(in srgb, var(--acc) 40%, var(--line))', color: 'var(--acc)', opacity: armed ? 1 : 0.55, transition: 'opacity .1s' }}>

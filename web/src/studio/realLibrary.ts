@@ -41,7 +41,7 @@ export function regionFromSound(s: ApiSound): Region {
   }
   return { startSample: a.startSample ?? 0, endSample: a.endSample ?? 0, bars: a.bars ?? 1, semitones: 0 };
 }
-export const regionFromClip = (c: Clip): Region => ({ startSample: c.startSample, endSample: c.endSample, bars: c.bars * clipTimeMul(c), semitones: c.semitones, fadeOutFrac: fadeFrac(c.fadeOutBars, c.bars), fadeSilenceFrac: fadeFrac(c.fadeSilenceBars, c.bars) });
+export const regionFromClip = (c: Clip): Region => { const loopBars = c.bars * clipTimeMul(c); return { startSample: c.startSample, endSample: c.endSample, bars: loopBars, semitones: c.semitones, fadeOutFrac: fadeFrac(c.fadeOutBars, loopBars), fadeSilenceFrac: fadeFrac(c.fadeSilenceBars, loopBars) }; }; // fade 比例的分母 = 渲染出的 buffer 总小节数(bars×timeMul);用 c.bars 会让 timeMul≠1 时淡出长度被成倍放大(字段语义=距 loop 尾 fadeOutBars 小节)
 
 /** Sound.warp(JSON 种子)→ 强类型 SampleWarp(与 Clip 同形)。缺字段按 analysis 兜底;出身默认 auto。 */
 export function warpFromSound(s: ApiSound): SampleWarp {
@@ -183,10 +183,9 @@ export async function buildBuffer(inst: Instrument, bpm: number, soundsById: Map
 export async function loadLibrary(): Promise<Map<string, ApiSound>> {
   const all = await api.sounds.list();
   const m = new Map<string, ApiSound>();
-  for (const s of all) {
-    if (!s.parentSoundId) m.set(s.id, s);
-    for (const st of s.stems ?? []) m.set(st.id, st); // 分轨 stem 也可被选中/编辑/拖放
-  }
+  // 递归收全部后代:顶层 + stem + 鼓件孙轨(§29)都可被选中/编辑/拖放
+  const walk = (s: ApiSound) => { m.set(s.id, s); for (const st of s.stems ?? []) walk(st); };
+  for (const s of all) walk(s);
   return m;
 }
 /** 给一组 soundId 解码出 collage 源 buffer（落库加载 collage 乐器时用）。 */

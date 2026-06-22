@@ -14,9 +14,9 @@ function Knob({ label, value, min, max, def, fmt, onStart, onChange }: { label: 
   const down = (e: React.PointerEvent) => {
     e.preventDefault();
     try { (e.target as Element).setPointerCapture?.(e.pointerId); } catch { /* 合成事件 */ }
-    onStart(); // §16:拖动开始压一次 undo 快照
     st.current = { y: e.clientY, v: value };
-    const move = (ev: PointerEvent) => { const dv = ((st.current.y - ev.clientY) / 140) * (max - min); onChange(Math.max(min, Math.min(max, st.current.v + dv))); };
+    let started = false, last = value; // §16:值**真变了**才压栈/emit;纯点击的合成 pointermove(零位移)不产生空 undo 步
+    const move = (ev: PointerEvent) => { const dv = ((st.current.y - ev.clientY) / 140) * (max - min); const nv = Math.max(min, Math.min(max, st.current.v + dv)); if (nv === last) return; if (!started) { onStart(); started = true; } onChange(nv); last = nv; };
     const up = (ev: PointerEvent) => { (e.target as Element).releasePointerCapture?.(ev.pointerId); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -28,7 +28,7 @@ function Knob({ label, value, min, max, def, fmt, onStart, onChange }: { label: 
   const big = ang - a0 > 180 ? 1 : 0;
   return (
     <div className="fx-k">
-      <svg width="38" height="38" viewBox="0 0 48 48" onPointerDown={down} onDoubleClick={() => { onStart(); onChange(def); }} style={{ cursor: 'ns-resize', touchAction: 'none' }}>
+      <svg width="38" height="38" viewBox="0 0 48 48" onPointerDown={down} onDoubleClick={() => { if (value !== def) { onStart(); onChange(def); } }} style={{ cursor: 'ns-resize', touchAction: 'none' }}>
         <circle cx="24" cy="24" r="17" fill="#2a2825" stroke="#48433b" strokeWidth="1" />
         <path d={`M ${sx} ${sy} A 17 17 0 1 1 ${ex} ${ey}`} fill="none" stroke={TRACK} strokeWidth="3" strokeLinecap="round" />
         <path d={`M ${sx} ${sy} A 17 17 0 ${big} 1 ${vx} ${vy}`} fill="none" stroke={CLAY} strokeWidth="3" strokeLinecap="round" />
@@ -89,7 +89,7 @@ export function FxRack({ fx, bpm, onFx, onStart }: { fx: FxConfig; bpm: number; 
 
             <div className={'fx-mod' + (d.on ? '' : ' off')}>
               <div className="fx-mh"><span className="fx-name">Distortion</span><Power on={d.on} onClick={() => { onStart(); setD({ on: !d.on }); }} /></div>
-              <div className="fx-row">{CHARS.map((ch) => <button key={ch} type="button" className={'fx-chip' + (d.character === ch ? ' on' : '')} onClick={() => { onStart(); setD({ character: ch }); }}>{cap(ch)}</button>)}</div>
+              <div className="fx-row">{CHARS.map((ch) => <button key={ch} type="button" className={'fx-chip' + (d.character === ch ? ' on' : '')} onClick={() => { if (d.character !== ch) { onStart(); setD({ character: ch }); } }}>{cap(ch)}</button>)}</div>
               <div className="fx-knobs">
                 <Knob label="DRIVE" value={d.drive} min={0} max={1} def={0.3} fmt={pct} onStart={onStart} onChange={(v) => setD({ drive: v })} />
                 <Knob label="TONE" value={d.tone} min={0} max={1} def={0.5} fmt={pct} onStart={onStart} onChange={(v) => setD({ tone: v })} />
@@ -100,7 +100,7 @@ export function FxRack({ fx, bpm, onFx, onStart }: { fx: FxConfig; bpm: number; 
 
             <div className={'fx-mod' + (dl.on ? '' : ' off')}>
               <div className="fx-mh"><span className="fx-name">Delay</span><Power on={dl.on} onClick={() => { onStart(); setDl({ on: !dl.on }); }} /></div>
-              <div className="fx-row">{SYNCS.map((s) => <button key={s} type="button" className={'fx-chip' + (dl.sync === s ? ' on' : '')} onClick={() => { onStart(); setDl({ sync: s }); }}>{s}</button>)}</div>
+              <div className="fx-row">{SYNCS.map((s) => <button key={s} type="button" className={'fx-chip' + (dl.sync === s ? ' on' : '')} onClick={() => { if (dl.sync !== s) { onStart(); setDl({ sync: s }); } }}>{s}</button>)}</div>
               <div className="fx-knobs">
                 {dl.sync === 'ms' && <Knob label="TIME" value={dl.timeMs} min={20} max={1000} def={250} fmt={(v) => `${Math.round(v)}ms`} onStart={onStart} onChange={(v) => setDl({ timeMs: Math.round(v) })} />}
                 <Knob label="FBK" value={dl.feedback} min={0} max={0.95} def={0.35} fmt={pct} onStart={onStart} onChange={(v) => setDl({ feedback: v })} />

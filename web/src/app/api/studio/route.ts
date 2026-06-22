@@ -73,7 +73,7 @@ export async function GET(req: Request) {
   }
   return Response.json(
     sessions.map((s) => ({
-      id: s.id, name: s.name, index: s.index, repeats: s.repeats ?? 1, color: s.color ?? null,
+      id: s.id, name: s.name, index: s.index, repeats: s.repeats ?? 1, color: s.color ?? null, xyAuto: s.xyAuto ?? null, // §26 Json 列,Prisma 已反序列化为对象
       instruments: (s.instruments as unknown as DbInstrument[]).map(instrumentFromDb),
     })),
   );

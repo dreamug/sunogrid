@@ -141,7 +141,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .br { min-height:0; overflow-y:auto; border-right:1px solid var(--line); background:var(--bg-1); display:flex; flex-direction:column; }
 .br-sec + .br-sec { border-top:1px solid var(--line); }
 .br-h { display:flex; align-items:center; gap:6px; height:30px; padding:0 12px; border-bottom:1px solid var(--line); }
-.br-h .n { margin-left:auto; font-size:11px; color:var(--tx-3); font-variant-numeric:tabular-nums; }
+.br-h .n { font-size:11px; color:var(--tx-3); font-variant-numeric:tabular-nums; } /* 紧贴 Library 标签;右侧由 §27 上传按钮的 margin-left:auto 接管 */
 
 .stage { min-height:0; display:flex; flex-direction:column; padding:0 16px 13px; gap:11px; background:var(--bg-0); overflow-y:auto; } /* top padding 去掉 → 交给 sticky 的 .srail-sticky,使其贴顶且 bg 能盖住下滚网格 */
 .banks { display:flex; align-items:center; gap:6px; }
@@ -154,10 +154,12 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 /* 整个 session 区 sticky 钉在操场顶:负边距铺到操场边缘 + 铺底色盖住下方网格滚动 */
 .srail-sticky { position:sticky; top:0; z-index:20; background:var(--bg-0); margin:0 -16px 0; padding:13px 16px 10px; } /* 贴顶 + 顶部 pad + bg 盖住下滚网格 */
 .srail { align-items:flex-start; flex-wrap:nowrap; width:max-content; gap:8px; } /* §20 横排一排,intrinsic 宽度 → 溢出由 HScroll 横滚 */
-/* §20 两色制:session 不再各自上色,--c 默认中性暖灰;正在播放切到 --acc(橙)见 .playing */
-.scard { --c:var(--tx-2); position:relative; flex:0 0 auto; width:168px; box-sizing:border-box; display:flex; flex-direction:column; gap:6px; padding:8px 9px; border-radius:var(--r); overflow:hidden; cursor:pointer;
+/* §26.9 对齐 Song 块:Live 卡也 per-session 上色(--c 由 JSX 给 = s.color || SESSION_COLORS[i]);播放态不再翻橙,只看播放头线 + 进度填充。 */
+.scard { --c:var(--tx-2); position:relative; flex:0 0 auto; width:168px; box-sizing:border-box; display:flex; flex-direction:column; gap:6px; padding:8px 9px; border-radius:var(--r); overflow:hidden; cursor:pointer; outline:none;
   background:color-mix(in srgb, var(--c) 18%, var(--bg-1)); border:1px solid color-mix(in srgb, var(--c) 54%, var(--line)); transition:border-color .1s, background-color .1s; }
 .scard:hover { border-color:color-mix(in srgb, var(--c) 70%, var(--line)); }
+.scard:focus-visible { box-shadow:inset 0 0 0 1px rgba(255,255,255,.28); } /* 键盘聚焦(Tab/点击):Del/⌫ · ⌘C/⌘V · ⌘D 作用于此 session(同 .sblock) */
+.scard .sc-bars { flex:0 0 auto; font-size:9px; color:rgba(236,233,227,.5); font-variant-numeric:tabular-nums; } /* 右端 bar 数(同 .sblk-bars) */
 /* 选中(当前)= 抬亮一档灰底 + 单条提亮 1px 白边(不叠白内环 → 不再"边框+环"双线);overflow:hidden 已把走带裹进 border 内 */
 .scard.on { background:color-mix(in srgb, var(--c) 28%, var(--bg-2)); border-color:rgba(255,255,255,.5); }
 /* Live 卡内文字压在进度色块(.ph z0)之上、播放线(z2)之下 */
@@ -190,8 +192,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
   background:color-mix(in srgb, var(--c) 18%, var(--bg-1)); border:1px solid color-mix(in srgb, var(--c) 54%, var(--line)); }
 .sstrip:hover { border-color:color-mix(in srgb, var(--c) 70%, var(--line)); }
 .sstrip.on { background:color-mix(in srgb, var(--c) 28%, var(--bg-2)); border-color:rgba(255,255,255,.5); } /* 选中 = 抬亮灰底 + 单线白边(同 .scard.on);放在 :hover 之后保证悬停时仍显选中 */
-/* 正在播放 = 橙:--c 切到 --acc → bg/边框/走带(.ph/文字)全自动跟着橙;放在 .on 之后,播放时盖过"选中灰底/白边" */
-.scard.playing, .sstrip.playing { --c:var(--acc); background:color-mix(in srgb, var(--acc) 22%, var(--bg-1)); border-color:color-mix(in srgb, var(--acc) 72%, var(--line)); }
+/* §26.9 播放态不再翻橙(对齐 Song):Live 卡保持 session 色,正在播只靠播放头线(.sphead)+ 进度填充(.ph,session 色)指示。 */
 .sstrip.queued { animation:clippulse .8s ease-in-out infinite; }
 .sstrip .scard-in { width:168px; box-sizing:border-box; flex:none; display:flex; flex-direction:column; gap:6px; padding:8px 9px; border-right:1px solid color-mix(in srgb, var(--c) 38%, var(--line)); }
 .sstrip .rcell { position:relative; z-index:1; width:40px; flex:none; display:flex; flex-direction:column; align-items:center; border-right:1px solid color-mix(in srgb, var(--c) 30%, transparent); }
@@ -369,6 +370,13 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .gb-btn { font-size:11px; color:var(--tx-2); background:transparent; border:1px solid var(--line-2); border-radius:4px; padding:3px 10px; cursor:pointer; }
 .gb-btn:hover { border-color:var(--acc); color:var(--acc); }
 .gb-btn.danger:hover { border-color:var(--danger); color:var(--danger); }
+/* §27 上传样本:全走系统暖色,不引入新色相 —— 进度态用既有琥珀 --queue(同生成的 in-progress),标记/按钮用中性 + --acc hover */
+.gdot.uploading, .gdot.detecting { background:var(--queue); }
+.up-tag { flex:none; font-size:11px; line-height:1; color:var(--tx-2); }
+/* §27 上传:Library 标题条右侧的紧凑按钮(margin-left:auto 推到行尾;沿用 .gb-btn 中性按钮语汇)*/
+.up-btn { display:inline-flex; align-items:center; gap:5px; margin-left:auto; box-sizing:border-box; font:inherit; font-size:10px; line-height:1; color:var(--tx-2); background:transparent; border:1px solid var(--line-2); border-radius:var(--r); padding:3px 9px; cursor:pointer; }
+.up-btn:hover { border-color:var(--acc); color:var(--acc); }
+.up-btn .up-ic { font-size:12px; line-height:1; }
 
 /* 播放键:变体大(主角,实心) / 分轨小(配角,透明) */
 .lib-list .pl { flex:none; display:inline-flex; align-items:center; justify-content:center; border-radius:3px; border:1px solid var(--line-2); background:var(--bg-3); color:var(--tx-2); font-size:9px; cursor:pointer; padding:0; }
@@ -417,6 +425,19 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .srow.vsel .sname { color:var(--tx); }
 .srow .sdot { width:8px; height:8px; flex:none; border-radius:2px; background:var(--c,var(--tx-3)); }
 .srow .sname { flex:1; min-width:0; font-size:11.5px; color:var(--tx-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* §29 鼓二段拆:drums 行 hover 出「Split kit」chip + 已拆时给 ↻ 重拆 */
+.srow.can-sep:hover .vsep { display:inline-flex; }
+.srow .vsep.sm { font-size:10px; }
+.srow .re { margin-left:auto; background:transparent; border:none; color:var(--tx-3); font-size:12px; cursor:pointer; padding:0 2px; }
+.srow .re:hover:not(:disabled) { color:var(--tx); }
+.srow .re:disabled { opacity:.4; cursor:default; }
+/* 鼓件孙行 = 配角的配角:再凹一层、更小更暗 */
+.srow.srow-sub { padding:6px 11px 6px 30px; }
+.srow.srow-sub .pl { width:16px; height:16px; }
+.srow.srow-sub .sdot { width:6px; height:6px; }
+.srow.srow-sub .sname { font-size:10.5px; color:var(--tx-3); }
+.srow-busy { display:flex; align-items:center; gap:7px; padding:6px 11px 6px 30px; font-size:10.5px; color:var(--tx-3); background:var(--bg-2); }
+.srow-note { padding:6px 11px 6px 30px; font-size:10.5px; color:var(--danger); cursor:pointer; background:var(--bg-2); }
 .svc-hint { padding:8px 12px; font-size:11px; color:var(--tx-3); }
 .svc-err { padding:6px 12px; font-size:11px; color:var(--danger); }
 
@@ -460,6 +481,12 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .we-stage.is-queued { animation:webreath 1.1s ease-in-out infinite; }
 @keyframes webreath { 0%,100% { background:var(--bg-0); } 50% { background:color-mix(in srgb, var(--acc) 16%, var(--bg-0)); } }
 .we-playhead { position:absolute; top:0; bottom:0; width:1px; background:#fff; pointer-events:none; z-index:4; }
+/* §28 起播线(跟手、吸格、仅 trim 内)+ 右键设起止菜单 */
+.we-hover { position:absolute; top:0; bottom:0; width:1px; background:color-mix(in srgb, var(--acc) 62%, transparent); pointer-events:none; z-index:3; }
+.we-menu-scrim { position:fixed; inset:0; z-index:60; }
+.we-menu { position:fixed; z-index:61; min-width:118px; display:flex; flex-direction:column; padding:3px; background:var(--bg-2); border:1px solid var(--line-2); border-radius:var(--r); box-shadow:0 6px 18px rgba(0,0,0,.45); }
+.we-menu button { text-align:left; font:inherit; font-size:11px; color:var(--tx-2); background:transparent; border:none; border-radius:2px; padding:5px 9px; cursor:pointer; white-space:nowrap; }
+.we-menu button:hover { background:var(--bg-3); color:var(--tx); }
 .we-scroll { position:relative; height:9px; background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); cursor:pointer; touch-action:none; }
 .we-thumb { position:absolute; top:1px; bottom:1px; min-width:18px; background:var(--line-2); border-radius:2px; }
 .we-thumb:hover { background:#544e44; }
@@ -567,3 +594,77 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .xy-rail .seg { display:flex; flex:1; }
 .xy-rail .seg button { flex:1; padding:5px 0; }
 .xy-wet { display:flex; align-items:center; gap:8px; flex:none; }
+
+/* ===== §26 Song 比例 arrange 时间轴 + 内联 XY 自动化 ===== */
+/* 顶栏全局控件:效果 chips(作用于选中 session)+ X/Y + 清除 + zoom(px/bar) */
+.song-ctl { display:flex; align-items:center; gap:8px; padding:0 0 9px; }
+.song-ctl-l { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--tx-3); }
+/* 顶栏标题改名框:hug 内容(随字长),不撑开顶栏。 */
+.song-ctl-l input { font:inherit; font-size:11px; font-weight:500; color:var(--tx); background:var(--bg-0); border:1px solid var(--acc); border-radius:var(--r); padding:0 5px; height:20px; box-sizing:border-box; outline:none; width:auto; min-width:60px; max-width:180px; field-sizing:content; }
+.song-ctl-sep { width:1px; height:16px; background:var(--line); }
+.song-progs { display:flex; gap:4px; }
+/* §26.v3 X/Y 轴切换:压到和 .fx-chip 一样高(20px),与左侧 4 选 1 一排齐高(默认 .seg.sm 偏高 3px)。 */
+.song-ctl .seg.sm button { font-size:10px; padding:3px 8px; }
+/* §26.10 automation UI 显隐 toggle(zoom 左侧,高 20px 同 X/Y seg)。on=显示中(抬亮),off=隐藏(暗)。 */
+.song-auto-tg { display:inline-flex; align-items:center; justify-content:center; height:20px; padding:0 13px; box-sizing:border-box; background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); color:var(--tx-3); cursor:pointer; }
+.song-auto-tg:hover { color:var(--tx); }
+.song-auto-tg.on { background:var(--on); color:var(--tx); }
+.song-clr { width:22px; height:22px; box-sizing:border-box; font-size:11px; line-height:1; background:transparent; border:1px solid var(--line-2); border-radius:var(--r); color:var(--tx-3); cursor:pointer; }
+.song-clr:hover:not(:disabled) { color:var(--danger); border-color:var(--danger); }
+.song-clr:disabled { opacity:.3; cursor:default; }
+.song-ctl-z { display:flex; align-items:center; gap:6px; }
+.song-ctl-zl { font-size:9px; letter-spacing:.05em; text-transform:uppercase; color:var(--tx-3); }
+.song-ctl-z input[type=range] { width:96px; -webkit-appearance:none; appearance:none; height:16px; background:transparent; cursor:pointer; }
+.song-ctl-z input[type=range]::-webkit-slider-runnable-track { height:3px; background:var(--line-2); border-radius:2px; }
+.song-ctl-z input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:9px; height:14px; background:var(--tx-2); border-radius:2px; margin-top:-5.5px; }
+/* 比例模式:block 首尾相接。§26.9 不再用 margin-right:-1px(负边距让每块视觉宽少 1px → 逐块累积错位);
+   也不靠块的左右边框分隔——border-box 的右边框落在 [B-1,B)、左边框落在 [B,B+1),都和标尺刻度(B)差 1px。
+   做法:块零边距精确相接、**去掉左右边框**(内容原点=cumBars×zoom 精确对齐),分隔线改成 SongTimeline 里独立的 `.song-div` 元素画在 B 处 → 分隔线/标尺刻度/播放头/lane 内容全部落同一 B,零错位。 */
+.srail.song { gap:0; align-items:flex-start; }
+.sblock { --c:var(--tx-2); position:relative; flex:0 0 auto; box-sizing:border-box; display:flex; flex-direction:column; overflow:hidden; outline:none;
+  border:1px solid color-mix(in srgb, var(--c) 66%, var(--line-2)); border-left:0; border-right:0; border-radius:0; background:var(--bg-1); transition:border-color .1s, background-color .1s; } /* ⚠ 左右边框去掉(在 border 简写之后);只留上下边框作框,左右分隔交给 .song-div */
+/* hover / 选中态:对齐设计系统 .scard.on/.sstrip.on(抬亮 session 底 + 单线白边)。播放态不变色(只看播放头线)。 */
+.sblock:hover { box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); } /* hover=细白内边 */
+.sblock:focus-visible { box-shadow:inset 0 0 0 1px rgba(255,255,255,.28); }   /* 键盘聚焦(Tab):Del/⌫ · ⌘C/⌘V · ⌘D 作用于此 session(Win=Ctrl) */
+.sblock.sblk-sel { border-color:rgba(255,255,255,.5); box-shadow:inset 0 0 0 1px rgba(255,255,255,.3); z-index:2; } /* 选中=单线白边(同 .scard.on)。⚠ 独立类名 sblk-sel 避开全局 .sel 的 max-width:170px 泄漏 */
+.sblock.sblk-sel .sblk-name { background:color-mix(in srgb, var(--c) 42%, var(--bg-1)); }  /* 名字条抬亮 session 底 */
+.sblock.sblk-sel .sblk-nums { background:color-mix(in srgb, var(--c) 28%, var(--bg-1)); }  /* 数字条抬亮 */
+.sblock-auto::after { content:''; position:absolute; inset:0; pointer-events:none; background:transparent; transition:background .12s; } /* lane 罩层 */
+.sblock:hover .sblock-auto::after { background:rgba(255,255,255,.025); }
+.sblock.sblk-sel .sblock-auto::after { background:rgba(255,255,255,.05); } /* lane 微抬亮 */
+.sblock.queued { animation:clippulse .8s ease-in-out infinite; }
+.sblock.dragging { opacity:.4; }
+/* 名字条:名字置顶 · 过窄截断 · 右端 Xb;兼作拖拽换位手柄。无删除/复制按钮(走键盘)。 */
+.sblk-name { position:relative; box-sizing:border-box; height:20px; display:flex; align-items:center; gap:6px; padding:0 6px; cursor:pointer; overflow:hidden;
+  background:color-mix(in srgb, var(--c) 34%, var(--bg-1)); border-bottom:1px solid color-mix(in srgb, var(--c) 40%, var(--line)); }
+.sblk-nm { flex:1 1 auto; min-width:0; font-size:11px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:color-mix(in srgb, var(--c) 34%, var(--tx)); }
+.sblk-bars { flex:0 0 auto; font-size:9px; color:rgba(236,233,227,.5); font-variant-numeric:tabular-nums; } /* 数字字体跟系统(非 mono) */
+.sblk-name input { flex:0 1 auto; width:auto; min-width:36px; max-width:150px; height:16px; field-sizing:content; } /* 改名框 hug 内容(随字长自适应),不撑满名字条 */
+/* 标题栏换色点:点开 SESSION_COLORS 浮层换 session 色(管理颜色)。 */
+.sblk-cdot { flex:0 0 auto; width:10px; height:10px; padding:0; border-radius:2px; border:1px solid rgba(0,0,0,.35); cursor:pointer; }
+/* §26.v3 标题栏单字母方块 = 纯标识(不可点):显示该 session 已激活(线非平)了哪些效果的 automation。 */
+.sblk-achip { flex:0 0 auto; width:13px; height:13px; padding:0; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:600; line-height:1; border:1px solid; border-radius:2px; cursor:default; }
+/* 数字条:与 automation 条等高 · repeat 一格 + 数字(各格左上)。 */
+.sblk-nums { position:relative; box-sizing:border-box; height:50px; overflow:hidden; cursor:pointer; /* 点 = 选中该 session(整块可点);+/− 按钮自带 pointer */
+  background:color-mix(in srgb, var(--c) 22%, var(--bg-1)); border-bottom:1px solid color-mix(in srgb, var(--c) 30%, var(--line)); }
+.sblk-nums:last-child { border-bottom:0; } /* §26.10 automation 隐藏时数字条成末元素 → 去掉自身下边框,免和 .sblock 外层下边框叠成双线 */
+.sblk-rn { position:absolute; top:4px; z-index:1; font-size:9px; font-variant-numeric:tabular-nums; color:color-mix(in srgb, var(--c) 42%, var(--tx-2)); pointer-events:none; } /* 数字字体跟系统(非 mono) */
+.sblk-tick { position:absolute; top:0; bottom:0; width:1px; background:color-mix(in srgb, var(--c) 22%, transparent); pointer-events:none; } /* repeat 分割线浅(弱于 session 间界线) */
+/* +/−:最后一个 repeat 格右侧 · 贴右/上/下边 · 纵向撑满数字条 · 仅选中块。逻辑不变(+ 加 repeat;n>1 才有 −)。 */
+.sblk-reps { position:absolute; top:0; right:0; bottom:0; z-index:3; display:flex; flex-direction:column; width:18px; }
+.sblk-reps button { flex:1 1 0; display:flex; align-items:center; justify-content:center; padding:0; line-height:1; font-size:13px; background:color-mix(in srgb, var(--c) 30%, var(--bg-1)); border:none; border-left:1px solid color-mix(in srgb, var(--c) 42%, var(--line)); color:#ece9e3; cursor:pointer; }
+.sblk-reps button + button { border-top:1px solid color-mix(in srgb, var(--c) 42%, var(--line)); }
+.sblk-reps button:hover { background:color-mix(in srgb, var(--c) 46%, var(--bg-1)); }
+.sblock-auto { position:relative; background:var(--bg-0); height:50px; }
+.auto-svg { display:block; }
+/* §26.9 全局 bar 标尺 + 列级播放头 + hover 引导线(都在 .song-content 这层定位,穿标尺+块) */
+.song-content { position:relative; }
+/* 标尺无背景色/无下边框(块的上边框已分隔);只剩 bar 号 + 极淡每-bar 刻度(背景渐变,组件内联给)。光标在标尺上=喇叭(speaker)。
+   ⚠ 热点坐标必须是字面 ` 10 10`(真空格、在 url() 外):写成 %2010 会让整条 cursor 值非法 → 静默退回默认光标。 */
+.song-ruler { position:relative; box-sizing:border-box; height:22px; background:transparent;
+  cursor:url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='22'%20height='22'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M4%209h3l4-3v12l-4-3H4z'%20fill='%23e6913f'/%3E%3Cpath%20d='M14%209a4%204%200%200%201%200%206'%20fill='none'%20stroke='%23e6913f'%20stroke-width='1.8'/%3E%3Cpath%20d='M16.5%206.5a8%208%200%200%201%200%2011'%20fill='none'%20stroke='%23e6913f'%20stroke-width='1.8'/%3E%3C/svg%3E") 4 11, pointer; }
+.song-rsel { position:absolute; top:0; bottom:0; z-index:0; pointer-events:none; } /* 选中 session 在标尺上的同色淡底(bg 由 JSX 给;压在 bar 号 z1 之下、不挡 hover/click) */
+.song-rn { position:absolute; top:4px; z-index:1; font-size:9px; font-variant-numeric:tabular-nums; color:var(--tx-3); pointer-events:none; } /* 全局 bar 号 */
+.song-div { position:absolute; top:0; bottom:0; width:1px; background:color-mix(in srgb, var(--tx-2) 38%, var(--line-2)); z-index:4; pointer-events:none; } /* session 分隔线 + 首/末缘线:独立元素画在每个块边界 B(cumBars×zoom),不占布局→与标尺刻度/播放头/lane 内容同落 B、零错位、不受选中态影响 */
+.song-guide { position:absolute; top:0; bottom:0; width:0; border-left:1px solid rgba(236,233,227,.18); z-index:5; pointer-events:none; } /* hover 吸到 bar 的引导线:实线、细、低透明 */
+.song-ph { position:absolute; top:0; bottom:0; width:1px; margin-left:-0.5px; background:var(--play); opacity:.85; z-index:6; pointer-events:none; box-shadow:0 0 4px color-mix(in srgb, var(--play) 55%, transparent); } /* 列级播放头(穿标尺+块) */

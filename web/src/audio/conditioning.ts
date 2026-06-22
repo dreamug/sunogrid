@@ -16,9 +16,13 @@ export interface LoopAnalysis {
   onsets: number[];    // 瞬态采样位置
 }
 
-const HOP = 256;
+export const HOP = 256;
 
-function toMono(channels: Float32Array[]): Float32Array {
+/** DSP 分析(测速/自相关/瞬态)只看头部这一个段落,长素材不至于全量扫 —— 整段时长/小节数仍按全长算(纯算术,不吃这刀)。
+ *  与 estimateKey 的截断同口径,单一来源。 */
+export const ANALYZE_SECONDS = 30;
+
+export function toMono(channels: Float32Array[]): Float32Array {
   if (channels.length === 1) return channels[0];
   const n = channels[0].length;
   const out = new Float32Array(n);
@@ -30,7 +34,7 @@ function toMono(channels: Float32Array[]): Float32Array {
 }
 
 /** onset novelty 包络(帧 RMS 的正向差分,去均值)。 */
-function novelty(mono: Float32Array, s: number, e: number): Float32Array {
+export function novelty(mono: Float32Array, s: number, e: number): Float32Array {
   const frames = Math.max(0, Math.floor((e - s) / HOP));
   const energy = new Float32Array(frames);
   for (let f = 0; f < frames; f++) {
@@ -103,7 +107,9 @@ export function detectLoop(
   const loopBpm = (bars * beatsPerBar * 60) / dur;
 
   // 置信度:① 时长接近整 N 小节 ② 节拍自相关峰强(窄窗) ③ 节拍速度与输入一致
-  const nov = novelty(mono, s, e);
+  // —— 测速/自相关/瞬态只看头部一个段落(ANALYZE_SECONDS),长素材不全量扫;bars/loopBpm 已按全长算。
+  const eAna = Math.min(e, s + Math.floor(ANALYZE_SECONDS * sampleRate));
+  const nov = novelty(mono, s, eAna);
   const expectedBeatFrames = ((60 / bpm0) * sampleRate) / HOP;
   const { lag, score } = beatScore(nov, expectedBeatFrames, 0.12);
   const refinedBpm = 60 / ((lag * HOP) / sampleRate);

@@ -40,9 +40,9 @@ function Knob({ label, value, fmt, def, onStart, onChange, dim }: { label: strin
   const down = (e: React.PointerEvent) => {
     e.preventDefault();
     try { (e.target as Element).setPointerCapture?.(e.pointerId); } catch { /* 合成事件 */ }
-    onStart();
     st.current = { y: e.clientY, v: value };
-    const move = (ev: PointerEvent) => onChange(Math.max(0, Math.min(1, st.current.v + (st.current.y - ev.clientY) / 140)));
+    let started = false, last = value; // §16:值**真变了**才压栈/emit;纯点击的合成 pointermove(零位移)不产生空 undo 步
+    const move = (ev: PointerEvent) => { const nv = Math.max(0, Math.min(1, st.current.v + (st.current.y - ev.clientY) / 140)); if (nv === last) return; if (!started) { onStart(); started = true; } onChange(nv); last = nv; };
     const up = (ev: PointerEvent) => { (e.target as Element).releasePointerCapture?.(ev.pointerId); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -53,7 +53,7 @@ function Knob({ label, value, fmt, def, onStart, onChange, dim }: { label: strin
   const big = ang - a0 > 180 ? 1 : 0;
   return (
     <div className="fx-k" style={dim ? { opacity: 0.4 } : undefined}>
-      <svg width="34" height="34" viewBox="0 0 48 48" onPointerDown={down} onDoubleClick={() => { onStart(); onChange(def); }} style={{ cursor: 'ns-resize', touchAction: 'none' }}>
+      <svg width="34" height="34" viewBox="0 0 48 48" onPointerDown={down} onDoubleClick={() => { if (value !== def) { onStart(); onChange(def); } }} style={{ cursor: 'ns-resize', touchAction: 'none' }}>
         <circle cx="24" cy="24" r="17" fill="#2a2825" stroke="#48433b" strokeWidth="1" />
         <path d={`M ${sx} ${sy} A 17 17 0 1 1 ${ex} ${ey}`} fill="none" stroke={TRACK} strokeWidth="3" strokeLinecap="round" />
         <path d={`M ${sx} ${sy} A 17 17 0 ${big} 1 ${vx} ${vy}`} fill="none" stroke={CLAY} strokeWidth="3" strokeLinecap="round" />
@@ -67,9 +67,10 @@ function Knob({ label, value, fmt, def, onStart, onChange, dim }: { label: strin
 
 type Live = 'idle' | 'engaged' | 'held';
 
-export function XYPad({ xy, onXy, onStart, onEngage, onMove, onRelease }: {
+export function XYPad({ xy, onXy, onStart, onEngage, onMove, onRelease, onClose }: {
   xy: XYConfig; onXy: (next: XYConfig) => void; onStart: () => void;
   onEngage: () => void; onMove: (nx: number, ny: number) => void; onRelease: () => void;
+  onClose: () => void; // §26.4 关浮层/卸载:释放 + 请求 coordinator 清掉 latch/glide(不止 down=false)
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -110,17 +111,18 @@ export function XYPad({ xy, onXy, onStart, onEngage, onMove, onRelease }: {
 
   // 重渲后(切 program / 重开浮层)同步圆点位置/读数/状态色。
   useEffect(() => { place(); applyAcc(); }); // eslint-disable-line react-hooks/exhaustive-deps
-  // 关闭浮层:停回弹 + 释放任何 engaged/held —— 否则效果卡在 wet 且没 UI 可解除(无电源键)。"不操作即关"。
+  // 关闭浮层:停回弹 + 释放任何 engaged/held —— 否则效果卡在 wet 且没 UI 可解除(无电源键)。"不操作即关"。onClose 还会清掉 coordinator 的 latch(只 down=false 清不掉)。
   useEffect(() => {
     if (open) return;
     cancelSpring();
-    if (live.current !== 'idle') { onRelease(); live.current = 'idle'; }
+    if (live.current !== 'idle') { onClose(); live.current = 'idle'; }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   // 卸载(切工程/拆 StudioApp):同样释放,免 phantom 主总线效果常驻。
-  useEffect(() => () => { cancelSpring(); if (live.current !== 'idle') onRelease(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { cancelSpring(); if (live.current !== 'idle') onClose(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function cancelSpring() { if (springRaf.current != null) { cancelAnimationFrame(springRaf.current); springRaf.current = null; } }
   // spring 回弹:springMs 内把 X/Y(easeOut)滑回中点,每帧驱动音频随之扫回中性;到点 release+idle。
+  // §26.4 回弹 = 仅圆点视觉滑回中点;音频的「交还/回旁路」由 coordinator 接管(不再每帧 onMove/末尾 onRelease)。
   const startSpring = () => {
     cancelSpring();
     const x0 = rx.current, y0 = ry.current, dur = Math.max(30, cfgRef.current.springMs);
@@ -130,9 +132,8 @@ export function XYPad({ xy, onXy, onStart, onEngage, onMove, onRelease }: {
       if (t0 == null) t0 = now;
       const e = Math.min(1, (now - t0) / dur), k = 1 - Math.pow(1 - e, 3);
       rx.current = x0 + (0.5 - x0) * k; ry.current = y0 + (0.5 - y0) * k;
-      place(); onMove(rx.current, ry.current);
-      if (e < 1) { springRaf.current = requestAnimationFrame(step); }
-      else { springRaf.current = null; onRelease(); live.current = 'idle'; applyAcc(); }
+      place();
+      if (e < 1) springRaf.current = requestAnimationFrame(step); else springRaf.current = null;
     };
     springRaf.current = requestAnimationFrame(step);
   };
@@ -154,16 +155,14 @@ export function XYPad({ xy, onXy, onStart, onEngage, onMove, onRelease }: {
   const onUp = () => {
     if (!dragging.current) return;
     dragging.current = false;
-    if (cfgRef.current.mode === 'spring') startSpring();   // 滑回中点 + 音频随动,到点 release
-    else { live.current = 'held'; applyAcc(); }
+    onRelease();                                           // §26.4 立刻松手(coordinator 读 down=false → 交还滑行/latch 冻结)
+    if (cfgRef.current.mode === 'spring') { startSpring(); live.current = 'idle'; } // spring:圆点视觉滑回中点(不驱动音频),态归 idle
+    else live.current = 'held';                            // latch:效果仍被 coordinator 冻结 → 圆点保持高亮(held),且关浮层/卸载的释放条件能命中
+    applyAcc();
   };
 
   const setCfg = (p: Partial<XYConfig>) => { onStart(); onXy({ ...cfgRef.current, ...p }); };
-  const pickMode = (mode: XYConfig['mode']) => {
-    setCfg({ mode });
-    if (mode === 'spring') { if (!dragging.current && live.current !== 'idle') startSpring(); }
-    else { const springing = springRaf.current != null; cancelSpring(); if (springing) { onRelease(); live.current = 'idle'; applyAcc(); } } // latch:中断回弹要释放,否则卡在 engaged
-  };
+  const pickMode = (mode: XYConfig['mode']) => { if (cfgRef.current.mode !== mode) setCfg({ mode }); if (mode === 'latch') cancelSpring(); }; // 模式由 coordinator 读 cfg.mode 实时生效;切 latch 顺手停视觉回弹(已是该模式则不压空 undo 步)
 
   return (
     <div className="fx-wrap" ref={wrapRef}>
@@ -191,7 +190,7 @@ export function XYPad({ xy, onXy, onStart, onEngage, onMove, onRelease }: {
             <div className="xy-rail">
               <div className="xy-progs">
                 {ORDER.map((p) => (
-                  <button key={p} type="button" className={'fx-chip' + (xy.program === p ? ' on' : '')} style={xy.program === p ? { background: PROG_COLOR[p], borderColor: PROG_COLOR[p], color: INK } : undefined} onClick={() => setCfg({ program: p })}>{PROGS[p].label}</button>
+                  <button key={p} type="button" className={'fx-chip' + (xy.program === p ? ' on' : '')} style={xy.program === p ? { background: PROG_COLOR[p], borderColor: PROG_COLOR[p], color: INK } : undefined} onClick={() => { if (xy.program !== p) setCfg({ program: p }); }}>{PROGS[p].label}</button>
                 ))}
               </div>
 
