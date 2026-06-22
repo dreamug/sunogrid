@@ -12,8 +12,6 @@
 
 **SunoGrid** combines "generate material with AI" and "perform / arrange like a groovebox" into a single browser app. You describe the sound you want → Suno generates a loop → it's auto-tempo-detected, snapped to whole bars, warped offline to your project BPM, and given clean loop points → you drag it onto the grid and it starts quantized to bar boundaries.
 
-**Style-agnostic**: trap, house, ambient, funk, jazzhiphop… anything Suno can generate works. There is no genre-specific logic in the engine. (The initial use case was jazzhiphop, but the product itself is style-agnostic.)
-
 ### Features
 
 - **AI loop generation (any style)** — describe a sound and Suno generates a loop; works for any genre, with no style-specific logic in the engine.
@@ -109,8 +107,6 @@ Reverse-engineering Suno's private endpoints for generation may violate its ToS;
 ## 中文
 
 **SunoGrid** 把"用 AI 生成素材"和"像 groovebox 一样演奏 / 编排"合进同一个浏览器 app。你描述想要的声音 → Suno 生成一段 loop → 自动测速、对齐整小节、离线变速到工程 BPM、钉好循环点 → 拖进网格,踩着小节边界量化启动。
-
-**风格无关**:trap、house、ambient、funk、jazzhiphop…… 任何 Suno 能生成的都行,引擎里没有任何风格专属逻辑。(初始用例是 jazzhiphop,但产品本身风格无关。)
 
 ### 功能
 
