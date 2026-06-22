@@ -1015,7 +1015,7 @@ WAV 可达数十 MB,base64 over JSON 膨胀 ~33% 不划算 → 新端点收 `mul
 ### 29.7 落地顺序
 ① 本节设计(doc-first)。② sidecar:`app.py` 双模型 + `model` 路由 + 归一化;README 写 drumsep 安装。③ 后端:`stems.ts` 开缝 + 传 `model`;两 GET 路由嵌第二层。④ 前端:三处 collect 递归 + LoopManager 鼓件渲染/「Split kit」+ STEM_LABEL/clipColor。⑤ typecheck。⑥ 实测:分全混→拖 drums 旁点 Split kit→出 4 鼓件孙轨→拖 kick 到 pad 锁相→重拆/失败态→删全混连带清孙。**坑**:改 `app.py` 重启 sidecar;装了 drumsep checkpoint 才有 drum 模型。
 
-## 30. 示例项目跨环境打包/导入(export → import 母版)—— 📐 设计 · 2026-06-22
+## 30. 示例项目跨环境打包/导入(export → import 母版)—— ✅ 实现 · 2026-06-22
 
 **一句话**:上线前要把**本地做好的一个项目**变成**线上的示例母版**(§25 `isExample`)。难点不是「标记」——`isExample` 只是 `Project` 上一个布尔(super admin 在 UI ★Example 开关或 `PATCH /api/projects/:id { isExample }` 一翻即可)。难点是**跨环境搬数据**:本地和线上是**两个 MySQL + 两个 `web/storage/`**,要把这个项目依赖的整张子图(行)+ 它引用的**音频字节**一起搬过去,并把所有权改成线上站长。本质 = **跨库版的 [`forkProject`](web/src/lib/forkProject.ts) + 额外搬 `Asset` 字节**。
 
@@ -1054,3 +1054,5 @@ WAV 可达数十 MB,base64 over JSON 膨胀 ~33% 不划算 → 新端点收 `mul
 
 ### 30.7 落地顺序
 ① 本节设计(doc-first)。② `export-example.mjs`:子图 + 收 Asset 文件 → bundle。③ `import-example.mjs`:sha256 去重落字节 + 所有权重写 + `isExample=true`。④ 实测:本地导出 → 线上空库导入 → 站长列表见母版 → 别的用户进入 fork 出副本 → 音频不 404、collage 不重 bake、stem 锁相 → 重复导入幂等(sha256 复用、`@@unique([userId,forkedFromExampleId])` 不撞)。**坑**:线上 import 前先 promote 站长;线上 `web/storage/` 要是持久卷(别落进会被重建清掉的临时目录)。
+
+**✅ 已实现(2026-06-22)**:`web/scripts/export-example.mjs`(`node scripts/export-example.mjs <projectId> [outDir]`)+ `web/scripts/import-example.mjs`(`node scripts/import-example.mjs <bundleDir> <站长username>`)。loadSoundsWithParents/嵌套 create 全对齐 forkProject;Asset 按内容 sha256 去重(等价 putAudioAsset)。**round-trip 已测**:导出真实项目 deephouse(15 sessions/35 instruments/34 clips/8 sounds 含 3 stem 子/8 assets)→ bundle 引用完整性+哈希+拓扑序校验过 → 导入 scratch 库 → 归属/isExample/originProjectId/genId=null/parent 链/asset&sound 映射全对(scratch 库测后即删)。脚本要在 `web/` 下跑(storage 根按脚本位置定位,不依赖 cwd)。
