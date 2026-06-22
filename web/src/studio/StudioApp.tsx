@@ -7,11 +7,11 @@ import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import type { Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, InstrumentPayload, InstrumentSends, Mixer, Quantize, SampleWarp, Session, XYAutomation, XYAutoSet, XYProgram } from '@/contracts';
-import { clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionRepeats, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
+import { activeInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionRepeats, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
 import { normalize, diff, type Snapshot } from '@/studio/sync';
 import { StudioEngine } from '@/audio/studioEngine';
 import { buildBuffer, decodeAsset, loadLibrary, regionFromClip, regionFromSound, soundToClip, warpToBuffer } from '@/studio/realLibrary';
-import { loadGens, generateToLibrary, retryGen, uploadToLibrary, conciseError, type GenHooks } from '@/studio/studioGens';
+import { loadGens, generateToLibrary, retryGen, uploadToLibrary, rechopSong, conciseError, type GenHooks } from '@/studio/studioGens';
 import { addSession as docAddSession, cloneInstrument, duplicateSessionAt, findInst, freeSlots, moveSession, patchCollageClip, patchMixer, patchSession, removeInstrument as docRemove, removeSessionAt } from '@/studio/sessionDoc';
 import { placeItem, placeNear, roomAt, itemLengthSteps } from '@/studio/collageDoc';
 import { MixerStrip } from '@/studio/ui/MixerStrip';
@@ -30,6 +30,7 @@ import { defaultAutomation, rescaleAuto, sampleXY, isActiveAuto, NEUTRAL, normal
 import type { GenView, LoopView } from '@/contracts/studioViews';
 import { api, type ApiSound } from '@/studio/api';
 import { ClipEditor } from '@/studio/ui/WarpEditor';
+import { ChopView } from '@/studio/ui/ChopView';
 
 // 客户端生成稳定 id(§15:落库与内存共用同一 id,支撑自动保存,刷新不变)。
 const nid = (p: string) => `${p}-${crypto.randomUUID()}`;
@@ -84,7 +85,12 @@ function setDragImage(ev: React.DragEvent, label: string): void {
 const PX = 12;
 const FAINT = 'rgba(255,255,255,0.032)'; // 很浅的网格线
 
-function computePeaks(buf: AudioBuffer, n = 120): number[] {
+// 波形峰值采样点数:全用同一高密度值 —— pad/lane/编辑器/库卡共享 lanePeaksCache(同 region 同 key),
+// 且 peaksFromRegion 是 O(span)(与 n 无关,只多写几个数组元素),故拉高几乎免费,换来宽编辑器里不再有可见折线。
+// 旧值 72/100/120 在宽 collage 轨上每个 transient 只摊到 ~6 点 → 圆钝折面;768 让每片 transient 有几十点 → 贴近逐像素的细腻。
+const WAVE_N = 768;
+
+function computePeaks(buf: AudioBuffer, n = WAVE_N): number[] {
   const ch0 = buf.getChannelData(0);
   const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
   const len = ch0.length, out = new Array(n).fill(0), step = len / n;
@@ -99,7 +105,7 @@ function computePeaks(buf: AudioBuffer, n = 120): number[] {
   return out;
 }
 // 取源解码声道里 [start,end) 区(= trim 后那段)的峰值,供 collage 轨上每片画 trim 后波形。
-function peaksFromRegion(channels: Float32Array[], startSample: number, endSample: number, n = 100): number[] {
+function peaksFromRegion(channels: Float32Array[], startSample: number, endSample: number, n = WAVE_N): number[] {
   const ch0 = channels[0]; if (!ch0) return [];
   const len = ch0.length;
   // ⚠不夹 span:trim 区可越界(负起点/超尾),越界处算静音补零 —— 与 warp sliceChannelsPadded / 播放一致,否则波形会"丢掉"前导静音、整体左移。
@@ -219,6 +225,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [stemUp, setStemUp] = useState<boolean | null>(null);
   const [peaks, setPeaks] = useState<Record<string, number[]>>({});
   const [libPeaks, setLibPeaks] = useState<Record<string, number[]>>({}); // 库卡波形缩略图:sound/stem id → 峰值(懒解码 + lanePeaksCache 复用)
+  const [chopBusy, setChopBusy] = useState(false); // §33.6 重切进行中
   const [warming, setWarming] = useState<string | null>(null); // ⑥ 试听 warm-up:正在 build buffer 的 sound/clip id(命中缓存<120ms 不显)
   const [building, setBuilding] = useState<Record<string, boolean>>({}); // ⑩ 新乐器入场:正在首建 buffer 的乐器 id(无 peaks 时 → 压暗 + 锁 ▶)
   const [playing, setPlaying] = useState(false);
@@ -275,12 +282,24 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   ctxRef.current = ctx; sessionsRef.current = sessions; gensRef.current = gens; quantizeRef.current = quantize;
 
   const loadInstrumentToEngine = useCallback(async (inst: Instrument, seamless = false, arm = true) => {
-    const c = ctxRef.current, e = eng.current; if (!c || !e) return;
+    const e = eng.current; if (!ctxRef.current || !e) return;
     const myV = (buildSeq.current[inst.id] = (buildSeq.current[inst.id] ?? 0) + 1); // 本次 build 代号:完成后据此判废,后发先至的旧 build 不再盖回引擎
     setBuilding((b) => ({ ...b, [inst.id]: true })); // ⑩ 入场/重建中;无缝重建(已有 peaks)不显遮罩,只锁全新乐器
     try {
-      const buf = await buildBuffer(inst, c.bpm, c.soundsById);
-      if (buildSeq.current[inst.id] !== myV) return; // 被更晚一次操作取代 → 丢弃这次(旧)build,不动引擎/peaks
+      // §34 竞态修复:新上传/生成的 asset 偶发「落库已返回但 CDN 还没就绪」→ 紧接着的 buildBuffer(取流/decode)**抛错**
+      //   = 这件乐器建不出 voice(预览不出声、开了也不跟走带,要刷新才好)。只对**抛错**退避重试(asset 就绪后即成功);
+      //   返回 null = 缺源(soundsById 没这条),重试也没用(不重载不会变)→ 立即按缺源处理,别白等。
+      let buf: AudioBuffer | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 250 * attempt));
+        const cc = ctxRef.current; if (!cc) break;
+        try { buf = await buildBuffer(inst, cc.bpm, cc.soundsById); break; } // 拿到 buffer 或确定缺源(null)→ 不再重试
+        catch (err) {
+          if (buildSeq.current[inst.id] !== myV) return; // 期间被更晚一次操作取代 → 丢弃这次(旧)build
+          if (attempt === 2) console.warn('[studio] buildBuffer 重试后仍失败,乐器暂无 voice:', inst.id, err);
+        }
+      }
+      if (buildSeq.current[inst.id] !== myV) return; // 成功路径也判废:build 期间被更晚操作取代 → 不动引擎/peaks
       if (!buf) { e.clearInstrument(inst.id); setPeaks((p) => { const q = { ...p }; delete q[inst.id]; return q; }); return; }
       if (seamless && e.hasVoice(inst.id)) {
         e.swapBuffer(inst.id, buf, instrumentBars(inst)); // 在播时:下一个小节边界无缝接管,不断声
@@ -350,13 +369,22 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     await refreshGens();
   }, [refreshGens]);
 
+  // stem 分离 sidecar 探活:挂载查一次 + 每 15s 轮询 —— sidecar 不自启(重启机器/崩了要手动 ./run.sh),
+  // 轮询让它一起来 Separate 按钮就自动恢复,不必手动刷新页面(否则 stemUp 一直缓存着 false)。
+  useEffect(() => {
+    let alive = true;
+    const ping = () => api.stemService().then((s) => alive && setStemUp(s.up)).catch(() => alive && setStemUp(false));
+    ping();
+    const t = setInterval(ping, 15000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         const soundsById = await loadLibrary();
         const g = await loadGens(projectId);
-        api.stemService().then((s) => alive && setStemUp(s.up)).catch(() => alive && setStemUp(false));
         let sessions = emptySessions();
         let restored = false;
         const saved = await fetch(`/api/studio?projectId=${projectId}`).then((r) => (r.ok ? r.json() : [])).catch(() => []);
@@ -543,6 +571,19 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
+  // §34 粘贴入库:document 级 paste 监听 —— 有音频文件才 preventDefault+入库,否则放行默认(不劫持文本/图片粘贴)。无 deps 同 keydown effect:每渲染重挂,importPastedAudio 始终最新闭包。
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const files = e.clipboardData?.files;
+      if (!files || !files.length) return;
+      const audio = Array.from(files).filter(isAudioFile);
+      if (!audio.length) return; // 非音频粘贴 → 交给默认行为
+      e.preventDefault();
+      void importPastedAudio(audio);
+    };
+    document.addEventListener('paste', onPaste);
+    return () => document.removeEventListener('paste', onPaste);
+  });
   useEffect(() => { const clear = () => { setDragSoundId(null); setDragInstSlot(null); }; window.addEventListener('dragend', clear); return () => window.removeEventListener('dragend', clear); }, []); // 拖拽结束(落下/取消)→ 清掉"正在拖的素材/乐器"
 
   // §20 Song 线性:撤销待推进的 scheduleOnce(切歌/停播/undo 前)。
@@ -588,7 +629,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const nextI = blockI + 1 < list.length ? blockI + 1 : (loopSongRef.current ? 0 : -1);
     if (nextI >= 0 && list[nextI] && list[nextI].id !== blockId) loadSessionAdditive(list[nextI], false).catch(() => {}); // 提前热下一块 buffer,边界不卡
     const len = sessionRepeats(s) * sessionBars(s);
-    const endBar = startBar + len;
+    const endBar = Math.max(startBar + len, e.currentBar() + 1); // §26 防御:重排时若新块尾已落在走带之前(播放中把 repeat 调小到播放头之后),钳到下一小节边界,否则 scheduleOnce 排在过去永不触发 = 块卡住不推进
     songSchedId.current = e.scheduleAt(`${endBar}:0:0`, (time) => {
       const cur = sessionsRef.current;
       const fi = cur.findIndex((x) => x.id === blockId); // 当前块此刻真实下标(重排/删除后仍准;当前块被删 → -1 即停)
@@ -727,8 +768,10 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   // §20 场景 CRUD —— 改 sessions 数组(口径①,免费可撤);改后按 id 保持活动场景不漂移。
   const mutateSessionsKeepActive = (next: Session[]) => {
     const curId = sessionsRef.current[sessionIdx]?.id;
+    const playId = playingRef.current ? sessionsRef.current[playingIdxRef.current]?.id : undefined; // §26 播放块也按 id 锚:播放中增删/重排别的块会移动它的下标,不重锚则播放头(cum[playingIdx])与高亮漂到错块 = 进度条跑偏
     pushHistory(); setSessions(next);
     if (curId) { const ni = next.findIndex((s) => s.id === curId); if (ni >= 0 && ni !== sessionIdx) setSessionIdx(ni); }
+    if (playId) { const pi = next.findIndex((s) => s.id === playId); if (pi >= 0 && pi !== playingIdxRef.current) { playingIdxRef.current = pi; setPlayingIdx(pi); } }
   };
   const moveSessionTo = (from: number, to: number) => { if (from === to) return; mutateSessionsKeepActive(moveSession(sessionsRef.current, from, to)); };
   // 拖拽换位的实时 preview:拖起 → 记 id + 初始顺序;拖过别的卡 → 把被拖 id 插到那张卡的槽位(整排实时滑动让位,像已经挪过去);松手 → 落库一次。
@@ -753,9 +796,16 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const next = Math.max(1, Math.round(repeats));
     const s = sessionsRef.current.find((x) => x.id === id);
     const oldR = s ? sessionRepeats(s) : 1;
+    if (oldR === next) return; // 没变:不压空 undo、不重排调度
     const patch: Partial<Pick<Session, 'repeats' | 'xyAuto'>> = { repeats: next };
-    if (s?.xyAuto && next !== oldR) { const r = next / oldR, set: XYAutoSet = {}; for (const p of PROG_ORDER) { const a = s.xyAuto[p]; if (a) set[p] = rescaleAuto(a, r); } patch.xyAuto = set; } // #2 改 repeat → 每条 automation 按比例缩放点重分布
-    mutateSessionsKeepActive(patchSession(sessionsRef.current, id, patch));
+    if (s?.xyAuto) { const r = next / oldR, set: XYAutoSet = {}; for (const p of PROG_ORDER) { const a = s.xyAuto[p]; if (a) set[p] = rescaleAuto(a, r); } patch.xyAuto = set; } // #2 改 repeat → 每条 automation 按比例缩放点重分布
+    const updated = patchSession(sessionsRef.current, id, patch);
+    mutateSessionsKeepActive(updated);
+    // §26 播放中改正在出声块的 repeat:块末推进是 enterSongBlock 起播时按旧 reps 排死的(endBar=startBar+reps×bars)。不重排则块被画宽/窄了,播放头仍按旧长度提前/滞后跳块 = 进度条跑偏。
+    if (playingRef.current && playModeRef.current === 'song' && sessionsRef.current[playingIdxRef.current]?.id === id) {
+      sessionsRef.current = updated; // ref 渲染滞后一帧;先就位让 enterSongBlock 立即读到新 reps
+      enterSongBlock(id, songBlockStart.current); // 用新 reps 重算 endBar 重排(songBlockStart 不变,块头不动)
+    }
   };
   const setSessionColor = (id: string, color: string) => { if (sessionsRef.current.find((x) => x.id === id)?.color === color) return; mutateSessionsKeepActive(patchSession(sessionsRef.current, id, { color })); }; // 选同色不压空 undo 步
   // §26.v3 Song XY 自动化:改 session.xyAuto[program]。激活=自动判定——**非平才入 map,平则删该键**(=失效);全空 → null。无显式插入/toggle:在 lane 上画即激活。history=false → 实时更新不压栈(画线拖每帧)。活动场景不变。
@@ -813,6 +863,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     return () => { cancelAnimationFrame(raf); eng.current?.xyReleaseAll(); };
   }, []);
   const duplicateSession = (idx: number) => { const { sessions: ns } = duplicateSessionAt(sessionsRef.current, idx, nid); mutateSessionsKeepActive(ns); };
+  const duplicateSessionOnce = (idx: number) => { const { sessions: ns, newIndex } = duplicateSessionAt(sessionsRef.current, idx, nid); ns[newIndex] = { ...ns[newIndex], repeats: 1 }; mutateSessionsKeepActive(ns); }; // 标题栏 ⧉:复制本 scene 但只留 1 个 repeat,插在其后
   // §26 session 剪贴板(⌘C/⌘V;同工程内,粘贴=末尾追加独立副本,乐器全新 id、引用同库素材)。
   const sessionClipRef = useRef<Session | null>(null);
   const copySession = (idx: number) => { const s = sessionsRef.current[idx]; if (s) { sessionClipRef.current = s; setStatus(`Copied session “${s.name}”`); } };
@@ -830,6 +881,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const list = sessionsRef.current;
     if (list.length <= 1) return; // 至少留一个场景
     const curId = list[sessionIdx]?.id;
+    const playId = playingRef.current ? list[playingIdxRef.current]?.id : undefined;
+    const removingPlaying = playingRef.current && idx === playingIdxRef.current; // 删的正是正在出声的块
     const ns = removeSessionAt(list, idx);
     pushHistory(); setSessions(ns);
     if (idx === sessionIdx) {
@@ -837,7 +890,14 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       cancelSongSchedule(); clearSolo(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false);
       setSessionIdx(nextIdx); setSelId(null); setSelClipId(null); setLibSel(null);
       loadSession(ns[nextIdx]).then(() => setTick((t) => t + 1));
-    } else if (curId) { const ni = ns.findIndex((s) => s.id === curId); if (ni >= 0 && ni !== sessionIdx) setSessionIdx(ni); }
+    } else {
+      if (curId) { const ni = ns.findIndex((s) => s.id === curId); if (ni >= 0 && ni !== sessionIdx) setSessionIdx(ni); }
+      if (removingPlaying) { // §26 删了正在出声但非查看的块(Song 钉住视图)→ 干净停播,免播放头无主漂移、声音拖到块末才停
+        cancelSongSchedule(); clearSolo(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false);
+      } else if (playId) { // 删的是出声块前面的块 → 出声块下标左移,按 id 重锚播放头/高亮,否则 cum[playingIdx] 漂到错块
+        const pi = ns.findIndex((s) => s.id === playId); if (pi >= 0 && pi !== playingIdxRef.current) { playingIdxRef.current = pi; setPlayingIdx(pi); }
+      }
+    }
   };
   const requestRemoveSession = async (idx: number) => {
     const s = sessionsRef.current[idx]; if (!s) return;
@@ -1046,7 +1106,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         const key = `${snd.assetId}:${Math.round(r.startSample)}:${Math.round(r.endSample)}`;
         let pk = lanePeaksCache.get(key);
         if (!pk) {
-          try { const d = await decodeAsset(snd.assetId); if (!alive) return; pk = peaksFromRegion(d.channels, r.startSample, r.endSample, 72); lanePeaksCache.set(key, pk); } catch { continue; }
+          try { const d = await decodeAsset(snd.assetId); if (!alive) return; pk = peaksFromRegion(d.channels, r.startSample, r.endSample); lanePeaksCache.set(key, pk); } catch { continue; }
         }
         if (!alive) return;
         setLibPeaks((m) => (m[id] === pk ? m : { ...m, [id]: pk! }));
@@ -1074,6 +1134,31 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     for (const f of Array.from(files)) {
       uploadToLibrary(projectId, f, genHooks()).catch((e) => setStatus('Upload failed: ' + conciseError(e)));
     }
+  };
+  // §34 粘贴入库:剪贴板里的音频文件(Splice ⌘C / Finder 复制的)→ 入库(§27 管线,自带运行态+检测)+ 自动建单 sample 乐器落空 pad。
+  // 只收 wav/mp3 —— 对齐 /api/uploads 的 OK_TYPES + 上传按钮 accept;收别的格式(aiff/m4a/ogg/flac)会在服务端 415 = "Paste failed"。
+  const AUDIO_EXT_RE = /\.(wav|mp3)$/i;
+  const isAudioFile = (f: File) => /^audio\/(wav|x-wav|wave|vnd\.wave|mpeg|mp3)$/.test(f.type) || AUDIO_EXT_RE.test(f.name);
+  const importPastedAudio = async (files: File[]) => {
+    if (!files.length) return;
+    setStatus(files.length > 1 ? `Pasting ${files.length} samples…` : 'Pasting sample…');
+    const slots = freeSlots(sessionsRef.current[sessionIdx], files.length); // 一次性算好 n 个空位按 index 落位(别边建边重算,免撞位)
+    let made = 0, padsFull = 0, failed = 0, lastErr = '';
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const soundId = await uploadToLibrary(projectId, files[i], genHooks()); // await 完检测;reload 已把新 sound 写回 soundsById,故可直接建乐器
+        if (!soundId) { failed++; continue; }
+        const slot = slots[i];
+        if (slot == null) { padsFull++; continue; } // 入库成功但 pad 满 → 只进库、不建乐器
+        addSampleFromSound(soundId, slot); made++;
+      } catch (e) { failed++; lastErr = conciseError(e); } // 单条失败不中断其余;最后汇总,别让成功盖掉失败(免部分丢样静默)
+    }
+    if (!made && !padsFull) { setStatus(failed ? 'Paste failed' + (lastErr ? ': ' + lastErr : '') : 'Nothing pasted'); return; }
+    const bits: string[] = [];
+    if (made) bits.push(`${made} → pad${made > 1 ? 's' : ''}`);
+    if (padsFull) bits.push(`${padsFull} → library (pads full)`);
+    if (failed) bits.push(`${failed} failed`);
+    setStatus('Pasted ' + bits.join(' · '));
   };
   const onRetryGen = (id: string) => {
     const g = gens.find((x) => x.id === id); if (!g) return;
@@ -1107,6 +1192,14 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     trashableSounds.current.add(id);
     if (libSel === id) setLibSel(null);
     await reloadLibrary();
+  };
+  // §33.6 重切:总览改「每块」→ 重跑 chopSong 替换块(reload 后 ChopView 自动重渲;libSel 仍是歌 → 总览不退)。
+  const rechopBlocks = async (song: ApiSound, blocks: ApiSound[], opts: { blockBars: number }) => {
+    if (chopBusy) return;
+    setChopBusy(true);
+    try { await rechopSong(song, blocks, opts, async () => { await reloadLibrary(); await refreshGens(); }); setStatus('Re-chopped'); }
+    catch (e) { setStatus('Re-chop failed: ' + conciseError(e)); }
+    finally { setChopBusy(false); }
   };
   // 乐观标记分离状态:id 可能是顶层变体,也可能是嵌套的 drums 子轨(§29 二段拆)→ 递归找
   const setStemStatus = (id: string, st: string) => {
@@ -1300,6 +1393,18 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   // sample 乐器:ClipEditor 吐出完整新 Clip(warp/trim/变调/timeMul 全在内) → 整条替换 + 无缝换 buffer(在播不断声) + 可撤销。
   const writeSampleClip = (instId: string, clip: Clip) => {
     const cur = sessionsRef.current[sessionIdx];
+    const inst0 = cur.instruments.find((i) => i.id === instId);
+    // §28.8 守卫(对齐 editSoundRegion):ClipEditor 在「选中/换素材/analysis 到达」重挂时会回流一次 emit。
+    //   命门:粘贴/拖建乐器后 setSelId 选中它 → ClipEditor 挂载即 emit;若不早退会多触发一次 seamless 重载,
+    //   它与初始 load 抢 buildSeq —— 大文件(慢 build)下初始 load 被判废、seamless 分支又因还没 voice 而 no-op
+    //   → 乐器**永久无 voice**(预览/走带都不出声,要刷新)。无实质改动直接早退:不压栈、不落库、不重载引擎。
+    if (inst0?.payload.kind === 'sample') {
+      const o = inst0.payload.clip;
+      if (o.startSample === clip.startSample && o.endSample === clip.endSample && o.bars === clip.bars
+          && (o.timeMul ?? 1) === (clip.timeMul ?? 1) && (o.semitones || 0) === (clip.semitones || 0)
+          && (o.fadeOutBars || 0) === (clip.fadeOutBars || 0) && (o.fadeSilenceBars || 0) === (clip.fadeSilenceBars || 0)
+          && (o.gainDb || 0) === (clip.gainDb || 0)) return;
+    }
     const next = cur.instruments.map((i) => (i.id === instId && i.payload.kind === 'sample' ? { ...i, payload: { kind: 'sample' as const, clip } } : i));
     pushHistory();
     updateSession({ ...cur, instruments: next });
@@ -1559,6 +1664,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
             <div className="song-ctl">
               {/* §26 顶栏标题 = 当前选中 session:色块换色 + 点名改名(和块标题一致),后缀 bar 数。 */}
               <span className="song-ctl-l" style={{ display: 'flex', alignItems: 'center', gap: 6, textTransform: 'none', letterSpacing: 0, fontSize: 11, fontWeight: 500, color: 'var(--tx-2)' }}>
+                <button className="song-dup" title="Duplicate (1 repeat)" aria-label="Duplicate scene" onMouseDown={(ev) => ev.preventDefault()} onClick={(ev) => { ev.stopPropagation(); duplicateSessionOnce(sessionIdx); }}>⧉</button>
                 <SessionColorDot color={curSession.color || SESSION_COLORS[sessionIdx % SESSION_COLORS.length]} onPick={(c) => setSessionColor(curSession.id, c)} />
                 {titleRenaming ? (
                   <input autoFocus defaultValue={curSession.name}
@@ -1676,6 +1782,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                     <div className="sblk-nums">
                       {Array.from({ length: n }, (_, k) => (<span key={'rn' + k} className="sblk-rn" style={{ left: k * bars * songZoom + 4 }}>{k + 1}</span>))}
                       {Array.from({ length: n - 1 }, (_, k) => (<span key={'t' + k} className="sblk-tick" style={{ left: (k + 1) * bars * songZoom }} aria-hidden="true" />))}
+                      {/* §26.11 激活乐器计数:钉数字条左下(=落 repeat 1,与 zoom 无关);hover 出名单(portal,免被块 overflow 裁)。点击冒泡到块=选 session。 */}
+                      <SongInstrumentCount session={s} />
+
                       {cur && (
                         <span className="sblk-reps" onClick={(ev) => ev.stopPropagation()} onMouseDown={(ev) => ev.preventDefault()}>{/* onMouseDown preventDefault:点 +/− 不夺焦点 → 空格起停后不会在按钮上残留 focus 圈 */}
                           {n > 1
@@ -1813,6 +1922,15 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
           if (libSel) {
             const s = ctx.soundsById.get(libSel);
             if (!s) return <EmptyEditor hint="Sample not found" />;
+            // §33.6:选中的是「有块的歌」→ 切块总览(点段进块 ClipEditor);否则照常单 clip 编辑。
+            const songBlocks = (s.stems ?? []).filter((k) => k.sliceIndex != null).sort((a, b) => (a.sliceIndex ?? 0) - (b.sliceIndex ?? 0));
+            if (songBlocks.length) {
+              return (
+                <div className="ed-wrap">
+                  <ChopView song={s} blocks={songBlocks} peaks={libPeaks[libSel]} busy={chopBusy} selectedId={libSel} onSelectBlock={focusSound} onDiscardBlock={onDeleteSound} onRechop={(o) => rechopBlocks(s, songBlocks, o)} />
+                </div>
+              );
+            }
             return (
               <div className="ed-wrap">
                 <ClipEditor key={'snd-' + libSel} clip={soundToClip(s)} sound={s} targetBpm={ctx.bpm}
@@ -2007,6 +2125,64 @@ function InstrumentChip({ color, icon, size = 26, onPick }: { color: string; ico
               </button>
             ))}
           </div>
+        </div>, document.body)}
+    </>
+  );
+}
+
+/** §26.11 Song block 数字条左下:激活(enabled)乐器计数胶囊;hover 出名单浮层。
+ *  浮层走 portal 挂 body,绕开 `.sblk-nums`/`.sblock` 的 overflow:hidden 裁剪(同 InstrumentChip)。
+ *  纯只读派生:count/名单都从 session 实时算,无新状态、不进 undo;点击冒泡到块=选 session。 */
+function SongInstrumentCount({ session }: { session: Session }) {
+  const active = activeInstruments(session);
+  const count = active.length;
+  const total = session.instruments.length;
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number; below: boolean } | null>(null);
+  const badgeRef = useRef<HTMLSpanElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const openT = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeT = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const place = useCallback(() => {
+    const r = badgeRef.current?.getBoundingClientRect(); if (!r) return;
+    const winW = window.innerWidth || 1280;
+    const below = r.top < 220; // 贴视口顶 → 翻下方,免跑出屏外
+    setPos({ left: Math.max(8, Math.min(r.left, winW - 196)), top: below ? r.bottom + 6 : r.top - 6, below });
+  }, []);
+  const cancelTimers = () => { if (openT.current) clearTimeout(openT.current); if (closeT.current) clearTimeout(closeT.current); };
+  const scheduleOpen = () => { cancelTimers(); openT.current = setTimeout(() => { place(); setOpen(true); }, 120); };
+  const scheduleClose = () => { cancelTimers(); closeT.current = setTimeout(() => setOpen(false), 80); };
+  useEffect(() => () => cancelTimers(), []); // 卸载清定时器
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', place, true); window.addEventListener('resize', place); // 滚动/resize 跟锚点走
+    return () => { document.removeEventListener('keydown', onKey); window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); };
+  }, [open, place]);
+  return (
+    <>
+      <span ref={badgeRef} className={'sblk-icount' + (count === 0 ? ' zero' : '')} aria-label={count ? `Active instruments: ${active.map((i) => i.label).join(', ')}` : 'No active instruments'}
+        onMouseEnter={scheduleOpen} onMouseLeave={scheduleClose}>{count}</span>
+      {open && pos && createPortal(
+        <div ref={popRef} onMouseEnter={cancelTimers} onMouseLeave={scheduleClose}
+          style={{ position: 'fixed', left: pos.left, top: pos.top, transform: pos.below ? 'none' : 'translateY(-100%)', zIndex: 260, background: 'var(--bg-1)', border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 9px', width: 180, boxSizing: 'border-box', boxShadow: '0 10px 28px rgba(0,0,0,0.45)' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: count ? 7 : 0, padding: '0 1px' }}>
+            <span style={{ fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--tx-3)' }}>Active</span>
+            <span style={{ fontSize: 10, fontVariantNumeric: 'tabular-nums', color: 'var(--tx-2)' }}>{count} / {total}</span>
+          </div>
+          {count === 0
+            ? <div style={{ fontSize: 11, color: 'var(--tx-2)', paddingTop: 6 }}>No active instruments</div>
+            : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 168, overflowY: 'auto' }}>
+                {active.map((i) => (
+                  <div key={i.id} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '2px 1px' }}>
+                    <span style={{ flex: 'none', width: 9, height: 9, borderRadius: 2, background: i.color || 'var(--tx-3)' }} />
+                    <span style={{ fontSize: 11, color: 'var(--tx)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{i.label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
         </div>, document.body)}
     </>
   );
@@ -2244,7 +2420,6 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
           onDrop={(e) => { e.preventDefault(); setOver(false); setDropStep(null); const st = stepFromX(e.clientX); const slot = e.dataTransfer.getData('application/x-inst-slot'); if (slot !== '') { onDropInst?.(Number(slot), st); return; } const id = e.dataTransfer.getData('text/plain'); if (id) onDropSound(id, st); }}
           onPointerDown={() => onSelectClip('')}
           style={{ position: 'relative', height: '100%', minHeight: 116, width: laneSteps * stepPx, minWidth: '100%', background: 'var(--bg-0)', userSelect: 'none', WebkitUserSelect: 'none',
-            backgroundImage: `repeating-linear-gradient(90deg, color-mix(in srgb,${color} 24%, transparent) 0 1px, transparent 1px ${spb * stepPx}px), repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px ${snapSteps * stepPx}px)`,
             boxShadow: over ? `inset 0 0 0 1px ${color}` : undefined }}>
           <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: loopStart * stepPx, background: 'rgba(0,0,0,0.34)', pointerEvents: 'none', zIndex: 3 }} />
           <div style={{ position: 'absolute', top: 0, bottom: 0, left: loopEnd * stepPx, right: 0, background: 'rgba(0,0,0,0.34)', pointerEvents: 'none', zIndex: 3 }} />
@@ -2259,6 +2434,8 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
               </div>
             );
           })}
+          {/* 网格线移到波形之上(放到片前面,做对齐参考,与 pad 的叠加式网格同观感);zIndex:2 在片(auto)之上、loop 暗罩(3)之下 → out-of-loop 仍被罩暗 */}
+          <div aria-hidden="true" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,0.18) 0 1px, transparent 1px ${spb * stepPx}px), repeating-linear-gradient(90deg, rgba(255,255,255,0.07) 0 1px, transparent 1px ${snapSteps * stepPx}px)` }} />
           {dropStep != null && (() => {
             const gSteps = Math.max(1, Math.round((dragBars ?? 1) * spb)); // 占位块宽 = 素材真实小节(未知则 1 小节)
             const occupied = clips.some((c) => dropStep < c.startStep + Math.max(1, Math.round(c.bars * spb)) && c.startStep < dropStep + gSteps); // 与已有片重叠 → 落不下

@@ -48,6 +48,10 @@ export async function POST(req: Request) {
       userId: user.id,
       originProjectId: b.originProjectId || null,
       genId: b.genId || null,
+      // §33 切块:块挂在歌下(parentSoundId=歌)、共享歌的 assetId;sliceIndex 非空 = block。
+      parentSoundId: b.parentSoundId || null,
+      sliceIndex: typeof b.sliceIndex === 'number' ? b.sliceIndex : null,
+      sectionLabel: b.sectionLabel || null,
       name: b.name ?? 'Untitled',
       mode: b.mode ?? 'sound',
       sourceBpm: b.sourceBpm ?? 90,

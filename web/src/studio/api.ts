@@ -18,6 +18,7 @@ export interface ApiSound {
   durationSec: number; sampleRate: number; channels: number;
   analysis: unknown; warp: unknown; assetId: string; asset?: ApiAsset; originProjectId: string | null; genId: string | null;
   parentSoundId?: string | null; stemKind?: string | null; stemStatus?: string | null; stems?: ApiSound[];
+  sliceIndex?: number | null; sectionLabel?: string | null; // §33 块
 }
 export interface ApiPad {
   id: string; projectId: string; bank: number; padIndex: number;
@@ -55,7 +56,7 @@ export const api = {
     list: (): Promise<ApiSound[]> => fetch('/api/sounds').then(J),
     create: (b: Record<string, unknown>): Promise<ApiSound> => post('/api/sounds', b),
     patch: (id: string, b: Record<string, unknown>): Promise<ApiSound> => patch(`/api/sounds/${id}`, b),
-    remove: (id: string): Promise<{ ok: boolean }> => del(`/api/sounds/${id}`),
+    remove: (id: string, hard?: boolean): Promise<{ ok: boolean }> => del(`/api/sounds/${id}${hard ? '?hard=1' : ''}`),
     separate: (id: string): Promise<{ ok: boolean; stems?: ApiSound[]; error?: string }> => post(`/api/sounds/${id}/separate`, {}),
   },
   stemService: (): Promise<{ up: boolean; device?: string; sources?: string[] }> => fetch('/api/stem-service').then(J),

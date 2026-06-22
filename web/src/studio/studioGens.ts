@@ -3,8 +3,9 @@
 // 产出 LoopManager 直接吃的 GenView[]。生成走真实 Suno 桥接(需插件 + 登录的 suno.com 标签)。
 import { api, type ApiSound } from '@/studio/api';
 import { clipColor } from '@/studio/clipColor';
-import { detectLoop } from '@/audio/conditioning';
-import { estimateTempo, estimateKey } from '@/audio/detect';
+import { detectLoop, type LoopAnalysis } from '@/audio/conditioning';
+import { estimateTempo, estimateKey, parseNameMeta } from '@/audio/detect';
+import { chopSong, shouldChop } from '@/audio/chop';
 import type { GenStatus, GenView, LoopView } from '@/contracts/studioViews';
 
 let _gctx: AudioContext | null = null;
@@ -34,6 +35,7 @@ export const soundToLoop = (s: ApiSound): LoopView => {
     durationSec: s.durationSec, musicalKey: s.musicalKey,
     color: clipColor({ stemKind: s.stemKind, id: s.id }),
     stemKind: s.stemKind ?? undefined, stemStatus: s.stemStatus ?? undefined,
+    sliceIndex: s.sliceIndex ?? null, sectionLabel: s.sectionLabel ?? null, // §33 块判别
     stems: (s.stems ?? []).map(soundToLoop),
   };
 };
@@ -58,6 +60,48 @@ export interface GenHooks {
   release?: (genId: string) => void;                          // 管线收尾,注销句柄
 }
 interface GenParams { projectId: string; mode: 'sound' | 'advanced'; prompt: string; bpm: number; key: string; loop: boolean }
+
+interface IngestMeta { projectId: string; genId: string; name: string; mode: string; sourceBpm: number; key: string; durationSec: number; sampleRate: number; channels: number }
+interface IngestAsset { audioB64?: string; sourceUrl?: string; assetId?: string }
+
+/** §33 落库:整段一条 Sound;若小节数超阈值则切成「歌(容器)+ N 块子 Sound(共享歌的 assetId)」并把 gen 标 `chopping` 流式入库。
+ *  块 = asset 内开窗(startSample/endSample/bars)+ 自己的 warp 种子;父=歌,sliceIndex 递增。 */
+async function ingestSound(meta: IngestMeta, channels: Float32Array[], analysis: LoopAnalysis, asset: IngestAsset, h: GenHooks, stopped: () => boolean): Promise<string | undefined> {
+  const warp = { startSample: analysis.startSample, endSample: analysis.endSample, bars: analysis.bars, semitones: 0, warpedBy: 'auto' };
+  const assetField = asset.assetId ? { assetId: asset.assetId } : { audioB64: asset.audioB64, sourceUrl: asset.sourceUrl };
+  const base = {
+    originProjectId: meta.projectId, genId: meta.genId, mode: meta.mode, sourceBpm: meta.sourceBpm, key: meta.key,
+    sampleRate: meta.sampleRate, channels: meta.channels,
+  };
+
+  // 不超阈值:整段一条(现行为)。
+  if (!shouldChop(analysis.bars)) {
+    const snd = await api.sounds.create({ ...base, name: meta.name, durationSec: meta.durationSec, analysis, warp, ...assetField });
+    return snd.id; // §34:回传主 soundId(粘贴入库后据此建单 sample 乐器)
+  }
+
+  // 超阈值 → 切块。先建「歌」(整段,容器),拿回共享 assetId;gen 进 chopping 态。
+  if (stopped()) return; // 取消则别建歌(对齐上传路径,免取消后留孤儿歌)
+  h.patch(meta.genId, { status: 'chopping' });
+  await api.gens.patch(meta.genId, { status: 'chopping' });
+  const song = await api.sounds.create({ ...base, name: meta.name, durationSec: meta.durationSec, analysis, warp, ...assetField });
+
+  // 网格用 analysis.bpm(loopBpm:整首恰好 N 小节 → 块整齐铺满);块共享歌的 assetId(零新字节)。
+  const { blocks } = chopSong(channels, meta.sampleRate, analysis.bpm || meta.sourceBpm, { beatsPerBar: 4 });
+  for (let i = 0; i < blocks.length; i++) {
+    if (stopped()) { try { await api.sounds.remove(song.id); } catch { /* ignore */ } return; } // 取消:软删歌(连带块从 API 不可达),免留孤儿
+    const bk = blocks[i];
+    const label = bk.sectionLabel || `Block ${i + 1}`;
+    const bAnalysis = { ...analysis, startSample: bk.startSample, endSample: bk.endSample, bars: bk.bars, exactBars: bk.bars, onsets: [] as number[] };
+    const bWarp = { startSample: bk.startSample, endSample: bk.endSample, bars: bk.bars, semitones: 0, warpedBy: 'auto' };
+    await api.sounds.create({
+      ...base, parentSoundId: song.id, assetId: song.assetId, sliceIndex: i, sectionLabel: bk.sectionLabel ?? null,
+      name: `${meta.name} · ${label}`, durationSec: (bk.endSample - bk.startSample) / meta.sampleRate,
+      analysis: bAnalysis, warp: bWarp,
+    });
+  }
+  return song.id; // §34:chop 时回传歌(容器)id
+}
 
 /** 在一条已存在的 gen 行上跑完整管线(桥接 → 轮询 → 下载 → 落库)。成功标 complete,失败标 failed(简洁报错)。 */
 async function runGeneration(genId: string, params: GenParams, h: GenHooks, signal?: AbortSignal): Promise<void> {
@@ -95,13 +139,11 @@ async function runGeneration(genId: string, params: GenParams, h: GenHooks, sign
         const channels: Float32Array[] = [];
         for (let ch = 0; ch < audio.numberOfChannels; ch++) channels.push(audio.getChannelData(ch).slice());
         const analysis = detectLoop(channels, audio.sampleRate, bpm);
-        // 落地即「包裹整段」:默认 warp = detectLoop 整段区间(用户进编辑器再裁),不按生成/上传猜该截多短。
-        const warp = { startSample: analysis.startSample, endSample: analysis.endSample, bars: analysis.bars, semitones: 0, warpedBy: 'auto' };
-        await api.sounds.create({
-          originProjectId: projectId, genId, name: `${prompt.slice(0, 16)} #${n}`, mode, sourceBpm: bpm, key,
-          durationSec: audio.duration, sampleRate: audio.sampleRate, channels: audio.numberOfChannels,
-          analysis, warp, audioB64: b64, sourceUrl: c.audio_url,
-        });
+        // §33:整段一条;超阈值则切成「歌 + N 块」(块共享 assetId、流式入库、gen 走 chopping 态)。
+        await ingestSound(
+          { projectId, genId, name: `${prompt.slice(0, 16)} #${n}`, mode, sourceBpm: bpm, key, durationSec: audio.duration, sampleRate: audio.sampleRate, channels: audio.numberOfChannels },
+          channels, analysis, { audioB64: b64, sourceUrl: c.audio_url }, h, stopped,
+        );
         ok++;
       } catch (e) { failures.push(conciseError(e)); }
     }
@@ -144,7 +186,7 @@ export async function retryGen(genId: string, params: GenParams, h: GenHooks): P
 }
 
 /** §27 上传管线:multipart 落 Asset(uploading) → 解码 + 估速估调(detecting) → 入库(complete)。镜像 runGeneration。 */
-async function runUpload(genId: string, projectId: string, file: File, h: GenHooks, signal?: AbortSignal): Promise<void> {
+async function runUpload(genId: string, projectId: string, file: File, h: GenHooks, signal?: AbortSignal): Promise<string | undefined> {
   const stopped = () => !!signal?.aborted;
   try {
     // ① 传输:把字节落成共享 Asset(WAV 走 multipart,不 base64)。
@@ -159,23 +201,24 @@ async function runUpload(genId: string, projectId: string, file: File, h: GenHoo
     if (stopped()) return;
     const channels: Float32Array[] = [];
     for (let ch = 0; ch < audio.numberOfChannels; ch++) channels.push(audio.getChannelData(ch).slice());
-    const { bpm } = estimateTempo(channels, audio.sampleRate);
-    const { key } = estimateKey(channels, audio.sampleRate);
+    // §34:文件名里有 BPM/调式(Splice 命名)就拿来当种子,绕开最不可靠的 estimateTempo/estimateKey;解析不出再 DSP 兜底。
+    const named = parseNameMeta(file.name);
+    const bpm = named.bpm ?? estimateTempo(channels, audio.sampleRate).bpm;
+    const key = named.key ?? estimateKey(channels, audio.sampleRate).key ?? '';
     const mode = audio.duration > 20 ? 'advanced' : 'sound'; // 仅卡片标签;warp 不再据此截短
     const analysis = detectLoop(channels, audio.sampleRate, bpm);
-    // 落地即「包裹整段」:默认 warp = detectLoop 整段区间(用户进编辑器再裁)。
-    const warp = { startSample: analysis.startSample, endSample: analysis.endSample, bars: analysis.bars, semitones: 0, warpedBy: 'auto' };
     const name = file.name.replace(/\.[^.]+$/, '').slice(0, 24) || 'Upload';
     if (stopped()) return; // 取消后别再落库(对齐 runGeneration:否则取消已软删 gen,这条 sound 仍以 trashed:false 建出 → 库里留孤儿)
-    await api.sounds.create({
-      originProjectId: projectId, genId, name, mode, sourceBpm: bpm, key: key || '',
-      durationSec: audio.duration, sampleRate: audio.sampleRate, channels: audio.numberOfChannels,
-      analysis, warp, assetId,
-    });
+    // §33:整段一条;超阈值则切块(共享 assetId、流式、chopping 态)。§34:回传主 soundId 供粘贴建乐器。
+    const soundId = await ingestSound(
+      { projectId, genId, name, mode, sourceBpm: bpm, key, durationSec: audio.duration, sampleRate: audio.sampleRate, channels: audio.numberOfChannels },
+      channels, analysis, { assetId }, h, stopped,
+    );
     if (stopped()) return;
     // 把检测结果回填到 gen 卡头(genParams 读 bpm/key/mode);完成。
     await api.gens.patch(genId, { status: 'complete', bpm: Math.round(bpm), musicalKey: key, mode, error: null });
     await h.reload();
+    return soundId;
   } catch (e) {
     if (stopped()) return;
     const msg = conciseError(e);
@@ -187,12 +230,36 @@ async function runUpload(genId: string, projectId: string, file: File, h: GenHoo
 }
 
 /** 上传一个本地音频文件 → 进库(§27)。建 upload gen 行 → 立刻出卡 → 跑管线。 */
-export async function uploadToLibrary(projectId: string, file: File, h: GenHooks): Promise<void> {
+export async function uploadToLibrary(projectId: string, file: File, h: GenHooks): Promise<string | undefined> {
   if (!projectId || !file) return;
   // 建 gen 行(source=upload;bpm/key 检测前留空,prompt=文件名)。
   const gen = await api.gens.create({ projectId, source: 'upload', mode: 'sound', prompt: file.name, bpm: 0, key: '', loop: true });
   const ctrl = new AbortController(); // 上传/检测可被取消(干掉整条)
   h.appear({ id: gen.id, source: 'upload', prompt: file.name, mode: 'sound', status: 'uploading', sounds: [], bpm: 0, musicalKey: '', loop: true });
   h.register?.(gen.id, ctrl);
-  await runUpload(gen.id, projectId, file, h, ctrl.signal);
+  return await runUpload(gen.id, projectId, file, h, ctrl.signal);
+}
+
+/** §33.6 重切:总览改「每块」或拖 origin → 按新参数重跑 chopSong 替换块。
+ *  软删旧块(其 stem 因父块被 trashed 而从 API 不可达,等同消失);新块共享歌 asset、sliceIndex 重排。非破坏(块=元数据,零字节)。 */
+export async function rechopSong(song: ApiSound, blocks: ApiSound[], opts: { blockBars?: number; originSamples?: number }, reload: () => void | Promise<void>): Promise<void> {
+  const { decodeAsset } = await import('@/studio/realLibrary');
+  const { channels, sampleRate } = await decodeAsset(song.assetId);
+  const a = (song.analysis || {}) as Record<string, number>;
+  const bpm = a.bpm || song.sourceBpm; // 网格用 loopBpm(整首恰好 N 小节 → 块整齐铺满)
+  for (const b of blocks) { try { await api.sounds.remove(b.id, true); } catch { /* 单块删失败不阻塞 */ } } // 硬删:级联清块的 stem + undo 不复活(免重复块)
+  const { blocks: nb } = chopSong(channels, sampleRate, bpm, { beatsPerBar: 4, blockBars: opts.blockBars, originSamples: opts.originSamples });
+  for (let i = 0; i < nb.length; i++) {
+    const bk = nb[i];
+    const label = bk.sectionLabel || `Block ${i + 1}`;
+    await api.sounds.create({
+      originProjectId: song.originProjectId, genId: song.genId, parentSoundId: song.id, assetId: song.assetId,
+      sliceIndex: i, sectionLabel: bk.sectionLabel ?? null, name: `${song.name} · ${label}`,
+      mode: song.mode, sourceBpm: song.sourceBpm, key: song.musicalKey || '',
+      durationSec: (bk.endSample - bk.startSample) / sampleRate, sampleRate, channels: song.channels,
+      analysis: { ...a, startSample: bk.startSample, endSample: bk.endSample, bars: bk.bars, exactBars: bk.bars, onsets: [] },
+      warp: { startSample: bk.startSample, endSample: bk.endSample, bars: bk.bars, semitones: 0, warpedBy: 'auto' },
+    });
+  }
+  await reload();
 }

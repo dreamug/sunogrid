@@ -9,6 +9,7 @@
 import os
 import subprocess
 import tempfile
+from typing import Optional
 
 import numpy as np
 import soundfile as sf
@@ -81,6 +82,8 @@ class SeparateReq(BaseModel):
     inputPath: str           # 源音频绝对路径(mp3/wav 皆可)
     outDir: str              # 输出目录(这里负责建)
     model: str = "full"      # 'full'=全混 6 轨(默认,向后兼容) | 'drums'=鼓二段拆(§29)
+    startSec: Optional[float] = None  # §33 块分离:只分 [startSec,endSec) 这一段(而不是整首);None=整段
+    endSec: Optional[float] = None
 
 
 def load_audio(path: str) -> np.ndarray:
@@ -120,6 +123,12 @@ def separate(req: SeparateReq):
         net, sources = MODEL, SOURCES
 
     wav = torch.tensor(load_audio(req.inputPath), dtype=torch.float32)  # (2, N)
+    # §33 块分离:只切 [startSec, endSec) 这一段喂模型(省 ~5×;块共享整首 asset,只需它那一段)。
+    if req.startSec is not None and req.endSec is not None:
+        a = max(0, int(round(req.startSec * SR)))
+        b = min(wav.shape[1], int(round(req.endSec * SR)))
+        if b > a:
+            wav = wav[:, a:b]
     # demucs CLI 式标准化:整段按标量均值/方差归一,分完再还原。
     ref = wav.mean(0)
     mean, std = ref.mean(), ref.std() + 1e-8

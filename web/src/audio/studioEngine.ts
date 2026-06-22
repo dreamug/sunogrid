@@ -22,6 +22,7 @@ interface Voice {
   sendDist: Tone.Gain; sendDelay: Tone.Gain; sendReverb: Tone.Gain; // aux send 量(post-panner 旁路进 3 个 fx return,§17)
   meter: Tone.Meter;
   bars: number;
+  mixer: Mixer;         // §34 最新 mixer 快照:clip 预览(previewInstrument)走 auditionChain 用它现搭一条到 dest,绕开下面的 muteGain 遮罩
   wantOn: boolean;      // 用户开关意图(走带停时也记着,起播时一并点亮)
   state: VoiceState;
   scheduledId?: number;
@@ -194,7 +195,7 @@ export class StudioEngine {
     }
     const meter = new Tone.Meter();
     panner.connect(meter); // 旁路抽头(pre-FX),只给本乐器 mixer 电平表;主 L/R 表抽在 master(见 init)= 真实总线,不再逐 panner 并联(那样会与 master 双计)
-    const v: Voice = { player, eq, muteGain, panner, sendDist, sendDelay, sendReverb, meter, bars, wantOn: false, state: 'off' };
+    const v: Voice = { player, eq, muteGain, panner, sendDist, sendDelay, sendReverb, meter, bars, mixer, wantOn: false, state: 'off' };
     this.voices.set(id, v);
     this.applyMixer(v, mixer);
     if (sends) this.applySends(v, sends);
@@ -208,7 +209,7 @@ export class StudioEngine {
     const v = this.voices.get(id);
     if (!v) return;
     v.bars = bars;
-    if (this.auditionId === id) this.auditionSwap(id, buffer, { eq: v.eq, gainDb: v.player.volume.value }); // 预览(audition)正放这件乐器(走带停时常态)→ 同步无缝换上新 buffer,否则改 trim/长度只动画不出声
+    if (this.auditionId === id) this.auditionSwap(id, buffer, { mixer: v.mixer, sends: this.voiceSends(v) }); // 预览(audition)正放这件乐器(走带停时常态)→ 同步无缝换上新 buffer(走 auditionChain,绕开 muteGain,保留 mixer + send→FX),否则改 trim/长度只动画不出声
     this.cancelPending(v);
     const t = Tone.getTransport();
     if (t.state === 'started' && v.state === 'on' && !v.player.disposed) {
@@ -334,10 +335,12 @@ export class StudioEngine {
   setMixer(id: string, mixer: Mixer): void {
     const v = this.voices.get(id);
     if (v) this.applyMixer(v, mixer);
-    // 预览中拖 gain → 即时跟手(eq/pan 走的是共享节点 v.eq/v.panner,已随 applyMixer 生效;gain 在 player 上要单独补)。
-    if (this.auditionId === id && this.auditionPlayer) this.auditionPlayer.volume.value = mixer.gainDb;
+    // 预览中拖 mixer → 即时跟手:gain 直接补到 audition player;eq/pan 经 setAuditionMix 刷到预览专用的 audEq/audPan 链
+    // (§34 预览不再走 voice 的共享节点 v.eq/v.panner,故这里不能只靠 applyMixer;裸链试听时 setAuditionMix 自身 gate 掉)。
+    if (this.auditionId === id) { if (this.auditionPlayer) this.auditionPlayer.volume.value = mixer.gainDb; this.setAuditionMix(mixer); }
   }
   private applyMixer(v: Voice, m: Mixer): void {
+    v.mixer = m; // §34 存最新 mixer 快照(clip 预览走 auditionChain 用,见 previewInstrument)
     v.player.volume.value = m.gainDb;
     v.panner.pan.value = Math.max(-1, Math.min(1, m.pan));
     v.eq.low.gain.value = m.eq.lowDb;
@@ -345,7 +348,7 @@ export class StudioEngine {
     v.eq.high.gain.value = m.eq.highDb;
   }
   /** 改一件乐器的 3 条 aux send 量(§17)。 */
-  setSends(id: string, sends: InstrumentSends): void { const v = this.voices.get(id); if (v) this.applySends(v, sends); }
+  setSends(id: string, sends: InstrumentSends): void { const v = this.voices.get(id); if (v) this.applySends(v, sends); if (this.auditionId === id) this.applyAuditionSends(sends); } // 预览中拖 send 旋钮 → 即时跟手刷预览 aux send(乐器整体预览,audSendX 已随 auditionChain 建好)
   private applySends(v: Voice, s: InstrumentSends): void {
     const c = (x: number) => Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
     v.sendDist.gain.value = c(s.dist);
@@ -537,19 +540,21 @@ export class StudioEngine {
   private auditionGen = 0;                 // §28.7 异步预览防陈旧令牌:每次 stopAudition 自增 → 作废 await 窗口里 in-flight 的预览(stop/新预览顶掉迟到的 audition)
   private auditionPendingTok = 0;          // §28.7 当前"加载中"预览的令牌(还在 warp、未出声);供空格识别 warm-up 窗口先停、不误启走带。0=无
   private auditionFading = new Set<Tone.Player>(); // §28.8 auditionSwap 淡出中的旧 player(在未来 loop boundary 才停)。⚠ 长 loop 的 boundary 可能在很久之后 → 必须能被 stopAudition 立即灭掉,否则旧 player 漏播 = "停不下来"
-  private audEq?: ShelfEq;               // collage 片预览的常驻 mixer 链(low/mid/high → panner → dest,频点同 EQ_BANDS/离线 bake);懒建复用、随实例销毁
+  private audEq?: ShelfEq;               // collage 片 / 乐器整体预览的常驻 mixer 链(low/mid/high → panner → master,频点同 EQ_BANDS/离线 bake);懒建复用、随实例销毁
   private audPan?: Tone.Panner;
+  private audSendDist?: Tone.Gain; private audSendDelay?: Tone.Gain; private audSendReverb?: Tone.Gain; // §17 预览 aux send:镜像 voice 的 sends(audPan 旁路进 fx return),让带 send 的乐器整体预览也出 FX(听感对齐走带);piece/库预览送量=0=纯干声
   private auditionUsesChain = false;     // 当前试听是否走 audEq 片链(走才允许 setAuditionMix 实时改;区别于库素材裸链 / 乐器共享 eq 链)
   // through 给定 → 预览带上 mixer:
   //   {eq,gainDb} = 走某乐器的共享 mixer 节点链(eq→panner→dest),听感与走带出声一致(乐器预览);
-  //   {mixer}     = collage 片:按片自己的 gain/pan/3 段 EQ 现搭一条常驻片链(audEq),听感与离线 bake 一致(片预览);
+  //   {mixer,sends?} = collage 片 / 乐器整体:按片/乐器自己的 gain/pan/3 段 EQ 现搭一条常驻链(audEq→audPan→master),
+  //                    给了 sends(乐器整体预览)则 audPan 旁路进 3 条 fx send → 预览也出 FX,与走带一致;不给(片预览)=纯干声。
   // 不给(库素材裸试听,没有乐器 mixer)→ 直连 destination。
   // quantize 且走带在跑 → 排到下一小节边界再起(跟随 bar);否则立即自由循环。
-  audition(id: string, buffer: AudioBuffer, through?: { eq: ShelfEq; gainDb: number } | { mixer: Mixer }, quantize = false, startSec = 0): void {
+  audition(id: string, buffer: AudioBuffer, through?: { eq: ShelfEq; gainDb: number } | { mixer: Mixer; sends?: InstrumentSends }, quantize = false, startSec = 0): void {
     this.stopAudition();
     const p = new Tone.Player(buffer);
-    p.fadeIn = DECLICK; // 试听同样起播去咔哒(预览路径不过主链/muteGain,自身淡入兜底)
-    if (through && 'mixer' in through) { p.volume.value = through.mixer.gainDb; p.connect(this.auditionChain(through.mixer)); this.auditionUsesChain = true; }
+    p.fadeIn = DECLICK; // 试听同样起播去咔哒(预览路径自身淡入兜底)
+    if (through && 'mixer' in through) { p.volume.value = through.mixer.gainDb; p.connect(this.auditionChain(through.mixer)); this.applyAuditionSends(through.sends); this.auditionUsesChain = true; }
     else if (through) { p.volume.value = through.gainDb; p.connect(through.eq.low); this.auditionUsesChain = false; }
     else { p.toDestination(); this.auditionUsesChain = false; }
     p.loop = true;
@@ -577,7 +582,7 @@ export class StudioEngine {
   }
   /** 试听中改了 region(trim/长度/变调)→ 不停下,在下一个 loop 边界保接缝换 buffer(新 loop 从头起,即"第二次播放"就是新长度);
    *  还没出声(排队/已停)→ 直接重起(无可闻打断)。手感同 voice 的 swapBuffer。through 同 audition 的路由。 */
-  auditionSwap(id: string, buffer: AudioBuffer, through?: { eq: ShelfEq; gainDb: number } | { mixer: Mixer }): void {
+  auditionSwap(id: string, buffer: AudioBuffer, through?: { eq: ShelfEq; gainDb: number } | { mixer: Mixer; sends?: InstrumentSends }): void {
     if (this.auditionId !== id) return; // 没在试听这条 → 下次起播自然用新 region
     const old = this.auditionPlayer;
     if (!old || this.auditionQueued || this.auditionDur <= 0) { // 还没出声 → 重起
@@ -591,7 +596,7 @@ export class StudioEngine {
     const boundary = this.auditionStart + k * dur;
     const np = new Tone.Player(buffer);
     np.loop = true; np.loopStart = 0; np.loopEnd = buffer.duration; np.fadeIn = XF;
-    if (through && 'mixer' in through) { np.connect(this.auditionChain(through.mixer)); np.volume.value = through.mixer.gainDb; this.auditionUsesChain = true; } // 片链:接常驻 audEq + 用片 gain
+    if (through && 'mixer' in through) { np.connect(this.auditionChain(through.mixer)); this.applyAuditionSends(through.sends); np.volume.value = through.mixer.gainDb; this.auditionUsesChain = true; } // 片/乐器链:接常驻 audEq + 用 gain + 刷 send 量
     else if (through) { np.connect(through.eq.low); np.volume.value = old.volume.value; } // 乐器共享链:保留当前音量
     else { np.toDestination(); np.volume.value = old.volume.value; }                       // 裸链
     old.fadeOut = XF;
@@ -610,14 +615,19 @@ export class StudioEngine {
   }
   /** 该 id 的预览正排队等小节边界(还没出声)→ true;UI 据此让波形背景呼吸。 */
   auditionQueuedFor(id: string): boolean { return this.auditionId === id && this.auditionQueued; }
-  /** 预览某乐器当前已加载的 warp 产物(自由循环,不挂主走带);仅走带停时用。过该乐器自己的 gain/eq/pan。 */
+  /** 预览某乐器当前已加载的 warp 产物(自由循环,不挂主走带);仅走带停时用。过该乐器自己的 gain/eq/pan + aux send(出 FX)。 */
   previewInstrument(id: string, startPhase = 0): void {
     const v = this.voices.get(id);
     const buf = v?.player.buffer?.get?.() as AudioBuffer | undefined;
-    if (v && buf) this.audition(id, buf, { eq: v.eq, gainDb: v.player.volume.value }, false, startPhase * buf.duration); // §28 单 sample 乐器 clip 预览(总走带停时)也走起播线偏移
+    if (v && buf) this.audition(id, buf, { mixer: v.mixer, sends: this.voiceSends(v) }, false, startPhase * buf.duration); // §28/§34 clip 预览(总走带停时):走 auditionChain(mixer→master + sends→fx,听感对齐走带),绕开 voice 的 muteGain(enable/solo 遮罩)→ 禁用/未起声的乐器也能试听;也走起播线偏移
   }
-  /** collage 片预览的常驻 mixer 链(lowshelf/peaking/highshelf → panner → destination,频点同离线 bake 的 EQ_BANDS)。
-   *  懒建一次复用,每次按片的 dB 刷 gain/pan,返回入口节点(audEq.low)。裸到 destination(不过主总线,同库素材试听口径),只补上片自己的 gain/eq/pan。 */
+  /** 从 voice 的 send gain 节点回读当前 3 条 aux send 量(预览镜像用,免在 Voice 上另存一份 sends)。 */
+  private voiceSends(v: Voice): InstrumentSends { return { dist: v.sendDist.gain.value, delay: v.sendDelay.gain.value, reverb: v.sendReverb.gain.value }; }
+  /** collage 片 / 乐器整体预览的常驻 mixer 链(lowshelf/peaking/highshelf → panner → master,频点同离线 bake 的 EQ_BANDS)。
+   *  懒建一次复用,每次按 dB 刷 gain/pan,返回入口节点(audEq.low)。
+   *  干声进 master(随主音量/软削波天花板/XY,与走带同口径,不再裸到 destination);panner 另旁路出 3 条 aux send
+   *  (audSendX → fx return.input),让带 send 的乐器整体预览也出 FX —— 送量由 applyAuditionSends 单独刷(默认 0 = 纯干声),
+   *  故 setAuditionMix 只刷 eq/pan 不会把 send 清零。 */
   private auditionChain(mixer: Mixer): Tone.Filter {
     if (!this.audEq || !this.audPan) {
       this.audEq = {
@@ -626,13 +636,29 @@ export class StudioEngine {
         high: new Tone.Filter({ type: 'highshelf', frequency: EQ_BANDS.highFreq, gain: 0 }),
       };
       this.audPan = new Tone.Panner(0);
-      this.audEq.low.chain(this.audEq.mid, this.audEq.high, this.audPan, Tone.getDestination());
+      this.audEq.low.chain(this.audEq.mid, this.audEq.high, this.audPan);
+      this.audPan.connect(this.master ?? Tone.getDestination()); // 干声进主总线(与走带一致);init 前兜底裸到 destination
+      // aux send 旁路(§17):panner → audSendX → fx return.input;送量默认 0(piece/库预览=纯干声),乐器整体预览经 applyAuditionSends 打开
+      this.audSendDist = new Tone.Gain(0); this.audSendDelay = new Tone.Gain(0); this.audSendReverb = new Tone.Gain(0);
+      if (this.fx) {
+        this.audPan.connect(this.audSendDist); this.audSendDist.connect(this.fx.distInput);
+        this.audPan.connect(this.audSendDelay); this.audSendDelay.connect(this.fx.delayInput);
+        this.audPan.connect(this.audSendReverb); this.audSendReverb.connect(this.fx.reverbInput);
+      }
     }
     this.audEq.low.gain.value = mixer.eq.lowDb;
     this.audEq.mid.gain.value = mixer.eq.midDb;
     this.audEq.high.gain.value = mixer.eq.highDb;
     this.audPan.pan.value = Math.max(-1, Math.min(1, mixer.pan));
     return this.audEq.low;
+  }
+  /** 刷预览 aux send 量(§17):乐器整体预览给 sends → audPan 旁路出 FX;piece/库预览不给 → 送量 0 = 纯干声。
+   *  与 auditionChain 解耦,故 setAuditionMix 拖 eq/pan 时不会把 send 清零。 */
+  private applyAuditionSends(sends?: InstrumentSends): void {
+    const c = (x: number) => Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
+    if (this.audSendDist) this.audSendDist.gain.value = sends ? c(sends.dist) : 0;
+    if (this.audSendDelay) this.audSendDelay.gain.value = sends ? c(sends.delay) : 0;
+    if (this.audSendReverb) this.audSendReverb.gain.value = sends ? c(sends.reverb) : 0;
   }
   /** 预览正走片链({mixer} 路由)时,实时改 gain/eq/pan —— 让片 MixerStrip 拖旋钮跟手(同乐器 MixerStrip 的 live 口径)。其它路由(裸/乐器共享)忽略。 */
   setAuditionMix(mixer: Mixer): void {
@@ -671,8 +697,9 @@ export class StudioEngine {
   dispose(): void {
     this.disposeTimers.forEach((t) => clearTimeout(t)); this.disposeTimers.clear();
     this.stopTransport(); this.clearAll(); this.stopAudition();
-    [this.audEq?.low, this.audEq?.mid, this.audEq?.high, this.audPan].forEach((n) => { try { n?.dispose(); } catch { /* */ } });
+    [this.audEq?.low, this.audEq?.mid, this.audEq?.high, this.audPan, this.audSendDist, this.audSendDelay, this.audSendReverb].forEach((n) => { try { n?.dispose(); } catch { /* */ } });
     this.audEq = undefined; this.audPan = undefined;
+    this.audSendDist = this.audSendDelay = this.audSendReverb = undefined;
     this.fx?.dispose(); this.fx = undefined;
     this.xy?.dispose(); this.xy = undefined;
     // 主总线 + 节拍器 + 电平表节点(常驻、随实例销毁;旧实现漏清这些)

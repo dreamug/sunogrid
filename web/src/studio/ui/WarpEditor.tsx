@@ -273,21 +273,29 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     c.fillStyle = 'rgba(232,163,61,0.07)';
     c.fillRect(tx0, RULER_H, tx1 - tx0, waveH);
 
-    // 波形(贴在 warp 坐标上)
-    for (let px = 0; px < W; px++) {
-      const ob = vStart + px / pxPerBar;
-      const s0 = srcSecAt(ob) * sampleRate;
-      const s1 = srcSecAt(ob + 1 / pxPerBar) * sampleRate;
+    // 波形(贴在 warp 坐标上):真 min/max(非对称)、按设备像素采样、整段一次填充
+    //  —— 比旧版「逐 CSS 像素描对称竖针」干净:实心无发丝缝、retina 利、形状贴近真实音频。
+    //  单条 Path2D 收齐所有列的实心竖条(近静音退化成中线),先暗色铺全幅,再裁到 trim 区盖亮色 → loop 内外分色无缝。
+    const amp = waveH * 0.45;
+    const cols = Math.max(2, Math.round(W * dpr)); // 亚像素列:retina 下每 CSS 像素再细分,边缘更利
+    const colW = W / cols;
+    const wave = new Path2D();
+    for (let cx = 0; cx < cols; cx++) {
+      const s0 = srcSecAt(vStart + (cx * colW) / pxPerBar) * sampleRate;
+      const s1 = srcSecAt(vStart + ((cx + 1) * colW) / pxPerBar) * sampleRate;
       const a0 = Math.max(0, Math.floor(Math.min(s0, s1)));
-      const a1 = Math.min(total, Math.max(a0 + 1, Math.ceil(Math.max(s0, s1))));
-      if (a1 <= 0 || a0 >= total) continue;
-      let peak = 0;
-      for (let i = a0; i < a1; i++) { const v = Math.abs(mono[i]); if (v > peak) peak = v; }
-      const h = peak * (waveH * 0.46);
-      const inLoop = ob >= trimStartBar && ob <= trimEndBar;
-      c.strokeStyle = inLoop ? 'rgba(196,206,216,0.95)' : 'rgba(70,82,94,0.5)';
-      c.beginPath(); c.moveTo(px + 0.5, mid - h); c.lineTo(px + 0.5, mid + h); c.stroke();
+      const a1 = Math.min(total, Math.ceil(Math.max(s0, s1)));
+      if (a1 <= a0) continue; // 该列落在音频之外(loop 滑出区)→ 留白
+      let mx = 0, mn = 0;
+      for (let i = a0; i < a1; i++) { const v = mono[i]; if (v > mx) mx = v; if (v < mn) mn = v; }
+      const yt = mid - mx * amp, yb = mid - mn * amp;
+      wave.rect(cx * colW, yt, colW + 0.4, Math.max(yb - yt, 1 / dpr)); // +0.4 微叠 → 列间无缝;下限 1 设备像素 → 近静音留一缕中线
     }
+    c.fillStyle = 'rgba(70,82,94,0.55)'; c.fill(wave);                              // loop 外:暗
+    c.save();
+    c.beginPath(); c.rect(tx0, RULER_H, Math.max(0, tx1 - tx0), waveH); c.clip();
+    c.fillStyle = 'rgba(196,206,216,0.95)'; c.fill(wave);                           // loop 内:亮(裁到 trim 区)
+    c.restore();
 
     // 网格:标尺密度 = 所选分辨率(与吸附一致)。整小节粗+编号,拍中等,细分淡;太密的细分不画(防糊)。
     // 网格原点 = 起始线(trimStartBar):所有小节/拍线从起点算起,起点一动,整套网格跟着走。

@@ -21,9 +21,15 @@ export async function PATCH(req: Request, { params }: P) {
   return Response.json(sound);
 }
 
-export async function DELETE(_req: Request, { params }: P) {
+export async function DELETE(req: Request, { params }: P) {
   const { id } = await params;
   if (!(await ownsSound(id))) return new Response('not found', { status: 404 });
-  await db.sound.update({ where: { id }, data: { trashed: true } }); // 软删
+  // 默认软删(可撤,§16 库存活集)。?hard=1 = 硬删(§33 重切旧块):级联清块的 stem(parentSoundId Cascade),
+  //   引用它的 clip/pad SetNull(字节仍在 Asset);硬删后 undo 也无法复活已删行 → 免重切产生重复块。
+  if (new URL(req.url).searchParams.get('hard') === '1') {
+    await db.sound.delete({ where: { id } });
+  } else {
+    await db.sound.update({ where: { id }, data: { trashed: true } });
+  }
   return Response.json({ ok: true });
 }

@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { BridgeInstall } from '@/ui/BridgeInstall';
+import { AuthParticles } from '@/ui/AuthParticles';
 
 // 一段"音频片段"的波形(build→peak→decay→tail);播放头扫过点亮陶土色,呼应 pad 已播 fill。
 const WAVE = [
@@ -58,6 +59,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
 
   return (
     <main className="auth">
+      <AuthParticles />
       <div className="auth-stack">
         <div className="auth-shell">
           <aside className="auth-brand">

@@ -9,8 +9,9 @@ export interface LoopView {
   id: string; label: string; status: LoopStatus; srcBpm: number; bars: number; color: string;
   durationSec: number; musicalKey?: string | null; // 库卡展示用:秒数 + 调
   stemKind?: string; stemStatus?: string | null; stems?: LoopView[]; // 乐器分离
+  sliceIndex?: number | null; sectionLabel?: string | null; // §33 块:非空=block(挂歌下);区别于 stemKind(非空=stem)
 }
 
 // 生成块:点生成就有,状态都在块上;完成后带两个变体(像 Suno)。
-export type GenStatus = 'generating' | 'streaming' | 'uploading' | 'detecting' | 'complete' | 'failed';
+export type GenStatus = 'generating' | 'streaming' | 'uploading' | 'detecting' | 'chopping' | 'complete' | 'failed';
 export interface GenView { id: string; prompt: string; mode: string; status: GenStatus; error?: string; sounds: LoopView[]; bpm?: number; musicalKey?: string; loop?: boolean; source?: 'suno' | 'upload' }

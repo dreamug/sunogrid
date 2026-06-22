@@ -1,7 +1,7 @@
 'use client';
 // 左列:Suno 生成(控件)+ 素材库(两级卡片:一级=全混变体,二级=分离出的乐器轨,凹陷一层、可折叠)。
 import { useState, Fragment } from 'react';
-import type { GenView } from '@/contracts/studioViews';
+import type { GenView, LoopView } from '@/contracts/studioViews';
 import { SunoStatus, type SunoConnState } from '@/studio/ui/SunoStatus';
 import { TransportIcon } from '@/studio/ui/glyphs';
 
@@ -40,13 +40,17 @@ const STEM_LABEL: Record<string, string> = {
   drums: 'Drums', bass: 'Bass', other: 'Other', vocals: 'Vocals', guitar: 'Guitar', piano: 'Keys',
   kick: 'Kick', snare: 'Snare', toms: 'Toms', cymbals: 'Cymbals', hihat: 'Hats', // §29 鼓二段拆
 };
-const GEN_STATUS: Record<string, string> = { generating: 'Generating…', streaming: 'Rendering…', uploading: 'Uploading…', detecting: 'Detecting…', complete: 'Done', failed: 'Failed' };
-// ② 生成阶段条:Suno 私有接口阶段 → 生成 → 渲染 → 到达(变体流式入库)。
+const GEN_STATUS: Record<string, string> = { generating: 'Generating…', streaming: 'Rendering…', uploading: 'Uploading…', detecting: 'Detecting…', chopping: 'Chopping…', complete: 'Done', failed: 'Failed' };
+// ② 生成阶段条:Suno 私有接口阶段 → 生成 → 渲染 →(长素材 §33)切块 → 到达(变体流式入库)。
 const GEN_PHASES: { key: string; label: string }[] = [{ key: 'generating', label: 'Generate' }, { key: 'streaming', label: 'Render' }, { key: 'complete', label: 'Done' }];
 const GEN_ORDER: Record<string, number> = { generating: 0, streaming: 1, complete: 2 };
-// §27 上传阶段条(平行于生成):上传 → 检测 → 到达。
+const GEN_PHASES_CHOP: { key: string; label: string }[] = [{ key: 'generating', label: 'Generate' }, { key: 'streaming', label: 'Render' }, { key: 'chopping', label: 'Chop' }, { key: 'complete', label: 'Done' }];
+const GEN_ORDER_CHOP: Record<string, number> = { generating: 0, streaming: 1, chopping: 2, complete: 3 };
+// §27 上传阶段条(平行于生成):上传 → 检测 →(长素材 §33)切块 → 到达。
 const UPLOAD_PHASES: { key: string; label: string }[] = [{ key: 'uploading', label: 'Upload' }, { key: 'detecting', label: 'Detect' }, { key: 'complete', label: 'Done' }];
 const UPLOAD_ORDER: Record<string, number> = { uploading: 0, detecting: 1, complete: 2 };
+const UPLOAD_PHASES_CHOP: { key: string; label: string }[] = [{ key: 'uploading', label: 'Upload' }, { key: 'detecting', label: 'Detect' }, { key: 'chopping', label: 'Chop' }, { key: 'complete', label: 'Done' }];
+const UPLOAD_ORDER_CHOP: Record<string, number> = { uploading: 0, detecting: 1, chopping: 2, complete: 3 };
 const fmtBars = (b: number) => (Number.isInteger(b) ? `${b}` : b.toFixed(2).replace(/0+$/, '').replace(/\.$/, ''));
 const fmtDur = (s: number) => (s >= 10 ? Math.round(s) + 's' : s.toFixed(1) + 's');
 // 生成块头部参数行:模式 · 生成BPM · 调 · Loop(advanced 无 loop 概念)。
@@ -127,6 +131,86 @@ export function LoopManager(p: Props) {
     onDragStart: (e: React.DragEvent) => { e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'copy'; p.onDragSound?.(id); },
   });
 
+  // 一条素材(歌/块)的 stem 通栏块:真 stem(stemKind 非空)才进,块(sliceIndex)不算。drums 可再拆 kit(§29)。
+  const renderStems = (host: LoopView) => {
+    const stems = (host.stems ?? []).filter((k) => k.stemKind != null);
+    if (!stems.length) return null;
+    const open = !collapsed[host.id];
+    const sepBusy = host.stemStatus === 'separating';
+    return (
+      <div className="stemblk">
+        <div className="stemblk-h" onClick={() => toggle(host.id)}>
+          <span className="cv">{open ? '▾' : '▸'}</span>
+          <span className="lbl">Stems</span>
+          <span className="cnt">{stems.length} stems{open ? '' : ' · collapsed'}</span>
+          <button className="re" disabled={sepBusy || p.stemServiceUp === false} title={p.stemServiceUp === false ? 'Separation service not running' : 'Re-separate'} onClick={(e) => { e.stopPropagation(); p.onSeparate(host.id); }}>↻</button>
+        </div>
+        {open && stems.map((st) => {
+          const isDrums = st.stemKind === 'drums'; // §29:只有 drums 能再拆 kit
+          const kit = (st.stems ?? []).filter((k) => k.stemKind != null);
+          const hasKit = kit.length > 0;
+          const kitSep = st.stemStatus === 'separating';
+          const canKit = isDrums && !hasKit && !kitSep && st.stemStatus !== 'failed'; // 结构可分;服务是否在跑由按钮 disabled 控制
+          return (
+            <Fragment key={st.id}>
+              <div className={'srow' + (canKit ? ' can-sep' : '') + (p.selectedLoopId === st.id ? ' vsel' : '')} style={{ ['--c']: st.color } as React.CSSProperties} {...drag(st.id)} onClick={() => p.onSelect(st.id)} title="Stem · drag to track / pad">
+                <button className={'pl' + (p.warmingId === st.id || (p.selectedLoopId === st.id && p.previewing) ? ' on' : '')} title="Preview" onClick={(e) => { e.stopPropagation(); p.onAudition(st.id); }}>{playInner(st.id)}</button>
+                <span className="sdot" />
+                <span className="sname">{STEM_LABEL[st.stemKind ?? ''] ?? st.stemKind}</span>
+                {canKit && <button className="vsep sm" disabled={p.stemServiceUp === false} title={p.stemServiceUp === false ? 'Separation service not running — start stem-service' : 'Split drum kit (kick / snare / toms / cymbals)'} onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>Split kit</button>}
+                {hasKit && <button className="re" disabled={kitSep || p.stemServiceUp === false} title={p.stemServiceUp === false ? 'Separation service not running' : 'Re-split kit'} onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>↻</button>}
+              </div>
+              {kitSep && (<div className="srow-busy" aria-busy="true"><span className="sg-spin sm" aria-hidden="true" /><span>Splitting kit · local Demucs</span></div>)}
+              {!kitSep && st.stemStatus === 'failed' && !hasKit && (<div className="srow-note" title="Tap to retry" onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>Kit split failed · tap to retry</div>)}
+              {hasKit && kit.map((k) => (
+                <div key={k.id} className={'srow srow-sub' + (p.selectedLoopId === k.id ? ' vsel' : '')} style={{ ['--c']: k.color } as React.CSSProperties} {...drag(k.id)} onClick={() => p.onSelect(k.id)} title="Drum piece · drag to track / pad">
+                  <button className={'pl' + (p.warmingId === k.id || (p.selectedLoopId === k.id && p.previewing) ? ' on' : '')} title="Preview" onClick={(e) => { e.stopPropagation(); p.onAudition(k.id); }}>{playInner(k.id)}</button>
+                  <span className="sdot" />
+                  <span className="sname">{STEM_LABEL[k.stemKind ?? ''] ?? k.stemKind}</span>
+                </div>
+              ))}
+            </Fragment>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // §33 块通栏块:长素材切出的整小节块,挂在歌下面(复用 stemblk/srow 语汇)。每块可拖/选/试听/再分 stem。
+  const renderBlocks = (host: LoopView, blocks: LoopView[]) => {
+    const open = !collapsed[host.id];
+    return (
+      <div className="stemblk">
+        <div className="stemblk-h" onClick={() => toggle(host.id)}>
+          <span className="cv">{open ? '▾' : '▸'}</span>
+          <span className="lbl">Blocks</span>
+          <span className="cnt">{blocks.length} blocks{open ? '' : ' · collapsed'}</span>
+        </div>
+        {open && blocks.map((bk) => {
+          const bSep = bk.stemStatus === 'separating';
+          const bStems = (bk.stems ?? []).filter((k) => k.stemKind != null);
+          const bHasStems = bStems.length > 0;
+          const bSepReady = !bSep && !bHasStems && bk.stemStatus !== 'failed'; // 结构可分;服务是否在跑由按钮 disabled 控制
+          const label = bk.sectionLabel || `Block ${(bk.sliceIndex ?? 0) + 1}`;
+          return (
+            <Fragment key={bk.id}>
+              <div className={'srow' + (bSepReady ? ' can-sep' : '') + (p.selectedLoopId === bk.id ? ' vsel' : '')} style={{ ['--c']: bk.color } as React.CSSProperties} {...drag(bk.id)} onClick={() => p.onSelect(bk.id)} title="Block · click to edit · drag to track / pad">
+                <button className={'pl' + (p.warmingId === bk.id || (p.selectedLoopId === bk.id && p.previewing) ? ' on' : '')} title="Preview" onClick={(e) => { e.stopPropagation(); p.onAudition(bk.id); }}>{playInner(bk.id)}</button>
+                <span className="sdot" />
+                <span className="sname">{label}</span>
+                <span className="vmeta">{fmtBars(bk.bars)} bar</span>
+                {bSepReady && <button className="vsep sm" disabled={p.stemServiceUp === false} title={p.stemServiceUp === false ? 'Separation service not running — start stem-service' : 'Separate stems (local Demucs)'} onClick={(e) => { e.stopPropagation(); p.onSeparate(bk.id); }}>Separate</button>}
+              </div>
+              {bSep && (<div className="srow-busy" aria-busy="true"><span className="sg-spin sm" aria-hidden="true" /><span>Separating · local Demucs</span></div>)}
+              {!bSep && bk.stemStatus === 'failed' && !bHasStems && (<div className="srow-note" title="Tap to retry" onClick={(e) => { e.stopPropagation(); p.onSeparate(bk.id); }}>Separation failed · tap to retry</div>)}
+              {bHasStems && renderStems(bk)}
+            </Fragment>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <>
       <section className="br-sec">
@@ -180,9 +264,11 @@ export function LoopManager(p: Props) {
           {gens.length === 0 && <div className="muted small" style={{ padding: '6px 2px' }}>Nothing yet — hit Generate above</div>}
           {gens.map((g) => {
             const isUp = g.source === 'upload';
-            const busy = g.status === 'generating' || g.status === 'streaming' || g.status === 'uploading' || g.status === 'detecting';
-            const phases = isUp ? UPLOAD_PHASES : GEN_PHASES;
-            const order = isUp ? UPLOAD_ORDER : GEN_ORDER;
+            const busy = g.status === 'generating' || g.status === 'streaming' || g.status === 'uploading' || g.status === 'detecting' || g.status === 'chopping';
+            // §33:Song(advanced)或正在切块 → 阶段条多一段 Chop。
+            const willChop = g.mode === 'advanced' || g.status === 'chopping';
+            const phases = isUp ? (willChop ? UPLOAD_PHASES_CHOP : UPLOAD_PHASES) : (willChop ? GEN_PHASES_CHOP : GEN_PHASES);
+            const order = isUp ? (willChop ? UPLOAD_ORDER_CHOP : UPLOAD_ORDER) : (willChop ? GEN_ORDER_CHOP : GEN_ORDER);
             return (
               <div key={g.id} className={'gencard' + (isUp ? ' up' : '')}>
                 <div className="gc-head">
@@ -213,6 +299,7 @@ export function LoopManager(p: Props) {
                       <span>{
                         g.status === 'uploading' ? 'Uploading file…'
                           : g.status === 'detecting' ? 'Detecting tempo + key…'
+                          : g.status === 'chopping' ? 'Chopping into blocks…'
                           : g.sounds.length > 0 ? `${g.sounds.length}/2 variants in` : 'Generating 2 variants…'
                       }</span>
                       {p.onCancelGen && <button className="gb-btn danger gcancel" onClick={() => p.onCancelGen!(g.id)} title={isUp ? 'Cancel & discard this upload' : 'Cancel & discard this generation'}>Cancel</button>}
@@ -232,16 +319,21 @@ export function LoopManager(p: Props) {
                 )}
 
                 {g.sounds.map((s, i) => {
+                  const kids = s.stems ?? [];
+                  // §33 子 sound 两类:块(sliceIndex 非空,挂歌下)vs 乐器 stem(stemKind 非空)。
+                  const blocks = kids.filter((k) => k.sliceIndex != null).sort((a, b) => (a.sliceIndex ?? 0) - (b.sliceIndex ?? 0));
+                  const stems = kids.filter((k) => k.sliceIndex == null && k.stemKind != null);
                   const separating = s.stemStatus === 'separating';
-                  const stems = s.stems ?? [];
+                  const hasBlocks = blocks.length > 0;
                   const hasStems = stems.length > 0;
-                  const open = !collapsed[s.id];
-                  const canSep = !separating && !hasStems && s.stemStatus !== 'failed' && p.stemServiceUp !== false;
+                  // 「结构上可分」(无 stem/块、不在分、未失败)与「服务在跑」拆开:服务没跑时按钮照样渲染、只灰掉,不再整个消失。
+                  const sepReady = !separating && !hasStems && !hasBlocks && s.stemStatus !== 'failed';
+                  const serviceDown = p.stemServiceUp === false;
                   return (
                     <div key={s.id} className="vcard">
                       {/* 变体行(主角) */}
                       <div
-                        className={'vrow' + (canSep ? ' can-sep' : '') + (p.selectedLoopId === s.id ? ' vsel' : '')}
+                        className={'vrow' + (sepReady ? ' can-sep' : '') + (p.selectedLoopId === s.id ? ' vsel' : '')}
                         {...drag(s.id)}
                         onClick={() => p.onSelect(s.id)}
                         title="Click to edit (Del to delete) · drag to track / pad"
@@ -250,7 +342,7 @@ export function LoopManager(p: Props) {
                         <MiniWave peaks={p.peaks?.[s.id]} className="vwave" />
                         <span className="vname">#{i + 1}</span>
                         <span className="vmeta">{fmtDur(s.durationSec)} · {fmtBars(s.bars)} bar</span>
-                        {canSep && <button className="vsep" title="Separate stems (local Demucs)" onClick={(e) => { e.stopPropagation(); p.onSeparate(s.id); }}>Separate</button>}
+                        {sepReady && <button className="vsep" disabled={serviceDown} title={serviceDown ? 'Separation service not running — start stem-service' : 'Separate stems (local Demucs)'} onClick={(e) => { e.stopPropagation(); p.onSeparate(s.id); }}>Separate</button>}
                       </div>
 
                       {separating && (
@@ -259,71 +351,12 @@ export function LoopManager(p: Props) {
                           <div className="gb-bar"><i /></div>
                         </div>
                       )}
-                      {!separating && s.stemStatus === 'failed' && !hasStems && (
+                      {!separating && s.stemStatus === 'failed' && !hasStems && !hasBlocks && (
                         <div className="vc-note err" title="Tap to retry" onClick={(e) => { e.stopPropagation(); p.onSeparate(s.id); }}>Separation failed · tap to retry</div>
                       )}
 
-                      {/* 分轨 = 通栏块 */}
-                      {hasStems && (
-                        <div className="stemblk">
-                          <div className="stemblk-h" onClick={() => toggle(s.id)}>
-                            <span className="cv">{open ? '▾' : '▸'}</span>
-                            <span className="lbl">Stems</span>
-                            <span className="cnt">{stems.length} stems{open ? '' : ' · collapsed'}</span>
-                            <button
-                              className="re"
-                              disabled={separating || p.stemServiceUp === false}
-                              title={p.stemServiceUp === false ? 'Separation service not running' : 'Re-separate'}
-                              onClick={(e) => { e.stopPropagation(); p.onSeparate(s.id); }}
-                            >↻</button>
-                          </div>
-                          {open && stems.map((st) => {
-                            // §29:只有 drums stem 能再拆 → kick/snare/toms/hihat 孙轨
-                            const isDrums = st.stemKind === 'drums';
-                            const kit = st.stems ?? [];
-                            const hasKit = kit.length > 0;
-                            const kitSep = st.stemStatus === 'separating';
-                            const canKit = isDrums && !hasKit && !kitSep && st.stemStatus !== 'failed' && p.stemServiceUp !== false;
-                            return (
-                              <Fragment key={st.id}>
-                                <div
-                                  className={'srow' + (canKit ? ' can-sep' : '') + (p.selectedLoopId === st.id ? ' vsel' : '')}
-                                  style={{ ['--c']: st.color } as React.CSSProperties}
-                                  {...drag(st.id)}
-                                  onClick={() => p.onSelect(st.id)}
-                                  title="Stem · drag to track / pad"
-                                >
-                                  <button className={'pl' + (p.warmingId === st.id || (p.selectedLoopId === st.id && p.previewing) ? ' on' : '')} title="Preview" onClick={(e) => { e.stopPropagation(); p.onAudition(st.id); }}>{playInner(st.id)}</button>
-                                  <span className="sdot" />
-                                  <span className="sname">{STEM_LABEL[st.stemKind ?? ''] ?? st.stemKind}</span>
-                                  {canKit && <button className="vsep sm" title="Split drum kit (kick / snare / toms / cymbals)" onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>Split kit</button>}
-                                  {hasKit && <button className="re" disabled={kitSep || p.stemServiceUp === false} title={p.stemServiceUp === false ? 'Separation service not running' : 'Re-split kit'} onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>↻</button>}
-                                </div>
-                                {kitSep && (
-                                  <div className="srow-busy" aria-busy="true"><span className="sg-spin sm" aria-hidden="true" /><span>Splitting kit · local Demucs</span></div>
-                                )}
-                                {!kitSep && st.stemStatus === 'failed' && !hasKit && (
-                                  <div className="srow-note" title="Tap to retry" onClick={(e) => { e.stopPropagation(); p.onSeparate(st.id); }}>Kit split failed · tap to retry</div>
-                                )}
-                                {hasKit && kit.map((k) => (
-                                  <div
-                                    key={k.id}
-                                    className={'srow srow-sub' + (p.selectedLoopId === k.id ? ' vsel' : '')}
-                                    style={{ ['--c']: k.color } as React.CSSProperties}
-                                    {...drag(k.id)}
-                                    onClick={() => p.onSelect(k.id)}
-                                    title="Drum piece · drag to track / pad"
-                                  >
-                                    <button className={'pl' + (p.warmingId === k.id || (p.selectedLoopId === k.id && p.previewing) ? ' on' : '')} title="Preview" onClick={(e) => { e.stopPropagation(); p.onAudition(k.id); }}>{playInner(k.id)}</button>
-                                    <span className="sdot" />
-                                    <span className="sname">{STEM_LABEL[k.stemKind ?? ''] ?? k.stemKind}</span>
-                                  </div>
-                                ))}
-                              </Fragment>
-                            );
-                          })}
-                        </div>
-                      )}
+                      {/* §33 块组(挂歌下)/ 否则乐器分离组 */}
+                      {hasBlocks ? renderBlocks(s, blocks) : renderStems(s)}
                     </div>
                   );
                 })}

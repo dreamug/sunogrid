@@ -146,6 +146,9 @@ export function sessionBars(s: Session): number {
   return s.instruments.reduce((m, i) => Math.max(m, instrumentBars(i)), 1);
 }
 
+/** §26.11 该 session 当前激活(`enabled`=随主走带量化播放)的乐器;徽章计数 + hover 名单共用。solo 是瞬态隔离、不计在内。 */
+export const activeInstruments = (s: Session): Instrument[] => s.instruments.filter((i) => i.enabled);
+
 export const defaultMixer = (): Mixer => ({ gainDb: 0, pan: 0, eq: { lowDb: 0, midDb: 0, highDb: 0 } });
 
 /** 把 Clip 的 per-片 mixer 字段拼成 Mixer(喂 MixerStrip);缺省补 0。 */

@@ -164,6 +164,11 @@ model Sound {
   stemKind      String? // 子 stem:drums|bass|other|vocals|guitar|piano
   stemStatus    String? // 父上分离状态:separating|done|failed(null=未分离)
 
+  // §33 长素材切块:块(block)= 整首切出的整小节子 Sound;parentSoundId=歌、共享歌的 assetId(零新字节)。
+  // 判别:sliceIndex 非空 = block;stemKind 非空 = stem;都空 = 顶层/歌。
+  sliceIndex   Int? // 块在歌内的序(0..N-1)
+  sectionLabel String? // intro|verse|hook…(结构感知 v2 回填;v1 null → UI 显 Block N)
+
   assetId String
   asset   Asset  @relation("SoundSource", fields: [assetId], references: [id])
 

@@ -31,15 +31,29 @@ export async function stemServiceHealth(): Promise<StemHealth | null> {
 export async function separateSound(soundId: string) {
   const parent = await db.sound.findUnique({ where: { id: soundId }, include: { asset: true } });
   if (!parent) throw new Error('sound not found');
-  // 开一道窄缝:鼓轨能二段拆,其它 stem 不行。
+  // 开一道窄缝:顶层 sound 与 §33 块都是整混 → model='full'(分 6 stem);鼓轨能二段拆;其它 stem 不行。
+  // 块(sliceIndex 非空)虽有 parentSoundId(父=歌),但它是整混的一段,不是乐器 stem → 当顶层处理。
+  const isBlock = parent.sliceIndex != null;
   let model: 'full' | 'drums';
-  if (!parent.parentSoundId) {
+  if (!parent.parentSoundId || isBlock) {
     model = 'full';
   } else if (parent.stemKind === 'drums') {
     model = 'drums';
   } else {
     throw new Error("Only the drums stem can be split further");
   }
+  // §33 优化:块共享歌的整首 asset → 只把块那一段 [startSec,endSec] 喂 Demucs(省 ~5×)。
+  // stem asset 就是这一段 → 块 stem 的窗口重置成 [0, blockLen](不能继承块在歌坐标里的窗口)。
+  const pa = (parent.analysis || {}) as Record<string, number>;
+  const pw = (parent.warp || {}) as Record<string, number>;
+  const sr = parent.sampleRate || 48000;
+  // warp 优先(与 regionFromSound / ChopView / 播放渲染一致):块被 ClipEditor trim 后只更新 warp、analysis 留旧,
+  // 读 analysis 会按未裁的原窗口分离 → stem 和用户看到的块对不上。
+  const segStart = pw.startSample ?? pa.startSample ?? 0;
+  const segEnd = pw.endSample ?? pa.endSample ?? 0;
+  const blockLen = Math.max(1, segEnd - segStart);
+  const blockBars = pw.bars ?? pa.bars ?? 1;
+  const segRange = isBlock && segEnd > segStart ? { startSec: segStart / sr, endSec: segEnd / sr } : {};
 
   const health = await stemServiceHealth();
   if (!health) throw new Error('分离服务没在跑:到 stem-service/ 执行 ./run.sh');
@@ -52,7 +66,7 @@ export async function separateSound(soundId: string) {
     const res = await fetch(`${STEM_URL}/separate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ inputPath: storageAbs(parent.asset.path), outDir, model }),
+      body: JSON.stringify({ inputPath: storageAbs(parent.asset.path), outDir, model, ...segRange }),
       signal: AbortSignal.timeout(10 * 60 * 1000),
     });
     if (!res.ok) {
@@ -75,8 +89,13 @@ export async function separateSound(soundId: string) {
       durationSec: parent.durationSec,
       sampleRate: parent.sampleRate,
       channels: parent.channels,
-      ...(parent.analysis != null ? { analysis: parent.analysis as object } : {}),
-      ...(parent.warp != null ? { warp: parent.warp as object } : {}),
+      ...(isBlock
+        // 块 stem:asset = 块那一段 → 窗口 [0, blockLen],继承块的 bars(锁相)。
+        ? { analysis: { ...pa, startSample: 0, endSample: blockLen, bars: blockBars, exactBars: blockBars, onsets: [] }, warp: { startSample: 0, endSample: blockLen, bars: blockBars, semitones: 0, warpedBy: 'auto' } }
+        : {
+            ...(parent.analysis != null ? { analysis: parent.analysis as object } : {}),
+            ...(parent.warp != null ? { warp: parent.warp as object } : {}),
+          }),
     };
 
     const children = [];

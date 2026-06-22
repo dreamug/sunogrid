@@ -107,3 +107,26 @@ export function estimateKey(channels: Float32Array[], sampleRate: number): KeyEs
   }
   return { key: best.key, confidence: Math.round(Math.max(0, best.score) * 100) / 100 };
 }
+
+// §34 文件名元数据:Splice 等命名里编码了 BPM/调式(`NH_IAP_100_..._Dmaj`、`SS_AXR2_111_..._D#m`)。
+// 剪贴板只带文件本体、带不出 Splice 的 metadata 列,故解析文件名是找回这俩值的唯一路;
+// 拿来当检测种子可绕开最不可靠的 estimateTempo/estimateKey(见 studioGens.runUpload),解析不出再 DSP 兜底。
+const FLAT_TO_SHARP: Record<string, string> = { Db: 'C#', Eb: 'D#', Gb: 'F#', Ab: 'G#', Bb: 'A#', Cb: 'B', Fb: 'E' };
+
+/** 从文件名解析 BPM + 调式(输出对齐 estimateKey:'D' / 'D#m')。解析不出的字段留 undefined → 调用方 DSP 兜底。 */
+export function parseNameMeta(filename: string): { bpm?: number; key?: string } {
+  const base = filename.replace(/\.[^.]+$/, '');
+  const toks = base.split(/[_\-\s.]+/).filter(Boolean);
+  let bpm: number | undefined;
+  for (const t of toks) { // 纯数字 token 且落在合理 BPM 区间 —— 纯数字才躲得开 `AXR2` 里粘连的 "2"
+    if (/^\d{2,3}$/.test(t)) { const n = +t; if (n >= 40 && n <= 220) { bpm = n; break; } }
+  }
+  let key: string | undefined;
+  for (const t of toks) { // 调式在尾巴 → 取最靠后一个匹配;要求大写根音 + maj/min/m 后缀,避开 "am"/"em" 等英文词误判
+    const m = /^([A-G])([#b]?)(maj|min|m)$/.exec(t);
+    if (!m) continue;
+    const root = m[2] === 'b' ? (FLAT_TO_SHARP[m[1] + 'b'] ?? m[1]) : m[1] + m[2]; // 降号归一到升号(对齐 ROOTS)
+    key = root + (m[3] === 'maj' ? '' : 'm'); // maj→大调(无后缀);min/m→小调
+  }
+  return { bpm, key };
+}

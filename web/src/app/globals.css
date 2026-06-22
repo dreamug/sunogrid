@@ -416,7 +416,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .gb-btn:hover { border-color:var(--acc); color:var(--acc); }
 .gb-btn.danger:hover { border-color:var(--danger); color:var(--danger); }
 /* §27 上传样本:全走系统暖色,不引入新色相 —— 进度态用既有琥珀 --queue(同生成的 in-progress),标记/按钮用中性 + --acc hover */
-.gdot.uploading, .gdot.detecting { background:var(--queue); }
+.gdot.uploading, .gdot.detecting, .gdot.chopping { background:var(--queue); }
 .up-tag { flex:none; font-size:11px; line-height:1; color:var(--tx-2); }
 /* §27 上传:Library 标题条右侧的紧凑按钮(margin-left:auto 推到行尾;沿用 .gb-btn 中性按钮语汇)*/
 .up-btn { display:inline-flex; align-items:center; gap:5px; margin-left:auto; box-sizing:border-box; font:inherit; font-size:10px; line-height:1; color:var(--tx-2); background:transparent; border:1px solid var(--line-2); border-radius:var(--r); padding:3px 9px; cursor:pointer; }
@@ -443,7 +443,8 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .vname { flex:none; font-size:12px; color:var(--tx); font-variant-numeric:tabular-nums; }
 .vmeta { margin-left:auto; font-size:10px; color:var(--tx-3); font-variant-numeric:tabular-nums; white-space:nowrap; }
 .vsep { display:none; margin-left:auto; font:inherit; font-size:11px; line-height:1; color:var(--tx-2); background:transparent; border:none; padding:2px 4px; cursor:pointer; }
-.vsep:hover { color:var(--acc); }
+.vsep:hover:not(:disabled) { color:var(--acc); }
+.vsep:disabled { opacity:.4; cursor:default; color:var(--tx-3); } /* sidecar 没跑:按钮仍在(hover 可见),但灰掉 + tooltip 提示,不再整个消失 */
 .vrow.can-sep:hover .vmeta { display:none; }
 .vrow.can-sep:hover .vsep { display:inline-flex; }
 
@@ -494,6 +495,37 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .ed-decode-wave { height:140px; }
 .ed-decode-lab { font-size:11px; color:var(--tx-3); }
 .ed-wrap { display:flex; flex-direction:column; }
+
+/* §33.6 切块总览(ChopView):整曲波形 + 块段;私有 cv-* 前缀避撞 .on/.sel */
+.cv-wrap { display:flex; flex-direction:column; height:100%; min-height:200px; }
+.cv-bar { display:flex; align-items:center; gap:8px; height:38px; flex:none; padding:0 12px; border-bottom:1px solid var(--line); }
+.cv-ic { color:var(--acc); font-size:14px; }
+.cv-title { font-size:13px; color:var(--tx); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+.cv-meta { font-size:11px; color:var(--tx-3); font-family:var(--mono); white-space:nowrap; }
+.cv-spacer { flex:1; }
+.cv-lab { font-size:11px; color:var(--tx-3); }
+.cv-seg { display:inline-flex; border:1px solid var(--line); border-radius:var(--r); overflow:hidden; background:var(--bg-0); }
+.cv-seg button { font:inherit; font-size:11px; padding:3px 10px; background:transparent; color:var(--tx-2); border:none; border-left:1px solid var(--line); cursor:pointer; }
+.cv-seg button:first-child { border-left:none; }
+.cv-seg button.on { background:var(--on); color:var(--tx); }
+.cv-seg button:hover:not(:disabled):not(.on) { color:var(--tx); }
+.cv-seg button:disabled { opacity:.45; cursor:default; }
+.cv-keep { font-size:11px; color:var(--tx-3); font-family:var(--mono); white-space:nowrap; }
+.cv-stage { position:relative; flex:1; min-height:96px; margin:11px 12px 5px; border:1px solid var(--line-2); border-radius:var(--r); background:var(--bg-0); overflow:hidden; }
+.cv-wave { position:absolute; inset:0; width:100%; height:100%; color:#a89a8c; }
+.cv-wave path { fill:currentColor; }
+.cv-wave path.cv-base { fill:none; stroke:var(--line-2); stroke-width:1; }
+.cv-seg-ov { position:absolute; top:0; bottom:0; border-right:1px solid var(--line-2); cursor:pointer; }
+.cv-seg-ov:last-of-type { border-right:none; }
+.cv-seg-ov:hover { background:rgba(255,255,255,.04); }
+.cv-seg-ov.sel { box-shadow:inset 0 0 0 2px var(--acc); background:var(--acc-dim); }
+.cv-seg-lab { position:absolute; top:5px; left:6px; display:flex; flex-direction:column; gap:1px; font-size:11px; color:var(--tx-2); pointer-events:none; max-width:calc(100% - 24px); overflow:hidden; }
+.cv-seg-lab i { font-style:normal; font-size:10px; color:var(--tx-3); font-family:var(--mono); }
+.cv-x { position:absolute; top:4px; right:4px; width:16px; height:16px; display:none; align-items:center; justify-content:center; background:var(--bg-2); border:1px solid var(--line-2); border-radius:3px; color:var(--tx-3); font-size:10px; line-height:1; cursor:pointer; }
+.cv-seg-ov:hover .cv-x { display:flex; }
+.cv-x:hover { color:var(--danger); border-color:var(--danger); }
+.cv-origin { position:absolute; top:0; bottom:0; width:2px; background:var(--acc); pointer-events:none; }
+.cv-hint { flex:none; font-size:10px; color:var(--tx-3); padding:0 12px 9px; }
 .ed-toplab { display:flex; align-items:center; gap:10px; padding:8px 16px 0; }
 /* 两栏:左=参数(两列),右=波形/trim 窗口(Ableton 式) */
 .we { display:flex; align-items:stretch; }
@@ -554,7 +586,8 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .we-compact .we-stage { flex:1; height:auto; min-height:140px; }  /* 波形铺满整个高度;浮层加宽后高度可矮些 */
 
 /* —— 认证页:左品牌(波形 hero)/ 右表单 双栏面板,呼应 pad 已播 fill —— */
-.auth { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+.auth { position:relative; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; overflow:hidden; }
+.auth-particles { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:0; }
 .auth-shell { width:100%; max-width:840px; display:grid; grid-template-columns:1.04fr .96fr;
   background:var(--bg-1); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
 
@@ -595,7 +628,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .auth-alt { margin-top:18px; font-size:12px; color:var(--tx-2); text-align:center; }
 
 /* 登录面板 + 插件 block 竖排;.auth 居中此栈 */
-.auth-stack { display:flex; flex-direction:column; gap:14px; width:100%; max-width:840px; }
+.auth-stack { position:relative; z-index:1; display:flex; flex-direction:column; gap:14px; width:100%; max-width:840px; }
 
 /* 插件 block:下载 / 安装步骤 / 学习用途风险声明,三段细线分隔 */
 .auth-ext { width:100%; background:var(--bg-1); border:1px solid var(--line); border-radius:6px; overflow:hidden; }
@@ -752,6 +785,9 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 /* 顶栏标题改名框:hug 内容(随字长),不撑开顶栏。 */
 .song-ctl-l input { font:inherit; font-size:11px; font-weight:500; color:var(--tx); background:var(--bg-0); border:1px solid var(--acc); border-radius:var(--r); padding:0 5px; height:20px; box-sizing:border-box; outline:none; width:auto; min-width:60px; max-width:180px; field-sizing:content; }
 .song-ctl-sep { width:1px; height:16px; background:var(--line); }
+/* §26 顶栏标题复制按钮:置标题最前 · 复制当前 scene(只留 1 个 repeat,插在其后)。 */
+.song-dup { flex:0 0 auto; width:18px; height:18px; padding:0; display:flex; align-items:center; justify-content:center; font-size:11px; line-height:1; background:var(--bg-3); color:var(--tx-2); border:1px solid var(--line-2); border-radius:var(--r); cursor:pointer; }
+.song-dup:hover { color:var(--tx); border-color:var(--tx-3); }
 .song-progs { display:flex; gap:4px; }
 /* §26.v3 X/Y 轴切换:压到和 .fx-chip 一样高(20px),与左侧 4 选 1 一排齐高(默认 .seg.sm 偏高 3px)。 */
 .song-ctl .seg.sm button { font-size:10px; padding:3px 8px; }
@@ -800,6 +836,13 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .sblk-nums:last-child { border-bottom:0; } /* §26.10 automation 隐藏时数字条成末元素 → 去掉自身下边框,免和 .sblock 外层下边框叠成双线 */
 .sblk-rn { position:absolute; top:4px; z-index:1; font-size:9px; font-variant-numeric:tabular-nums; color:color-mix(in srgb, var(--c) 42%, var(--tx-2)); pointer-events:none; } /* 数字字体跟系统(非 mono) */
 .sblk-tick { position:absolute; top:0; bottom:0; width:1px; background:color-mix(in srgb, var(--c) 22%, transparent); pointer-events:none; } /* repeat 分割线浅(弱于 session 间界线) */
+/* §26.11 激活乐器计数:钉数字条左下(=落 repeat 1,与 zoom 无关) · 带框胶囊以区别于裸 repeat 序号 · hover 出名单(浮层走 portal,见 SongInstrumentCount)。 */
+.sblk-icount { position:absolute; left:4px; bottom:5px; z-index:4; box-sizing:border-box; display:inline-flex; align-items:center; justify-content:center;
+  min-width:15px; height:15px; padding:0 5px; border-radius:8px; cursor:default; pointer-events:auto;
+  background:color-mix(in srgb, var(--c) 32%, var(--bg-0)); border:1px solid color-mix(in srgb, var(--c) 48%, var(--line));
+  color:color-mix(in srgb, var(--c) 58%, var(--tx)); font-size:10px; font-weight:500; font-variant-numeric:tabular-nums; line-height:1; }
+.sblk-icount.zero { opacity:.5; } /* 0 激活=变暗,不隐藏(栏位稳定) */
+.sblock.sblk-sel .sblk-icount { box-shadow:0 0 0 1px rgba(255,255,255,.10); } /* 选中态微提 */
 /* +/−:最后一个 repeat 格右侧 · 贴右/上/下边 · 纵向撑满数字条 · 仅选中块。逻辑不变(+ 加 repeat;n>1 才有 −)。 */
 .sblk-reps { position:absolute; top:0; right:0; bottom:0; z-index:3; display:flex; flex-direction:column; width:18px; }
 .sblk-reps button { flex:1 1 0; display:flex; align-items:center; justify-content:center; padding:0; line-height:1; font-size:13px; background:color-mix(in srgb, var(--c) 30%, var(--bg-1)); border:none; border-left:1px solid color-mix(in srgb, var(--c) 42%, var(--line)); color:#ece9e3; cursor:pointer; }
