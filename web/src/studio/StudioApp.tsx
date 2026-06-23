@@ -303,17 +303,25 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (!buf) { e.clearInstrument(inst.id); setPeaks((p) => { const q = { ...p }; delete q[inst.id]; return q; }); return; }
       if (seamless && e.hasVoice(inst.id)) {
         e.swapBuffer(inst.id, buf, instrumentBars(inst)); // 在播时:下一个小节边界无缝接管,不断声
-      } else if (!seamless) {
+      } else {
+        // 非 seamless,**或** seamless 但引擎里还没有这件乐器的 voice —— 后者过去只重算波形、不建 voice,是个坑:
+        //   collage 建 voice 的那次(seamless=false,addPiece/addEmpty/粘贴)build 还在 bake 时,若被随后一次编辑
+        //   (rebake/move/改片/调 mixer/拖 loop 杆,均 seamless=true)作废(L302 判废发生在 loadInstrument 之前),
+        //   接管的 seamless build 因 !hasVoice 落到这里 → 永远不建 voice;于是 pad 有波形但引擎无 voice,
+        //   激活(setEnabled)因 `if(!v) return` 空操作、按 play 不出声,**要刷新才好**(见 'bug' 复盘)。改为一并建 voice。
+        //   建 voice 本身不漏声:下面 soundingNow/arm 闸决定 setEnabled(量化起声)还是只 setWantOn(记意图);
+        //   Song 查看非播放块时落到 setWantOn,voice 留 'off' 不点响(§20 常驻口径不破,真正播到时 loadSessionAdditive 会以 clearInstrument 重灌)。
         e.loadInstrument(inst.id, buf, instrumentBars(inst), inst.mixer, inst.sends);
         // arm 且该乐器属于「正在出声的块」→ 即时量化起声;否则只记意图(setWantOn),到换场边界由 swapVoicesAt 按 wantOn 起。
         // §20:Song 钉住查看非播放块时编辑/填充/加片一件 enabled 乐器,会走 arm=true 这条全量重载 —— 若直接 setEnabled 会把
         //   非出声块的乐器凭空点响(声音泄漏)。startPlayback 的 loadSession 即便落到 setWantOn 也无碍:随后 startTransport 按 wantOn 全量起声。
         const soundingNow = playModeRef.current !== 'song' || sessionIdxRef.current === playingIdxRef.current;
-        if (arm && soundingNow) e.setEnabled(inst.id, inst.enabled); // 活动场景:走带在跑时即量化起声
-        else e.setWantOn(inst.id, inst.enabled);      // §20 预载非活动场景 / 查看非播放块:只记意图,到换场边界再起
+        // 取 sessionsRef 里**最新**的 enabled,而非这次异步 build 捕获时的旧 inst.enabled:bake 期间用户点了激活 →
+        //   捕获值已过期,旧值会把刚点的激活回写覆盖掉(同源的次生 desync)。乐器找不到(已删)则回落捕获值。
+        const liveEnabled = sessionsRef.current.flatMap((s) => s.instruments).find((i) => i.id === inst.id)?.enabled ?? inst.enabled;
+        if (arm && soundingNow) e.setEnabled(inst.id, liveEnabled); // 活动场景:走带在跑时即量化起声
+        else e.setWantOn(inst.id, liveEnabled);      // §20 预载非活动场景 / 查看非播放块:只记意图,到换场边界再起
       }
-      // seamless 但该乐器不在引擎(Song 模式查看非播放场景时编辑它)→ 只重算下方波形、**不建 voice / 不出声**;
-      // 该块真正播到时由 loadSession(Additive) 以最新数据建出。否则会在别的块播放途中把这件乐器凭空点响(声音泄漏 + 违反 §20 常驻口径)。
       // sample:pad 波形 = 源的 trim 区(与 ClipEditor 同一段,所见=所见);collage:乐器层 = 整条 baked loop。
       let peaks: number[];
       if (inst.payload.kind === 'sample') {

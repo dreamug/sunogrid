@@ -449,9 +449,9 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     draggingRef.current = true;
     if (mode === 'fadeStart' || mode === 'fadeEnd') setFadeDragging(true);
     drag.current = { mode, grabSrcSec: srcSecAt(ob), anchorSrcSec0: anchorSrcSec, secPerBar0: secPerBar, grabBarOffset: trimStartBar - ob, loopLen0: trimEndBar - trimStartBar };
-    applyDrag(e.clientX);
+    applyDrag(e.clientX, e.metaKey || e.ctrlKey);
   };
-  const applyDrag = (clientX: number) => {
+  const applyDrag = (clientX: number, gridMod = false) => {
     const d = drag.current;
     const stage = stageRef.current;
     if (!d || !stage) return;
@@ -460,7 +460,16 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     const x = clientX - stage.getBoundingClientRect().left;
     const ob = vStart + x / pxPerBar;
 
-    if (d.mode === 'trimStart') {
+    if (d.mode === 'trimStart' && gridMod) {
+      // §28.9 ⌘/Ctrl:从左裁剪 —— 终点钉死、loop 长度改变;吸附基准 = 固定终点(原点是移动中的起点,不能用 snapGrid)。
+      const want = snap ? trimEndBar - Math.round((trimEndBar - ob) / gridBars) * gridBars : ob;
+      const minStart = Math.max(0, maxBars != null ? trimEndBar - maxBars : 0); // 往左拉 = loop 变长,受 collage 空档约束 + 不越 0
+      const ns = Math.min(trimEndBar - gridBars, Math.max(minStart, want)); // 至少留一格,不越终点
+      setTrimStartBar(ns);
+      const nm = (trimEndBar - ns) / 2; // loop 变短 → fade 不得超过新后半(同 trimEnd)
+      setFadeOutBars((f) => Math.min(f, nm));
+      setFadeSilenceBars((f) => Math.min(f, nm));
+    } else if (d.mode === 'trimStart') {
       // 无极:绿线跟光标连续移动(不吸附);终点等距跟随 → loop 长度不变,整窗在固定波形上滑动。
       const ns = Math.max(0, ob + d.grabBarOffset);
       setTrimStartBar(ns);
@@ -498,7 +507,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   };
   const onMove = (e: React.PointerEvent) => {
     if (menu) return; // §28 右键菜单开着时冻结起播线(光标不再跟手移动)
-    if (drag.current) { applyDrag(e.clientX); return; }
+    if (drag.current) { applyDrag(e.clientX, e.metaKey || e.ctrlKey); return; }
     const cc = clickCand.current; // 移动超过阈值 → 不是点击,取消试听候选
     if (cc && (Math.abs(e.clientX - cc.x) > 4 || Math.abs(e.clientY - cc.y) > 4)) clickCand.current = null;
     // 悬停光标:锚点附近(或按住 Shift 变速)= 横向拖拽箭头;波形身体(可拖出时)= 抓手;其余 = 喇叭(CSS)
@@ -717,7 +726,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
           <div className="we-thumb" style={{ left: thumbLeft + '%', width: thumbW + '%' }} />
         </div>
 
-        <div className="we-hint">Click waveform = preview · drag green line = move start (free) · drag orange anchor = change length · drag the cream dots (top/bottom) = fade-out tail · Shift+drag = stretch · scroll / Alt+scroll = pan / zoom</div>
+        <div className="we-hint">Click waveform = preview · drag green line = move start (free) · ⌘/Ctrl+drag green line = trim start (snapped, end fixed) · drag orange anchor = change length · drag the cream dots (top/bottom) = fade-out tail · Shift+drag = stretch · scroll / Alt+scroll = pan / zoom</div>
       </div>
   );
 

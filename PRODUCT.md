@@ -1014,6 +1014,15 @@ WAV 可达数十 MB,base64 over JSON 膨胀 ~33% 不划算 → 新端点收 `mul
 **实测验证(Chrome 注入)**:① 连点 A/B/A/B 不再出现 `SWAP`、无孤儿、单 player 干净切换;② 注入真 `auditionSwap` 后 `old` 进 `fading` 仍 `started`,`stopAudition` 后 `old` 变 `stopped`+`disposed`、`fading` 清空、无任何 player 残留 `started`;③ 空格停止后 `auditionId=null`、不误启走带。
 **§15/§16 合规**:`auditionFading` 纯瞬态;`editSoundRegion` 早退反而**减少**了无意义的 undo 压栈/落库(更合规)。
 
+### 28.9 ⌘/Ctrl 拖起始线 = 独立左裁剪(网格吸附,终点钉死)—— 🚧 设计 · 2026-06-24
+**动机**:此前起始线(绿)拖动恒为**整窗滑动**(loop 长度不变、终点等距跟随,见 [`applyDrag` trimStart 分支](web/src/studio/ui/WarpEditor.tsx:463)),配合 §28.4「Set as start 也是整窗平移」(2026-06-21 用户更正)—— 于是**左边没有任何"裁剪"操作**:右边橙锚能 resize,左边只能滑。补一个 **⌘(Mac)/Ctrl(Win) + 拖绿起始线** 的镜像操作。
+**语义**:按住修饰键拖起始线时——
+- **终点钉死不动** → loop 长度**改变**(= 从左裁剪 / resize-from-left,与 `trimEnd` 右裁剪对称);无修饰键仍是整窗滑动(两套语义,修饰键切换)。
+- **吸附网格**(默认绿线拖动是无极的,这是新增能力)。**吸附基准 = 固定的终点**:`newStart = trimEnd − round((trimEnd − ob)/gridBars)·gridBars`(不能复用 `snapGrid`,它原点 = 正在移动的起点,会自相矛盾)→ loop 长度恒为网格整数倍,与 trimEnd 同口径。`snap` 关时直接取 `ob`。
+- **夹紧**(三条,镜像 trimEnd):`newStart ≤ trimEnd − gridBars`(至少留一格);`newStart ≥ max(0, trimEnd − maxBars)`(往左拉 = loop 变长,受 collage 空档 `maxBars` 约束 + outBar 不越 0);loop 变短后 `fadeOut/fadeSilence` 夹到 `(trimEnd − newStart)/2`(同 trimEnd)。
+**实现(集中、低风险)**:`applyDrag(clientX)` 加尾参 `gridMod`,两处调用(`onDown`/`onMove`)传 `e.metaKey || e.ctrlKey`(**实时读** → 拖到一半按下修饰键即切语义,Ableton 风)。仅 `mode==='trimStart'` 时按 `gridMod` 分叉:真 = 左裁剪,假 = 既有整窗滑动。底部 hint 补一句修饰键说明。
+**§15/§16 合规**:纯几何改动,emit 的 `region`(start/end/bars)本就能表达任意起止 → 走既有 200ms 防抖 `onChange`(落库 + 进 undo,§16 口径已含 clip trim/长度),**零新链路、口径不扩**。
+
 ## 29. 鼓二段分离(Drum kit split / drumsep)—— 🚧 实现 · 2026-06-22
 **一句话**:已分离出的 **drums stem 可以再拆一层** —— 用专训鼓模型(drumsep)把鼓轨分成 **kick / snare / toms / cymbals** 四件孙 Sound。**只有鼓能再拆**(bass/other/vocals/guitar/piano 不行);拆出来的孙轨与父鼓轨逐样本对齐 → 继续继承同一条 warp → 仍**天然锁相**,可单独拖 pad/轨。
 
