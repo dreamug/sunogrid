@@ -950,9 +950,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   // 选中乐器 = arrange 上下文(collage)/底部聚焦(sample);切到别的乐器停掉上一个预览。
   const selectInst = (id: string) => {
     eng.current?.stopAudition(); setSelId(id); setLibSel(null);
-    const inst = findInst(sessionsRef.current[sessionIdx], id); // 选中切片乐器且有片 → 自动聚焦最左片(否则清空)
-    const first = inst?.payload.kind === 'collage' && inst.payload.clips.length ? [...inst.payload.clips].sort((a, b) => a.startStep - b.startStep)[0].id : null;
-    setSelClipId(first);
+    setSelClipId(null); // 选中乐器=只选乐器,不预选片:Del/⌘D 作用于乐器本身(与别的 pad 一致,不再先删里面的片)。底部编辑器仍默认展示最左片(arrangeInst 分支里派生,纯展示、arrange 不高亮);点片才真选中 → 此时 Del 删该片。
   };
   const selectPiece = (id: string) => { setSelClipId(id); if (id) setLibSel(null); }; // 点片 → 下方编辑器显示该片;清掉素材聚焦
   // 点素材 = 聚焦到它的预调(底部常驻编辑器显示);选中的是切片乐器时不清它(arrange 浮层留着,只换下方)。
@@ -1988,7 +1986,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
           // ③ 选中切片乐器 + 选了某片 → 该片的 clip(arrange 轨在浮层里)
           if (arrangeInst) {
             const cp = arrangeInst.payload; if (cp.kind !== 'collage') return null;
-            const selPiece = cp.clips.find((c) => c.id === selClipId) ?? null;
+            const selPiece = cp.clips.find((c) => c.id === selClipId) ?? (cp.clips.length ? [...cp.clips].sort((a, b) => a.startStep - b.startStep)[0] : null); // 未显式选片时默认展示最左片(纯展示用;arrange 不高亮它、Del/⌘D 也不作用于它,只作用于乐器)
             const psSound = selPiece ? ctx.soundsById.get(selPiece.soundId) : null;
             if (selPiece && psSound) {
               return (
