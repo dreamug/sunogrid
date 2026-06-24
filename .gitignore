@@ -24,5 +24,10 @@ data/
 storage/
 *.log
 
+# --- 线上部署本地目录 ---
+deploy/ssl/
+stem-service/.torch/
+web/public/downloads/
+
 # --- Claude Code(本地配置 / 会话,不入库) ---
 .claude/
