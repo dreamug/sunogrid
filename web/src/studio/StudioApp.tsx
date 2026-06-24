@@ -1946,7 +1946,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
             }
             return (
               <div className="ed-wrap">
-                <ClipEditor key={'snd-' + libSel} clip={soundToClip(s)} sound={s} targetBpm={ctx.bpm}
+                <ClipEditor key={'snd-' + libSel} clip={soundToClip(s)} sound={s} targetBpm={ctx.bpm} markersReadOnly={playing}
                   initGridBars={gridRef.current.warp} initSnap={gridRef.current.snap} onGridChange={(warp, snap) => saveGrid({ warp, snap })}
                   onChange={(c) => editSoundRegion(libSel, c)}
                   onDragOut={(ev) => { ev.dataTransfer.setData('text/plain', libSel); ev.dataTransfer.effectAllowed = 'copy'; setDragImage(ev, s.name); setDragSoundId(libSel); }}
@@ -1983,7 +1983,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
               </div>
             );
             return (
-              <ClipEditor key={sel.id} clip={clip} sound={s} targetBpm={ctx.bpm} canPreview={!playing}
+              <ClipEditor key={sel.id} clip={clip} sound={s} targetBpm={ctx.bpm} canPreview={!playing} markersReadOnly={playing}
                 initGridBars={gridRef.current.warp} initSnap={gridRef.current.snap} onGridChange={(warp, snap) => saveGrid({ warp, snap })}
                 onChange={(c) => writeSampleClip(sel.id, c)} header={header}
                 mixer={<MixerStrip mixer={sel.mixer} engine={e} voiceId={sel.id} playing={playing} onMixer={(patch, history) => changeMixer(sel.id, patch, !!history)} sends={sel.sends} onSends={(patch, history) => changeSends(sel.id, patch, !!history)} />}
@@ -1999,7 +1999,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
               return (
                 <div className="ed-wrap">
                   <div className="ed-toplab"><span className="sec-l">Slice edit ({arrangeInst.label})</span><span className="muted small">{psSound.name}</span></div>
-                  <ClipEditor key={selPiece.id} clip={selPiece} sound={psSound} targetBpm={ctx.bpm} canPreview={!playing}
+                  <ClipEditor key={selPiece.id} clip={selPiece} sound={psSound} targetBpm={ctx.bpm} canPreview={!playing} markersReadOnly={playing}
                     initGridBars={gridRef.current.warp} initSnap={gridRef.current.snap} onGridChange={(warp, snap) => saveGrid({ warp, snap })}
                     maxBars={roomAt(collageDocView(cp), selPiece.startStep, selPiece.id) / cp.stepsPerBar}
                     mixer={<MixerStrip mixer={clipMixer(selPiece)} onMixer={(patch, history) => setCollagePieceMixer(arrangeInst.id, selPiece.id, patch, !!history)} />}

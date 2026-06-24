@@ -46,6 +46,7 @@ interface ClipEditorProps {
   mixer?: ReactNode;   // 乐器场景传 MixerStrip;库/collage 不传
   header?: ReactNode;  // 乐器场景传 名称+激活LED;其余不传
   canPreview?: boolean;
+  markersReadOnly?: boolean; // §36.5 总走带播放中 → marker 层只读(可见但灰、不可增删拖);trim/变速等照旧
   showTimeMul?: boolean; // 是否显示 ÷2/×2 倍速排(库预调 step1 暂不支持 → false)
   onDragOut?: (e: React.DragEvent) => void; // 给定 → 波形身体可拖出(宿主写 dataTransfer);trim 锚 / Shift 区不触发
   maxBars?: number; // loop 长度上限(collage 片传 = 到下一片的空档);不传 = 无限
@@ -55,7 +56,7 @@ interface ClipEditorProps {
 }
 
 /** studio 唯一的 clip 调整入口。解码 + region↔Clip 映射 + 预览接线都收在这,调用点只管喂 Clip、收 Clip。 */
-export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, preview, mixer, header, canPreview = true, showTimeMul = true, onDragOut, maxBars, initGridBars, initSnap, onGridChange }: ClipEditorProps) {
+export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, preview, mixer, header, canPreview = true, markersReadOnly = false, showTimeMul = true, onDragOut, maxBars, initGridBars, initSnap, onGridChange }: ClipEditorProps) {
   const [audio, setAudio] = useState<{ channels: Float32Array[]; sampleRate: number } | null>(null);
   useEffect(() => {
     let alive = true;
@@ -80,7 +81,7 @@ export function ClipEditor({ clip, sound, targetBpm, beatsPerBar = 4, onChange, 
       initFadeOut={clip.fadeOutBars} initFadeSilence={clip.fadeSilenceBars} initWarpPts={clip.warpPts}
       previewing={preview.previewing} queued={preview.queued} warming={preview.warming} getPhase={preview.getPhase} onPreviewToggle={(_r, sp) => preview.toggle(sp)}
       onChange={(r) => onChange({ ...clip, startSample: r.startSample, endSample: r.endSample, bars: r.bars, semitones: r.semitones, fadeOutBars: r.fadeOutBars || undefined, fadeSilenceBars: r.fadeSilenceBars || undefined, warpPts: r.warpPts && r.warpPts.length ? r.warpPts : undefined })}
-      hideHead compact compactHeader={header} compactMixer={mixer} canPreview={canPreview} onDragOut={onDragOut} maxBars={maxBars}
+      hideHead compact compactHeader={header} compactMixer={mixer} canPreview={canPreview} markersReadOnly={markersReadOnly} onDragOut={onDragOut} maxBars={maxBars}
       initGridBars={initGridBars} initSnap={initSnap} onGridChange={onGridChange}
       timeMul={clip.timeMul ?? 1} onTimeMul={showTimeMul ? (m) => onChange({ ...clip, timeMul: m }) : undefined}
     />
@@ -110,6 +111,7 @@ interface Props {
   timeMul?: number;                         // compact:半/倍速快捷当前值(0.5 / 1 / 2)
   onTimeMul?: (m: number) => void;          // compact:点 1/2·1·2 → 设半/倍速(网格下面那排)
   canPreview?: boolean;                      // compact:预览键是否可用(主走带停=可用;运行时置灰)
+  markersReadOnly?: boolean;                  // §36.5 总走带播放中 → marker 不可增删拖(灰显);trim/变速等照旧
   queued?: boolean;                          // 量化预览等边界 → 波形背景呼吸
   warming?: boolean;                         // ⑥ build buffer 中(出声前)→ 播放键转圈
   onDragOut?: (e: React.DragEvent) => void;  // 波形身体拖出(宿主写 dataTransfer)
@@ -144,7 +146,7 @@ const GRID_OPTS: { label: string; bars: number; tip: string }[] = [
 type DragMode = 'trimStart' | 'trimEnd' | 'stretch' | 'fadeStart' | 'fadeEnd' | 'marker';
 interface DragSnap { mode: DragMode; grabSrcSec: number; anchorSrcSec0: number; secPerBar0: number; grabBarOffset: number; loopLen0: number; markerIdx?: number; }
 
-function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beatsPerBar = 4, initSemitones = 0, initFadeOut = 0, initFadeSilence = 0, initWarpPts, previewing, getPhase, onPreviewToggle, onChange, onReset, hideHead = false, compact = false, compactHeader, compactMixer, timeMul = 1, onTimeMul, canPreview = true, queued = false, warming = false, onDragOut, maxBars, initGridBars, initSnap, onGridChange }: Props) {
+function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beatsPerBar = 4, initSemitones = 0, initFadeOut = 0, initFadeSilence = 0, initWarpPts, previewing, getPhase, onPreviewToggle, onChange, onReset, hideHead = false, compact = false, compactHeader, compactMixer, timeMul = 1, onTimeMul, canPreview = true, markersReadOnly = false, queued = false, warming = false, onDragOut, maxBars, initGridBars, initSnap, onGridChange }: Props) {
   const total = channels[0].length;
   const srcDur = total / sampleRate;
   const beatsBar = beatsPerBar;
@@ -400,10 +402,13 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
       if (mx < -6 || mx > W + 6) continue;
       const hot = drag.current?.mode === 'marker' && drag.current.markerIdx === i;
       const col = hot ? '#e3b53f' : '#c2724f';
-      c.save(); c.setLineDash([2, 3]); c.strokeStyle = col; c.lineWidth = 1;
-      c.beginPath(); c.moveTo(mx, RULER_H); c.lineTo(mx, H); c.stroke(); c.restore();
+      c.save();
+      if (markersReadOnly) c.globalAlpha = 0.4; // §36.5 总走带播放中:marker 灰显,提示不可编辑
+      c.setLineDash([2, 3]); c.strokeStyle = col; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(mx, RULER_H); c.lineTo(mx, H); c.stroke(); c.setLineDash([]);
       c.fillStyle = col;
       c.beginPath(); c.moveTo(mx, RULER_H - 6); c.lineTo(mx + 5, RULER_H + 1); c.lineTo(mx, RULER_H + 8); c.lineTo(mx - 5, RULER_H + 1); c.closePath(); c.fill();
+      c.restore();
     }
 
     // §24 fade 两点(画在最上层)。拖动时显 ½-trim 上限线(两点都不得越过)。无连接线 —— 抛物线即罩层下沿。
@@ -419,7 +424,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     fadeDot(bx(fadeStartBar), fadeTopY, fadeHover === 'start'); // 顶点(圆心在曲线端点):无 fade 时停在结束线顶,供拉出
     if (hasFade) fadeDot(bx(fadeEndBar), fadeBotY, fadeHover === 'end'); // 底点:有 fade 才显
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fade 几何为派生常量,随下列 state 一并重建
-  }, [mono, total, sampleRate, barsVisible, vStart, trimStartBar, trimEndBar, beatsBar, gridBars, srcSecAt, outBarAt, analysis.onsets, fadeOutBars, fadeSilenceBars, fadeDragging, fadeHover, markers]);
+  }, [mono, total, sampleRate, barsVisible, vStart, trimStartBar, trimEndBar, beatsBar, gridBars, srcSecAt, outBarAt, analysis.onsets, fadeOutBars, fadeSilenceBars, fadeDragging, fadeHover, markers, markersReadOnly]);
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => {
@@ -479,7 +484,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     const xFadeStart = (fadeStartBar - vStart) * pxPerBar, xFadeEnd = (fadeEndBar - vStart) * pxPerBar;
     // §36 marker pin 命中(仅顶部 pin 带,避开波形身体;marker 内部 → 不与 trim 边锚冲突)
     let markerHit = -1;
-    if (y <= RULER_H + 12) for (let i = 0; i < markers.length; i++) { if (markers[i].outBar > trimStartBar + 1e-4 && markers[i].outBar < trimEndBar - 1e-4 && Math.abs(x - (markers[i].outBar - vStart) * pxPerBar) <= ANCHOR_HIT) { markerHit = i; break; } } // 跳过 trim 外残留(与 draw 一致)
+    if (!markersReadOnly && y <= RULER_H + 12) for (let i = 0; i < markers.length; i++) { if (markers[i].outBar > trimStartBar + 1e-4 && markers[i].outBar < trimEndBar - 1e-4 && Math.abs(x - (markers[i].outBar - vStart) * pxPerBar) <= ANCHOR_HIT) { markerHit = i; break; } } // §36.5 只读则不接管(跳过 trim 外残留,与 draw 一致)
     let mode: DragMode;
     if (markerHit >= 0) mode = 'marker';
     else if (Math.hypot(x - xFadeStart, y - (RULER_H + FADE_INSET)) <= FADE_DOT_HIT) mode = 'fadeStart';
@@ -506,6 +511,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   };
   // §36 双击:命中 marker pin → 删;否则在落点加 marker(吸最近 onset、共线落点 → 不改声,拖了才生效)。
   const onDoubleClick = (e: React.MouseEvent) => {
+    if (markersReadOnly) return; // §36.5 总走带播放中:marker 层只读,双击不增删
     const stage = stageRef.current; if (!stage) return;
     const rectB = stage.getBoundingClientRect();
     const pxPerBar = stage.clientWidth / barsVisible;

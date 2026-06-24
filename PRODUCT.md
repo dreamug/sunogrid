@@ -1426,9 +1426,9 @@ Splice 文件名编码了 BPM/调式(`NH_IAP_100_..._Dmaj`=100/D大、`SS_AXR2_1
 - 视觉:marker = 主强调色 `--acc` 菱形 pin + 1px 虚线(与 trim 的绿/橙全高实线、fade 的奶油圆点区分);拖动中升金色 `--solo` + 吸附线;段上浮 per-段速率读数(复用 `.we-box`)。trim 拖绿/橙、Shift 变速、滚轮缩放全部原样保留。
 - **只读门**:Song/master 播放态 marker 层不响应指针(灰显/降透明)。
 
-### 36.6 阶段(doc-first)
-0. **spike**:真鼓 fill 手排 2 段控制点,`warpClip` 多帧 `schedule` 离线渲一圈,**听段边/相位/loop 缝**。决定主方案 vs 兜底。
-1. **契约 + 纯模块 + 测**:`WarpPoint`/`warpPts`、`warpMap.ts`(normalize/srcAtBeat/段速/增删移/clamp)+ `warpMap.test.ts`(退化为单段时与现状逐样本一致)。✅ 本轮先落 1 的纯逻辑部分 + 缓存键串联。
-2. **渲染**:`warpClip` 分段 + `regionFromClip`/`WarpRequest` 串 `warpPts`。
-3. **UI**:WarpEditor marker 命中/绘制/增删拖 + 只读门。
-4. **stems + 导出验证**:子 stem 带 `warpPts`;导出/bake 一致性回归。
+### 36.6 阶段(doc-first)—— ✅ 全部完成 · 2026-06-25
+0. ✅ **spike**:真鼓 fill 手排 2 段,真机听。结论=signalsmith 单遍多关键帧 schedule 不可靠 → 采用兜底「每段单渲 + 环形 overlap-add 交叉淡化」(`/dev/warp-spike` 回归 harness)。
+1. ✅ **契约 + 纯模块 + 测**:`WarpPoint`/`warpPts`、`warpMap.ts`(normalize/srcAtBeat/段速/增删移/clamp)+ `warpMap.test.ts`(退化单段逐样本一致)+ 缓存键串联。
+2. ✅ **渲染**:`warpClip` 分段(`warpClipPiecewise`)+ `regionFromClip`/`WarpRequest` 串 `warpFracs`(分数控制点,timeMul 无关)。
+3. ✅ **UI**:WarpEditor marker 双击增/拖钉到格/双击删 + 只读门(总走带播放中 marker 灰显不可编辑);编辑器 cps/emit/绘制/命中统一走 `normalizeWarpPts` → 所见==落库==渲染。
+4. ✅ **stems + 导出**:无需新代码——stem 子 Sound 整体继承 `parent.warp`(含 `warpPts`,逐样本锁相);导出 `renderSong→buildBuffer` 与 collage `buildCollageBuffer` 都过 `warpToBuffer→warpClip(warpFracs)`,自动落地。code-review(/code-review high)修了 collage 片/fork 落库漏 `warpPts`、编辑器三套阈值不一致 + ghost pin。
