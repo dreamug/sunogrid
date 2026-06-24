@@ -5,6 +5,15 @@
 // 排列只有两种方向:Session **竖排并行**(每件乐器一个开关、各自 free-loop);Collage **横排串行**(一件乐器内部 bake 成一条)。
 // 拷贝独立性贯穿每层:乐器/片都是独立副本,只共享 Asset 字节;改一处不影响库与别处。
 
+/** §36 warp marker:把「源某采样」钉到「输出某拍」的一个分段 warp 控制点。
+ *  `src` = 绝对源采样(同 startSample/endSample 坐标系,须在 trim 开区间内);
+ *  `beat` = 距 loop 起点的输出拍(0=trim 起、bars×beatsPerBar=trim 止,须在开区间内)。
+ *  端点(trim 起/止)是隐式控制点,不进数组;空数组 = 单段恒速 = §6 现状(零迁移)。 */
+export interface WarpPoint {
+  src: number;
+  beat: number;
+}
+
 /** 叶子原子:一份 warp/trim 的独立拷贝,挂在共享 Asset 上。 */
 export interface Clip {
   /** 稳定 id(§15 细粒度持久化:sample/collage clip 都靠它做字段级 diff)。CollageClip 必有;sample clip 创建/加载时也带。 */
@@ -27,6 +36,8 @@ export interface Clip {
   fadeOutBars?: number;
   /** 淡出静音尾:gain 已到 0 后到 loop 尾的小节数(底点未拉到尾时留的空);0=正好淡到结尾;≤ fadeOutBars。 */
   fadeSilenceBars?: number;
+  /** §36 分段 warp 控制点(按 beat 升序);空/缺 = 单段恒速(§6 现状)。端点隐式,不入数组。见 warpMap.ts。 */
+  warpPts?: WarpPoint[];
   /** —— per-片 mixer(arrange 层;collage 片用,sample 片走乐器 mixer 故恒 0)—— gain + pan + 三段 EQ(low shelf / mid peaking / high shelf)。 */
   gainDb: number;
   pan?: number;
@@ -38,7 +49,7 @@ export interface Clip {
 /** Sound 上的"原始 warp"种子:与 Clip 同形的 sample 域子集(soundId/assetId 来自 Sound、gainDb 属乐器层,故不在内)+ 出身标记。
  *  入库自动建(warpedBy:'auto')、预调改它(→'manual')、建乐器时与 Sound 合成一条独立 Clip 副本(realLibrary.soundToClip)。
  *  注:仍以 JSON 存在 `Sound.warp`(非独立表)—— 后端 pads route(/api/pads)仍读这块 JSON,不能挪走。 */
-export type SampleWarp = Pick<Clip, 'startSample' | 'endSample' | 'bars' | 'timeMul' | 'semitones' | 'fadeOutBars' | 'fadeSilenceBars'> & { warpedBy?: 'auto' | 'manual' };
+export type SampleWarp = Pick<Clip, 'startSample' | 'endSample' | 'bars' | 'timeMul' | 'semitones' | 'fadeOutBars' | 'fadeSilenceBars' | 'warpPts'> & { warpedBy?: 'auto' | 'manual' };
 
 /** 乐器通用外壳的 mixer:gain + pan + 三段 EQ(low shelf / mid peaking / high shelf)。 */
 export interface Mixer {

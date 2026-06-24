@@ -3,8 +3,16 @@
 // 一件 sample 乐器 = 库里某条 Sound 的 warp 副本;一件 collage = 几条 Sound 各切一片拼成。
 import type { ApiSound } from '@/studio/api';
 import { api, cdnUrl } from '@/studio/api';
-import type { Clip, CollageClip, Instrument, SampleWarp, Session } from '@/contracts';
+import type { Clip, CollageClip, Instrument, SampleWarp, Session, WarpPoint } from '@/contracts';
 import { clipTimeMul, defaultMixer, defaultSends, EQ_BANDS, fadeGain } from '@/contracts';
+import { warpPtsSig } from '@/audio/warpMap';
+
+/** §36 从 JSON(Sound.warp)读 warpPts:只收形状对的 {src,beat} 数组;空/坏 → undefined。清洗留给渲染层 normalize。 */
+const parseWarpPts = (v: unknown): WarpPoint[] | undefined => {
+  if (!Array.isArray(v) || v.length === 0) return undefined;
+  const out = v.filter((p): p is WarpPoint => !!p && typeof (p as WarpPoint).src === 'number' && typeof (p as WarpPoint).beat === 'number').map((p) => ({ src: p.src, beat: p.beat }));
+  return out.length ? out : undefined;
+};
 
 let _ctx: AudioContext | null = null;
 const getCtx = () => (_ctx ??= new AudioContext());
@@ -30,18 +38,18 @@ async function decodedBuffer(assetId: string): Promise<AudioBuffer> {
 
 // fadeOutFrac/fadeSilenceFrac = 占 loop **整段**(渲染出的 buffer)的比例 0..0.5;在 region 层就换算成比例,
 // 这样 timeMul(buffer 拉长)时仍与编辑器里看到的"占后半多少"对齐,且 warpToBuffer 不必知道 bars/timeMul。
-export interface Region { startSample: number; endSample: number; bars: number; semitones: number; fadeOutFrac?: number; fadeSilenceFrac?: number }
+export interface Region { startSample: number; endSample: number; bars: number; semitones: number; fadeOutFrac?: number; fadeSilenceFrac?: number; warpPts?: WarpPoint[] }
 const fadeFrac = (bars: number | undefined, loopBars: number): number => (bars && bars > 0 && loopBars > 0 ? Math.max(0, Math.min(0.5, bars / loopBars)) : 0);
 export function regionFromSound(s: ApiSound): Region {
   const w = (s.warp || {}) as Record<string, number>;
   const a = (s.analysis || {}) as Record<string, number>;
   if (typeof w.startSample === 'number' && typeof w.endSample === 'number') {
     const bars = w.bars ?? 1;
-    return { startSample: w.startSample, endSample: w.endSample, bars, semitones: w.semitones ?? 0, fadeOutFrac: fadeFrac(w.fadeOutBars, bars), fadeSilenceFrac: fadeFrac(w.fadeSilenceBars, bars) };
+    return { startSample: w.startSample, endSample: w.endSample, bars, semitones: w.semitones ?? 0, fadeOutFrac: fadeFrac(w.fadeOutBars, bars), fadeSilenceFrac: fadeFrac(w.fadeSilenceBars, bars), warpPts: parseWarpPts((s.warp as Record<string, unknown>).warpPts) };
   }
   return { startSample: a.startSample ?? 0, endSample: a.endSample ?? 0, bars: a.bars ?? 1, semitones: 0 };
 }
-export const regionFromClip = (c: Clip): Region => { const loopBars = c.bars * clipTimeMul(c); return { startSample: c.startSample, endSample: c.endSample, bars: loopBars, semitones: c.semitones, fadeOutFrac: fadeFrac(c.fadeOutBars, loopBars), fadeSilenceFrac: fadeFrac(c.fadeSilenceBars, loopBars) }; }; // fade 比例的分母 = 渲染出的 buffer 总小节数(bars×timeMul);用 c.bars 会让 timeMul≠1 时淡出长度被成倍放大(字段语义=距 loop 尾 fadeOutBars 小节)
+export const regionFromClip = (c: Clip): Region => { const loopBars = c.bars * clipTimeMul(c); return { startSample: c.startSample, endSample: c.endSample, bars: loopBars, semitones: c.semitones, fadeOutFrac: fadeFrac(c.fadeOutBars, loopBars), fadeSilenceFrac: fadeFrac(c.fadeSilenceBars, loopBars), warpPts: c.warpPts }; }; // fade 比例的分母 = 渲染出的 buffer 总小节数(bars×timeMul);用 c.bars 会让 timeMul≠1 时淡出长度被成倍放大(字段语义=距 loop 尾 fadeOutBars 小节)
 
 /** Sound.warp(JSON 种子)→ 强类型 SampleWarp(与 Clip 同形)。缺字段按 analysis 兜底;出身默认 auto。 */
 export function warpFromSound(s: ApiSound): SampleWarp {
@@ -57,13 +65,14 @@ export function warpFromSound(s: ApiSound): SampleWarp {
     semitones: num(w.semitones, 0),
     fadeOutBars: typeof w.fadeOutBars === 'number' ? num(w.fadeOutBars, 0) : undefined,
     fadeSilenceBars: typeof w.fadeSilenceBars === 'number' ? num(w.fadeSilenceBars, 0) : undefined,
+    warpPts: parseWarpPts(w.warpPts),
     warpedBy: w.warpedBy === 'manual' ? 'manual' : 'auto',
   };
 }
 /** 由 Sound + 其种子 warp 合成一条独立 Clip 副本(无 id;预调喂 ClipEditor、建乐器 clone 都走它)。 */
 export function soundToClip(s: ApiSound): Clip {
   const w = warpFromSound(s);
-  return { soundId: s.id, assetId: s.assetId, startSample: w.startSample, endSample: w.endSample, bars: w.bars, timeMul: w.timeMul, semitones: w.semitones, fadeOutBars: w.fadeOutBars, fadeSilenceBars: w.fadeSilenceBars, gainDb: 0 };
+  return { soundId: s.id, assetId: s.assetId, startSample: w.startSample, endSample: w.endSample, bars: w.bars, timeMul: w.timeMul, semitones: w.semitones, fadeOutBars: w.fadeOutBars, fadeSilenceBars: w.fadeSilenceBars, warpPts: w.warpPts, gainDb: 0 };
 }
 
 const warpCache = new Map<string, AudioBuffer>();
@@ -71,7 +80,12 @@ const lruBump = (k: string, v: AudioBuffer) => { warpCache.delete(k); warpCache.
 const lruTrim = () => { if (warpCache.size > 40) warpCache.delete(warpCache.keys().next().value as string); };
 // 纯 warp 的缓存键(不含 fade):落盘渲染只存纯 warp,fade 在内存里后挂(见 applyFade)。
 // `x1` = warp 算法版本标记(x1=输出烘入 loop 缝交叉淡化,见 signalsmithWarp)。改 warp 产物口径时 ++,令旧落盘渲染失效、强制重渲。
-const pureSig = (s: ApiSound, masterBpm: number, region: Region) => `${s.assetId}|${region.startSample}|${region.endSample}|${region.bars.toFixed(4)}|${region.semitones || 0}|${s.sourceBpm}|${masterBpm}|x1`;
+// §36:warpPts 非空时追加 `|w:<sig>`;空时不追加 → 单段 clip 签名与今天逐字一致,旧落盘渲染不失效。
+const pureSig = (s: ApiSound, masterBpm: number, region: Region) => {
+  const base = `${s.assetId}|${region.startSample}|${region.endSample}|${region.bars.toFixed(4)}|${region.semitones || 0}|${s.sourceBpm}|${masterBpm}|x1`;
+  const w = warpPtsSig(region.warpPts);
+  return w ? `${base}|w:${w}` : base;
+};
 
 /** clip 尾淡出:在纯 warp 出来的 buffer 尾巴乘一条隆起抛物线包络 1-t²(两点曲线:fadeStart→fadeEnd 由 1 降到 0,fadeEnd 之后到尾=静音)。
  *  烘进 buffer 而非实时增益 → 与 trim/warp 同档离线,引擎 loop=true 时每圈循环自然淡尾(也顺手消循环接缝爆音)。不改源 buffer,返回新副本。 */

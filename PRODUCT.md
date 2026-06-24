@@ -114,6 +114,7 @@ warping 失败 ──▶ error(不可启动)
 - **先做 loop conditioning(Suno loop 必需,见 §10)**:Suno 的 loop 不是整小节。流水线先确定真实循环区——v1 简单做法:以 `user_tempo` 为已知拍速、从 t=0(内容基本对齐下拍,lead≈0)取整数小节区(1/2/4 选能放下的最大值);更稳做法:对音频做自相关找真实循环周期,再四舍五入到整小节。裁出 region 后再 warp。
 - 目标长度 = **整数小节的精确采样数** = `小节数 × (60/主BPM) × 4 × 48000`;钉死 `loopStart/loopEnd`。
 - 改主 BPM = 重跑预加载流水线。**走带在跑时已实现无缝过渡**(`StudioEngine.retempoPlaying`,见 §12):保旧速播到下一小节边界 B → B 处 transport 翻速 + 各乐器同边界保相位换新 buffer(众声同时换、不错拍)→ B 时没渲完的乐器先 `playbackRate` 顶速(tape pitch)桥接、就绪后在循环边界换高质量 buffer 并复位 rate。
+- **单段线性是默认;分段 warp(warp marker)见 §36**——把"走音/飘速"的 loop 掰正到网格,仍走同一条"离线渲一次→缓存→傻放"的管线,复杂度只落在 `warpClip` 一步。
 
 ## 7. 架构 / 技术栈
 
@@ -1380,3 +1381,46 @@ Splice 文件名编码了 BPM/调式(`NH_IAP_100_..._Dmaj`=100/D大、`SS_AXR2_1
 - ✅ `tsc` 干净;`POST /api/ai/prompt` 未登录 401(路由已编译+鉴权门生效);**DashScope 直连实测**:`qwen-flash` 对"dark trap…"回干净提示词、114 token(成本可忽略)、模型名/endpoint/key 全对。
 - ✅ **中文输入实测**:"忧郁中国风古筝+lo-fi 嘶嘶声" → Sound 给单一古筝音色描述、Song 给整曲编配,**两者都纯英文**、都以 instrumental 收尾、未漏 BPM/Key。
 - **未走真机登录 UI 流**(避免在你 DB 造测试用户/项目):✨ 按钮渲染 + 浮层开合 + Use this 写回 —— 标准 React/CSS,留你本机点一眼。
+
+## §36 warp marker(可编辑分段 warp)—— 🚧 设计已定 · 2026-06-24
+
+把 §6 的「单段恒速 warp」升级成 Ableton 式 **分段 warp**:在 clip 里钉若干 marker,把「源某采样」对齐到「输出某拍」,相邻 marker 之间各自线性变速 → 能把 Suno 那种「速度飘、瞬态不落格」的 loop 掰正到网格。**当前波形顶上那排橙色竖线只是检测瞬态(`analysis.onsets`,纯视觉参考,不可点);本节让它们变成可增删拖的真 marker。**
+
+### 36.1 核心不变量
+- **复杂度锁在一处**:架构是「离线渲一次 → 缓存成 WarpRender Asset → 引擎/导出/bake/stems 全只消费这条 buffer」。分段只改 `warpClip` 的渲染与「marker→渲染请求」的串联,**下游一律不动**。
+- **退化即现状(零迁移)**:`warpPts` 空 = 只有「trim 起→beat0」「trim 止→beatN」两个隐式端点 = 一条恒速直线 = 今天的行为。老 clip 不动,加第一个中间 marker 才进入分段。
+- **编辑边界(你定的)**:marker 增删拖**只在 ClipEditor 单 clip 预览态可用**;Song/总走带播放时 marker 层**只读**(可见、不可编辑)。避开「整首在播时热替换某 clip 分段 buffer」的竞态(复用 §31 `viewingSoundingBlock` 门的思路)。
+
+### 36.2 数据模型
+- `WarpPoint = { src: number; beat: number }`(`contracts/instrument.ts`)。
+  - `src` = **绝对源采样**(与 `startSample/endSample` 同坐标系),须落在 `(startSample, endSample)` 开区间内。
+  - `beat` = **距 loop 起点的输出拍**(0 = trim 起,`bars×beatsPerBar` = trim 止),须落在开区间内。
+- `Clip.warpPts?: WarpPoint[]`(JSON 逃生口,与 `Sound.warp` 同款;`/api/pads` 旧读法不受影响)。`SampleWarp` 同步带上。**空/缺 = 单段**。
+- 渲染用的完整控制点序列 = `[{src:startSample,beat:0}, ...warpPts(按 beat 升序)..., {src:endSample,beat:bars×bpb}]`。
+- **铁律**:序列在 `src` 与 `beat` 上**严格单调递增**(不许交叉/时间倒流);每段 `beat` 跨度 ≥ 最小阈值(防除零/极端速率)。纯函数 `warpMap.ts` 负责 normalize / clamp / 插入 / 移动 / 删除,保证铁律恒成立。
+
+### 36.3 渲染(`warpClip` 分段)
+- signalsmith 的 `schedule({output, input, rate})` 是一条**输出时间线**:在 `output` 秒把播放头放到输入 `input` 秒、以 `rate` 继续(README 实测语义)。按控制点顺序排帧 → 段间相位连续地变速 = 分段 warp。
+- 每个控制点排一帧:`input = srcSec_i`,`rate_i = (srcSec_{i+1}−srcSec_i)/(outSec_{i+1}−outSec_i)`(到下一点的段速);因 rate 算得自洽,下一帧 `input=srcSec_{i+1}` 是无跳变重定位。
+- **loop 稳态 + 缝交叉淡化**(§6 既有技巧)保留:整条控制点序列按每圈 `targetDur` 重复排帧渲多圈,取稳态那圈,末段与 pre-roll 交叉淡化去缝。⚠ 这是本特性唯一真风险点 → 先做 spike(见 36.6 阶段 0),用真鼓 fill 排 2 段听有无段边缝/相位毛刺;不过则退回「每段单独渲 + 段边交叉淡化」兜底。
+
+### 36.4 缓存 / 落库 / undo / stems / 导出
+- **缓存键**:`realLibrary.pureSig` 末尾追加 `warpPts` 的紧凑哈希(改 marker → 自动 bust 重渲;`warp-render/route.ts` 签名同步)。
+- **落库**:`Clip.warpPts` 走规范化列旁的 JSON 字段(同 `Sound.warp`),乐观更新/发件箱不变(§15)。
+- **undo**:**不扩 7 项口径**——快照本就含 clips,`warpPts` 是 Clip 新字段,自动进快照(改前照常 `pushHistory`)。
+- **stems**:6 条子 stem 用**同一份 `warpPts`** 渲染(src 在父子逐样本对齐 → 同映射 → 天然锁相,§沿用 stem 继承)。
+- **导出/bake**:消费已渲 buffer,**不动**。
+
+### 36.5 交互(ClipEditor 内)
+- **加**:双击瞬态/波形 → 在该处建 marker(默认吸到最近 `onset`);初始与所在段共线 → 不改声,拖了才变。
+- **拖**:拖 marker 横向改其 `beat` → 两侧段重拉伸;默认吸网格拍(把鼓掰到拍),**按住 Alt 吸最近瞬态**(和现有 Alt 滚轮缩放的修饰键习惯一致)。瞬时态直驱不落库,松手提交。
+- **删**:双击 marker(或拖出顶栏)→ 删除,两侧段并回一段。
+- 视觉:marker = 主强调色 `--acc` 菱形 pin + 1px 虚线(与 trim 的绿/橙全高实线、fade 的奶油圆点区分);拖动中升金色 `--solo` + 吸附线;段上浮 per-段速率读数(复用 `.we-box`)。trim 拖绿/橙、Shift 变速、滚轮缩放全部原样保留。
+- **只读门**:Song/master 播放态 marker 层不响应指针(灰显/降透明)。
+
+### 36.6 阶段(doc-first)
+0. **spike**:真鼓 fill 手排 2 段控制点,`warpClip` 多帧 `schedule` 离线渲一圈,**听段边/相位/loop 缝**。决定主方案 vs 兜底。
+1. **契约 + 纯模块 + 测**:`WarpPoint`/`warpPts`、`warpMap.ts`(normalize/srcAtBeat/段速/增删移/clamp)+ `warpMap.test.ts`(退化为单段时与现状逐样本一致)。✅ 本轮先落 1 的纯逻辑部分 + 缓存键串联。
+2. **渲染**:`warpClip` 分段 + `regionFromClip`/`WarpRequest` 串 `warpPts`。
+3. **UI**:WarpEditor marker 命中/绘制/增删拖 + 只读门。
+4. **stems + 导出验证**:子 stem 带 `warpPts`;导出/bake 一致性回归。
