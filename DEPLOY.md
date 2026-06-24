@@ -115,7 +115,7 @@ NODE_ENV=production PORT=3000 npm start   # next start(默认 3000)
 ./release.sh
 ```
 
-默认流程:拉取 `origin/main` 的快进更新 → `npm ci` → `npm run build` → `npm run db:deploy` → 重启 `sunogrid` → 请求 `/api/health`。常用覆盖:
+默认流程:拉取 `origin/main` 的快进更新 → `npm ci` → `npm run build` → `npm run db:deploy` → 重启 web 服务 → 请求 `/api/health`。常用覆盖:
 
 ```bash
 BRANCH=main SERVICE_NAME=sunogrid ./release.sh
@@ -129,6 +129,42 @@ RESTART_CMD='pm2 restart sunogrid' ./release.sh
 ```bash
 pm2 start "npm start" --name sunogrid --cwd /path/to/sunogrid/web \
   --env "NODE_ENV=production" --env "PORT=3000"
+```
+
+### 4.1 当前线上部署情况
+
+当前生产机记录(2026-06-24):
+
+- 主机:`cable00`
+- 仓库根目录:`/data/deploy/sunogrid`
+- web 工作目录:`/data/deploy/sunogrid/web`
+- 分支:`main`,远端:`origin/main`
+- 进程管理器:`supervisord`
+- web program:`sunogrid-web`
+- stem program:`sunogrid-stem`(独立服务,常规 web 上线不重启它)
+- 数据库:MySQL `sunogrid` at `127.0.0.1:3306`(由 `web/.env` 的 `DATABASE_URL` 决定)
+- 线上本地目录:`deploy/ssl/`,`stem-service/.torch/`,`web/public/downloads/` 已加入 `.gitignore`
+
+生产机上线命令:
+
+```bash
+cd /data/deploy/sunogrid
+git pull --ff-only
+./release.sh
+```
+
+`release.sh` 默认会尝试重启 `sunogrid`,并在 supervisord 场景自动尝试 `sunogrid-web`。如果需要显式指定:
+
+```bash
+cd /data/deploy/sunogrid
+RESTART_CMD='supervisorctl restart sunogrid-web' ./release.sh
+```
+
+上线后检查:
+
+```bash
+supervisorctl status sunogrid-web sunogrid-stem
+curl -f http://127.0.0.1:3000/api/health
 ```
 
 ---
