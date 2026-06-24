@@ -15,7 +15,7 @@ export interface NInstrument {
 }
 export interface NClip {
   id: string; instrumentId: string; soundId: string; assetId: string;
-  startSample: number; endSample: number; bars: number; timeMul: number | null; semitones: number;
+  startSample: number; endSample: number; bars: number; timeMul: number | null; warpPts: unknown; semitones: number;
   fadeOutBars: number | null; fadeSilenceBars: number | null;
   gainDb: number; pan: number; eqLowDb: number; eqMidDb: number; eqHighDb: number;
   startStep: number | null; orderIndex: number;
@@ -59,12 +59,12 @@ export function normalize(sessions: Session[]): Snapshot {
       if (i.payload.kind === 'sample') {
         const c = i.payload.clip;
         if (c.id && hasAsset(c.assetId)) {
-          snap.clips[c.id] = { id: c.id, instrumentId: i.id, soundId: c.soundId || '', assetId: c.assetId, startSample: Math.round(c.startSample), endSample: Math.round(c.endSample), bars: c.bars, timeMul: c.timeMul ?? null, semitones: c.semitones, fadeOutBars: c.fadeOutBars ?? null, fadeSilenceBars: c.fadeSilenceBars ?? null, gainDb: c.gainDb, pan: 0, eqLowDb: 0, eqMidDb: 0, eqHighDb: 0, startStep: null, orderIndex: 0 };
+          snap.clips[c.id] = { id: c.id, instrumentId: i.id, soundId: c.soundId || '', assetId: c.assetId, startSample: Math.round(c.startSample), endSample: Math.round(c.endSample), bars: c.bars, timeMul: c.timeMul ?? null, warpPts: c.warpPts ?? null, semitones: c.semitones, fadeOutBars: c.fadeOutBars ?? null, fadeSilenceBars: c.fadeSilenceBars ?? null, gainDb: c.gainDb, pan: 0, eqLowDb: 0, eqMidDb: 0, eqHighDb: 0, startStep: null, orderIndex: 0 };
         }
       } else {
         i.payload.clips.forEach((c, idx) => {
           if (c.id && hasAsset(c.assetId)) {
-            snap.clips[c.id] = { id: c.id, instrumentId: i.id, soundId: c.soundId || '', assetId: c.assetId, startSample: Math.round(c.startSample), endSample: Math.round(c.endSample), bars: c.bars, timeMul: c.timeMul ?? null, semitones: c.semitones, fadeOutBars: c.fadeOutBars ?? null, fadeSilenceBars: c.fadeSilenceBars ?? null, gainDb: c.gainDb, pan: c.pan ?? 0, eqLowDb: c.eqLowDb ?? 0, eqMidDb: c.eqMidDb ?? 0, eqHighDb: c.eqHighDb ?? 0, startStep: c.startStep, orderIndex: idx };
+            snap.clips[c.id] = { id: c.id, instrumentId: i.id, soundId: c.soundId || '', assetId: c.assetId, startSample: Math.round(c.startSample), endSample: Math.round(c.endSample), bars: c.bars, timeMul: c.timeMul ?? null, warpPts: c.warpPts ?? null, semitones: c.semitones, fadeOutBars: c.fadeOutBars ?? null, fadeSilenceBars: c.fadeSilenceBars ?? null, gainDb: c.gainDb, pan: c.pan ?? 0, eqLowDb: c.eqLowDb ?? 0, eqMidDb: c.eqMidDb ?? 0, eqHighDb: c.eqHighDb ?? 0, startStep: c.startStep, orderIndex: idx };
           }
         });
       }
@@ -75,7 +75,7 @@ export function normalize(sessions: Session[]): Snapshot {
 
 const SESS_FIELDS: (keyof NSession)[] = ['name', 'index', 'repeats', 'color', 'xyAuto'];
 const INST_FIELDS: (keyof NInstrument)[] = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'];
-const CLIP_FIELDS: (keyof NClip)[] = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'];
+const CLIP_FIELDS: (keyof NClip)[] = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'warpPts', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'];
 
 // 字段相等:标量直接比,sends(对象)按 JSON 比。
 function eq(a: unknown, b: unknown): boolean {

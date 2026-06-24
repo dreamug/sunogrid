@@ -282,6 +282,7 @@ model Clip {
   endSample   Int
   bars        Float
   timeMul     Float? // ÷2/×2 快捷;null/1=原速
+  warpPts     Json? // §36 分段 warp 控制点 [{src,beat}](绝对源采样 + 距 loop 起点输出拍);null/空=单段恒速
   semitones   Float  @default(0)
   fadeOutBars     Float? // §24 clip 尾淡出起点(距 loop 尾的小节数,顶点);null/0=无淡出
   fadeSilenceBars Float? // §24 淡出静音尾(到零点后到 loop 尾的小节数,底点);null/0=淡到正好结尾

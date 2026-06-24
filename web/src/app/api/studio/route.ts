@@ -9,7 +9,7 @@ import { defaultSends } from '@/contracts';
 // —— DB 行 → contract 形状 ——
 type DbClip = {
   id: string; soundId: string | null; assetId: string; startSample: number; endSample: number;
-  bars: number; timeMul: number | null; semitones: number; fadeOutBars: number | null; fadeSilenceBars: number | null; gainDb: number; pan: number; eqLowDb: number; eqMidDb: number; eqHighDb: number; startStep: number | null; orderIndex: number;
+  bars: number; timeMul: number | null; warpPts: unknown; semitones: number; fadeOutBars: number | null; fadeSilenceBars: number | null; gainDb: number; pan: number; eqLowDb: number; eqMidDb: number; eqHighDb: number; startStep: number | null; orderIndex: number;
 };
 type DbInstrument = {
   id: string; slot: number; type: string; label: string; color: string | null; icon: string | null; enabled: boolean;
@@ -22,7 +22,7 @@ const EMPTY_CLIP: Clip = { soundId: '', assetId: '', startSample: 0, endSample: 
 function clipFromDb(c: DbClip): Clip {
   return {
     id: c.id, soundId: c.soundId ?? '', assetId: c.assetId, startSample: c.startSample, endSample: c.endSample,
-    bars: c.bars, ...(c.timeMul != null ? { timeMul: c.timeMul } : {}), semitones: c.semitones, ...(c.fadeOutBars != null ? { fadeOutBars: c.fadeOutBars } : {}), ...(c.fadeSilenceBars != null ? { fadeSilenceBars: c.fadeSilenceBars } : {}), gainDb: c.gainDb, pan: c.pan, eqLowDb: c.eqLowDb, eqMidDb: c.eqMidDb, eqHighDb: c.eqHighDb,
+    bars: c.bars, ...(c.timeMul != null ? { timeMul: c.timeMul } : {}), ...(Array.isArray(c.warpPts) && c.warpPts.length ? { warpPts: c.warpPts as Clip['warpPts'] } : {}), semitones: c.semitones, ...(c.fadeOutBars != null ? { fadeOutBars: c.fadeOutBars } : {}), ...(c.fadeSilenceBars != null ? { fadeSilenceBars: c.fadeSilenceBars } : {}), gainDb: c.gainDb, pan: c.pan, eqLowDb: c.eqLowDb, eqMidDb: c.eqMidDb, eqHighDb: c.eqHighDb,
   };
 }
 

@@ -8,7 +8,7 @@ import type { Op, NSession, NInstrument, NClip } from '@/studio/sync';
 
 const SESS_COLS = ['name', 'index', 'repeats', 'color', 'xyAuto'] as const;
 const INST_COLS = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'] as const;
-const CLIP_COLS = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'] as const;
+const CLIP_COLS = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'warpPts', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'] as const;
 
 const pick = <T extends object>(o: T, cols: readonly (keyof T)[]): Record<string, unknown> => {
   const out: Record<string, unknown> = {};
@@ -23,6 +23,7 @@ function clipData(row: Partial<NClip>, ownedSounds: Set<string>): Record<string,
     const sid = d.soundId as string;
     d.soundId = sid && ownedSounds.has(sid) ? sid : null;
   }
+  if ('warpPts' in d) d.warpPts = d.warpPts == null ? Prisma.DbNull : (d.warpPts as object); // §36 可空 Json:null→DbNull(同 xyAuto)
   return d;
 }
 function instData(row: Partial<NInstrument>): Record<string, unknown> {
