@@ -53,6 +53,7 @@ export class StudioEngine {
   private split?: Tone.Split; private analyserL?: Tone.Analyser; private analyserR?: Tone.Analyser; // 总输出 L/R 峰值表(抽 master = post-FX/post 主音量/pre-软削波;waveform analyser,masterLevel 自算 peak)
   private peakHold: [number, number] = [0, 0];                     // 峰值表弹道状态:快攻(瞬时跳上)慢落(每帧 ×PEAK_RELEASE),masterLevel 每帧推进一次
   private clickSynth?: Tone.Synth; private clickVol?: Tone.Volume;  // 节拍器:click synth → 音量节点 → master(随主音量+限制器,但不进 FX)
+  private clickLastTime = -Infinity; // 单音 click synth 上次出声的绝对上下文时刻(走带 scheduleRepeat 与试听 Clock 共用此 synth,强制时间严格递增)
   private fx?: FxBus; private fxCfg?: FxConfig;                     // 主总线效果器(§17):各乐器 panner → fx.input → 失真→延迟→混响 → master;节拍器不进
   private xy?: XYPad;                                              // §21 XY 表演板:主总线 insert,串在 master 与软削波天花板之间(吃完整最终 mix)
   /** 离散态(voice off/queued/on/stopping、audition 起停)在**异步边界**跃迁时回调上层重渲;连续视觉(电平/播放头/走带位置)由 UI 叶子自驱动 rAF,不走这里。 */
@@ -152,7 +153,15 @@ export class StudioEngine {
     if (!this.metroOn || !this.clickSynth) return;
     const t = Tone.getTransport();
     const { play, note } = this.clickForBeat(Math.round(t.getTicksAtTime(time) / t.PPQ));
-    if (play) this.clickSynth.triggerAttackRelease(note, '32n', time);
+    if (play) this.fireClick(note, time);
+  }
+  // 走带节拍器与试听 Clock 共用同一个单音 clickSynth。Tone 用 lookahead 提前排程,故停走带时它最后一拍 click
+  // 已落在未来某绝对时刻;若紧接着试听 Clock 在更早的时刻触发,单音 synth 会抛 "Start time must be strictly
+  // greater than previous start time"。上下文时刻全程单调递增 → 强制递增只在路径切换的撞点丢一下(听感无损),稳态一拍不漏。
+  private fireClick(note: 'C6' | 'C5', time: number): void {
+    if (!this.clickSynth || !(time > this.clickLastTime)) return;
+    this.clickLastTime = time;
+    this.clickSynth.triggerAttackRelease(note, '32n', time);
   }
   // §节拍器·试听:走带停时给自由跑的预览配一条独立 click 时钟(Transport 冻结,scheduleRepeat 不 fire)。
   // 网格按 master bpm,锚回 auditionStart 的 phase-0(整小节 loop 的下拍 = 重音);带 startPhase 偏移时只打未来的格点。
@@ -166,7 +175,7 @@ export class StudioEngine {
     const clk = new Tone.Clock((time) => {
       if (!this.clickSynth) return;
       const { play, note } = this.clickForBeat(n); n++;
-      if (play) this.clickSynth.triggerAttackRelease(note, '32n', time);
+      if (play) this.fireClick(note, time);
     }, 1 / beatDur);
     clk.start(Math.max(Tone.now(), first));
     this.metroClock = clk;
