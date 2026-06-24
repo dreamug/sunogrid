@@ -131,6 +131,7 @@ export async function forkExampleProject(exampleId: string, userId: string): Pro
                     endSample: c.endSample,
                     bars: c.bars,
                     timeMul: c.timeMul,
+                    warpPts: json(c.warpPts), // §36 分段 warp 控制点(可空 Json,同 sends/extra 走 json() 助手)
                     semitones: c.semitones,
                     fadeOutBars: c.fadeOutBars,
                     fadeSilenceBars: c.fadeSilenceBars,

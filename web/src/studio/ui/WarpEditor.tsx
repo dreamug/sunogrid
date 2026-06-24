@@ -14,7 +14,7 @@ import { decodeAsset } from '@/studio/realLibrary';
 import { TransportIcon } from '@/studio/ui/glyphs';
 import type { Clip, WarpPoint } from '@/contracts';
 import { fadeGain } from '@/contracts';
-import { warpPtsSig } from '@/audio/warpMap';
+import { warpPtsSig, normalizeWarpPts } from '@/audio/warpMap';
 import type { ApiSound } from '@/studio/api';
 
 export interface WarpRegion {
@@ -222,19 +222,24 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     return out;
   }, [channels]);
 
-  // §36 分段控制点(markers 非空才建):trim 两端点(取自线性基 anchor/secPerBar)+ 中间 markers(夹回 trim 内、src/outBar 双单调)。
-  // markers 空 → null → srcSecAt/outBarAt 退化为线性基,行为与单段逐字一致(零风险)。
+  const baseSrcSec = useCallback((ob: number) => anchorSrcSec + (ob - anchorOutBar) * secPerBar, [anchorSrcSec, anchorOutBar, secPerBar]); // 线性基(端点恒取此,markers 只动中间)
+
+  // §36 把画布 markers 归一成「与渲染端同口径」的有效中间点 —— 复用 warpMap.normalizeWarpPts(同 toFracs 用的那个),
+  //   阈值(MIN_BEAT_GAP/MIN_SRC_GAP、严格单调、夹回 trim)统一 → 编辑器所见/所听 == 落库 == 渲染,不再三套标准各判各的。
+  //   src/outBar(画布秒/小节域)↔ src采样/beat(契约域)在此一次性来回换。空 → [] → cps=null → 退化线性基(零风险)。
+  const effPts = useMemo(() => {
+    if (!markers.length) return [] as { src: number; beat: number; srcSec: number; outBar: number }[];
+    const srcStart = Math.round(baseSrcSec(trimStartBar) * sampleRate), srcEnd = Math.round(baseSrcSec(trimEndBar) * sampleRate);
+    const totalBeats = (trimEndBar - trimStartBar) * beatsBar;
+    const pts = markers.map((m) => ({ src: Math.round(m.srcSec * sampleRate), beat: (m.outBar - trimStartBar) * beatsBar }));
+    return normalizeWarpPts(pts, srcStart, srcEnd, totalBeats).map((p) => ({ src: p.src, beat: p.beat, srcSec: p.src / sampleRate, outBar: trimStartBar + p.beat / beatsBar }));
+  }, [markers, baseSrcSec, trimStartBar, trimEndBar, sampleRate, beatsBar]);
+
+  // markers 空 / 全被归一丢弃 → null → srcSecAt/outBarAt 退化为线性基,行为与单段逐字一致(零风险)。
   const cps = useMemo(() => {
-    if (!markers.length) return null;
-    const base = (ob: number) => anchorSrcSec + (ob - anchorOutBar) * secPerBar;
-    const s0 = base(trimStartBar), s1 = base(trimEndBar);
-    const pts: { ob: number; s: number }[] = [];
-    let ps = s0, pob = trimStartBar;
-    for (const m of [...markers].sort((a, b) => a.outBar - b.outBar)) {
-      if (m.outBar > pob + 1e-4 && m.outBar < trimEndBar - 1e-4 && m.srcSec > ps + 1e-6 && m.srcSec < s1 - 1e-6) { pts.push({ ob: m.outBar, s: m.srcSec }); ps = m.srcSec; pob = m.outBar; }
-    }
-    return pts.length ? [{ ob: trimStartBar, s: s0 }, ...pts, { ob: trimEndBar, s: s1 }] : null;
-  }, [markers, anchorSrcSec, anchorOutBar, secPerBar, trimStartBar, trimEndBar]);
+    if (!effPts.length) return null;
+    return [{ ob: trimStartBar, s: baseSrcSec(trimStartBar) }, ...effPts.map((m) => ({ ob: m.outBar, s: m.srcSec })), { ob: trimEndBar, s: baseSrcSec(trimEndBar) }];
+  }, [effPts, baseSrcSec, trimStartBar, trimEndBar]);
 
   const srcSecAt = useCallback((outBar: number) => {
     if (!cps) return anchorSrcSec + (outBar - anchorOutBar) * secPerBar;
@@ -269,14 +274,8 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const srcEnd = Math.max(srcStart + 1, Math.round(srcSecAt(trimEndBar) * sampleRate));
   const trimBpm = secPerBar > 0 ? (beatsBar * 60) / secPerBar : 0;
   const rate = masterBar > 0 ? secPerBar / masterBar : 1;
-  // §36 emit:画布域 marker(srcSec/outBar)→ warpPt(绝对采样 / 距 loop 起点拍);只发严格落在 trim 内的,按 outBar 升序。
-  const warpPtsOut = useMemo(() => {
-    const pts = markers
-      .filter((m) => m.outBar > trimStartBar + 1e-4 && m.outBar < trimEndBar - 1e-4)
-      .sort((a, b) => a.outBar - b.outBar)
-      .map((m) => ({ src: Math.round(m.srcSec * sampleRate), beat: (m.outBar - trimStartBar) * beatsBar }));
-    return pts.length ? pts : undefined;
-  }, [markers, trimStartBar, trimEndBar, sampleRate, beatsBar]);
+  // §36 emit:就是 effPts(已归一,与 cps/渲染同一套)→ 编辑器所见 == 落库 == 渲染。
+  const warpPtsOut = useMemo(() => (effPts.length ? effPts.map((m) => ({ src: m.src, beat: m.beat })) : undefined), [effPts]);
   // 罩层/曲线阈值(hasFade)与落库口径统一:低于阈值一律按 0 发出,避免 UI 显示"无淡出"却烘了个微淡出。
   const region: WarpRegion = { startSample: srcStart, endSample: srcEnd, bars: loopLen, semitones, fadeOutBars: hasFade ? fadeOut : 0, fadeSilenceBars: hasFade ? fadeSilence : 0, warpPts: warpPtsOut };
 
@@ -396,6 +395,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
 
     // §36 warp marker pins(terracotta 菱形 + 细虚线;拖动中升金色)。markers 始终按 outBar 升序 → 下标与 drag.markerIdx 对齐。
     for (let i = 0; i < markers.length; i++) {
+      if (markers[i].outBar <= trimStartBar + 1e-4 || markers[i].outBar >= trimEndBar - 1e-4) continue; // §36 不画落到 trim 外的残留(滑 trim 后)→ 免 ghost pin;它们也已被 effPts 从 cps/emit 丢弃
       const mx = bx(markers[i].outBar);
       if (mx < -6 || mx > W + 6) continue;
       const hot = drag.current?.mode === 'marker' && drag.current.markerIdx === i;
@@ -479,7 +479,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     const xFadeStart = (fadeStartBar - vStart) * pxPerBar, xFadeEnd = (fadeEndBar - vStart) * pxPerBar;
     // §36 marker pin 命中(仅顶部 pin 带,避开波形身体;marker 内部 → 不与 trim 边锚冲突)
     let markerHit = -1;
-    if (y <= RULER_H + 12) for (let i = 0; i < markers.length; i++) { if (Math.abs(x - (markers[i].outBar - vStart) * pxPerBar) <= ANCHOR_HIT) { markerHit = i; break; } }
+    if (y <= RULER_H + 12) for (let i = 0; i < markers.length; i++) { if (markers[i].outBar > trimStartBar + 1e-4 && markers[i].outBar < trimEndBar - 1e-4 && Math.abs(x - (markers[i].outBar - vStart) * pxPerBar) <= ANCHOR_HIT) { markerHit = i; break; } } // 跳过 trim 外残留(与 draw 一致)
     let mode: DragMode;
     if (markerHit >= 0) mode = 'marker';
     else if (Math.hypot(x - xFadeStart, y - (RULER_H + FADE_INSET)) <= FADE_DOT_HIT) mode = 'fadeStart';

@@ -26,7 +26,7 @@ export const patchInstrument = (s: Session, id: string, patch: Partial<Pick<Inst
   mapInst(s, id, (i) => ({ ...i, ...patch }));
 
 /** 下钻第二层:改 collage 乐器里某一片 Clip 的可调字段(pitch/gain)。 */
-export function patchCollageClip(s: Session, instId: string, clipId: string, patch: Partial<Pick<CollageClip, 'startSample' | 'endSample' | 'bars' | 'timeMul' | 'semitones' | 'fadeOutBars' | 'fadeSilenceBars' | 'gainDb'>>): Session {
+export function patchCollageClip(s: Session, instId: string, clipId: string, patch: Partial<Pick<CollageClip, 'startSample' | 'endSample' | 'bars' | 'timeMul' | 'warpPts' | 'semitones' | 'fadeOutBars' | 'fadeSilenceBars' | 'gainDb'>>): Session {
   return mapInst(s, instId, (i) => {
     if (i.payload.kind !== 'collage') return i;
     return { ...i, payload: { ...i.payload, clips: i.payload.clips.map((c) => (c.id === clipId ? { ...c, ...patch } : c)) } };
