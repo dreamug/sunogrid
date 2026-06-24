@@ -60,6 +60,7 @@ export class StudioEngine {
   private metroOn = false;
   private metroInterval: 'beat' | 'bar' | '2bar' | '4bar' = 'beat'; // 几小节响一次:每拍/每小节/每2小节/每4小节
   private metroRepeatId?: number; // 节拍器的 scheduleRepeat id —— 每次 startTransport 重注册(stopTransport 的 t.cancel() 会清掉它)
+  private metroClock?: Tone.Clock; // 走带停时给自由跑的 clip 试听配的独立节拍器时钟(脱离 Transport,锚 auditionStart;走带在跑用上面的 scheduleRepeat,二者互斥)
 
   init(bpm: number, beatsPerBar = 4): void {
     this.beatsPerBar = beatsPerBar;
@@ -126,7 +127,11 @@ export class StudioEngine {
 
   // --- 节拍器 ---
   setQuantize(q: Quantize): void { this.quantize = q; }
-  setMetronome(on: boolean): void { this.metroOn = on; }
+  setMetronome(on: boolean): void {
+    this.metroOn = on;
+    // 走带停 + 有自由预览在响 → 预览中开/关节拍器即时跟上(走带在跑则由 scheduleRepeat 那条覆盖,这里不掺和)。
+    if (Tone.getTransport().state !== 'started' && this.auditionPlayer && !this.auditionQueued) { if (on) this.startAuditionMetro(); else this.stopAuditionMetro(); }
+  }
   // 每次起播重挂节拍器节拍回调(stopTransport 的 t.cancel() 会把它清掉,故不能只在 init 注册一次)。
   private scheduleMetro(): void {
     const t = Tone.getTransport();
@@ -135,16 +140,38 @@ export class StudioEngine {
   }
   setMetronomeVolume(db: number): void { if (this.clickVol) this.clickVol.volume.value = db; }
   setMetronomeInterval(iv: 'beat' | 'bar' | '2bar' | '4bar'): void { this.metroInterval = iv; }
-  private onClick(time: number): void {
-    if (!this.metroOn || !this.clickSynth) return;
-    const t = Tone.getTransport();
-    const beats = Math.round(t.getTicksAtTime(time) / t.PPQ);
+  // 给定绝对拍号 → 按 interval/重音决定这一拍是否响、响哪个音(走带节拍器与试听节拍器共用,避免两份 interval 逻辑漂移)。
+  private clickForBeat(beats: number): { play: boolean; note: 'C6' | 'C5' } {
     const beatInBar = ((beats % this.beatsPerBar) + this.beatsPerBar) % this.beatsPerBar;
     const barIdx = Math.floor(beats / this.beatsPerBar);
     const down = beatInBar === 0;
     const play = this.metroInterval === 'beat' ? true : this.metroInterval === 'bar' ? down : this.metroInterval === '2bar' ? down && barIdx % 2 === 0 : down && barIdx % 4 === 0;
-    if (play) this.clickSynth.triggerAttackRelease(down ? 'C6' : 'C5', '32n', time);
+    return { play, note: down ? 'C6' : 'C5' };
   }
+  private onClick(time: number): void {
+    if (!this.metroOn || !this.clickSynth) return;
+    const t = Tone.getTransport();
+    const { play, note } = this.clickForBeat(Math.round(t.getTicksAtTime(time) / t.PPQ));
+    if (play) this.clickSynth.triggerAttackRelease(note, '32n', time);
+  }
+  // §节拍器·试听:走带停时给自由跑的预览配一条独立 click 时钟(Transport 冻结,scheduleRepeat 不 fire)。
+  // 网格按 master bpm,锚回 auditionStart 的 phase-0(整小节 loop 的下拍 = 重音);带 startPhase 偏移时只打未来的格点。
+  private startAuditionMetro(): void {
+    this.stopAuditionMetro();
+    if (!this.metroOn || !this.clickSynth || this.auditionDur <= 0) return;
+    const beatDur = 60 / Tone.getTransport().bpm.value; // buffer warp 到 master bpm,故一拍 = 60/bpm 秒
+    if (!(beatDur > 0) || !isFinite(beatDur)) return;
+    let n = Math.max(0, Math.ceil((Tone.now() - this.auditionStart - 1e-4) / beatDur)); // 只 fire 未来拍,锚 phase-0
+    const first = this.auditionStart + n * beatDur;
+    const clk = new Tone.Clock((time) => {
+      if (!this.clickSynth) return;
+      const { play, note } = this.clickForBeat(n); n++;
+      if (play) this.clickSynth.triggerAttackRelease(note, '32n', time);
+    }, 1 / beatDur);
+    clk.start(Math.max(Tone.now(), first));
+    this.metroClock = clk;
+  }
+  private stopAuditionMetro(): void { if (this.metroClock) { try { this.metroClock.stop(); this.metroClock.dispose(); } catch { /* */ } this.metroClock = undefined; } }
   async resume(): Promise<void> { await Tone.start(); }
   /** §31 把整条出声链路由到指定输出设备。全应用只有 Tone 这一个 context 真驱动扬声器(解码/离线 ctx 不出声),
    *  故只切它即全局生效。deviceId='default' → setSinkId('') = 跟随系统默认;Safari/Firefox 无 setSinkId → 静默走默认。 */
@@ -154,7 +181,7 @@ export class StudioEngine {
     await raw.setSinkId(deviceId === 'default' ? '' : deviceId);
   }
   /** 改主 BPM:主走带 transport 立即跟随(buffer 的 re-warp/热替换由上层逐乐器做)。 */
-  setBpm(bpm: number): void { Tone.getTransport().bpm.value = bpm; this.fx?.setBpm(bpm); this.xy?.setBpm(bpm); }
+  setBpm(bpm: number): void { Tone.getTransport().bpm.value = bpm; this.fx?.setBpm(bpm); this.xy?.setBpm(bpm); if (this.metroClock) this.startAuditionMetro(); /* 预览中改速 → 按新速重锚试听节拍器(buffer re-warp 由上层做) */ }
 
   isPlaying(): boolean { return Tone.getTransport().state === 'started'; }
   transportBeats(): number { const t = Tone.getTransport(); return t.ticks / t.PPQ; }
@@ -578,6 +605,7 @@ export class StudioEngine {
       p.start(undefined, off);
       this.auditionStart = Tone.now() - off;
       this.auditionQueued = false;
+      if (t.state !== 'started') this.startAuditionMetro(); // 走带停 → 自由预览自配节拍器;走带在跑(非量化预览)归 Transport 节拍器,不重复
     }
   }
   /** 试听中改了 region(trim/长度/变调)→ 不停下,在下一个 loop 边界保接缝换 buffer(新 loop 从头起,即"第二次播放"就是新长度);
@@ -678,6 +706,7 @@ export class StudioEngine {
   stopAudition(): void {
     this.auditionGen++; // §28.7 作废任何 in-flight 异步预览(stop 落在 warp await 窗口内时,迟到的 audition 据此放弃)
     this.auditionPendingTok = 0; // §28.7 stop 取消"加载中"标志(空格第二下才走带)
+    this.stopAuditionMetro(); // 试听节拍器随预览一并拆(切预览/停预览/起走带都经此中央口)
     if (this.auditionSchedId != null) { Tone.getTransport().clear(this.auditionSchedId); this.auditionSchedId = undefined; }
     this.auditionQueued = false;
     if (this.auditionPlayer) { try { this.auditionPlayer.stop(); } catch { /* */ } this.auditionPlayer.dispose(); this.auditionPlayer = null; }

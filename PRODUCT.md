@@ -1024,6 +1024,14 @@ WAV 可达数十 MB,base64 over JSON 膨胀 ~33% 不划算 → 新端点收 `mul
 **实现(集中、低风险)**:`applyDrag(clientX)` 加尾参 `gridMod`,两处调用(`onDown`/`onMove`)传 `e.metaKey || e.ctrlKey`(**实时读** → 拖到一半按下修饰键即切语义,Ableton 风)。仅 `mode==='trimStart'` 时按 `gridMod` 分叉:真 = 左裁剪,假 = 既有整窗滑动。底部 hint 补一句修饰键说明。
 **§15/§16 合规**:纯几何改动,emit 的 `region`(start/end/bars)本就能表达任意起止 → 走既有 200ms 防抖 `onChange`(落库 + 进 undo,§16 口径已含 clip trim/长度),**零新链路、口径不扩**。
 
+### 28.10 pad 二次点 = 试听 + 走带停时预览自带节拍器 —— ✅ 实现 · 2026-06-24
+**pad 二次点试听**:走带停时,普通点 playground 乐器 pad 第一下 = 选中(原状),**已选中再点 = `previewInst` 切换试听**(§28 audition,自带 toggle:再点停)。判定 `!playing && selId===id && !markedIds.size`,落在 [`clickInst`](web/src/studio/StudioApp.tsx:963) 一处;shift 多选 / 走带在跑均维持"只选中"。即第 4 个走 audition 的预览入口(并列 §28.2 三处),复用 `previewInstrument`,瞬态、不进 undo。
+**预览节拍器(`metroClock`)**:节拍器原是 `Transport.scheduleRepeat('4n')`,Transport 冻结时不 fire → **走带停时的预览本来一声不响**。补一条**脱离 Transport 的 `Tone.Clock`**([`startAuditionMetro`](web/src/audio/studioEngine.ts:158)):频率 = master bpm 的拍频,锚回 `auditionStart` 的 phase-0(整小节 loop 下拍 = 重音 C6),带 `startPhase` 偏移时 `n=ceil(...)` 只打未来格点。响不响/重音由 `clickForBeat(beats)` 决定(与 Transport 节拍器 `onClick` 共用一份 interval/重音逻辑,免漂移)。
+- **互斥门槛**:仅 `audition()` 立即起播分支且 `Transport.state!=='started'` 时 arm;走带在跑(含非量化预览)归 Transport 节拍器,**绝不双调度**。
+- **生命周期**:`stopAudition()`(切/停预览·起走带·dispose 的中央口)统一 `stopAuditionMetro()`,不泄漏/不"停不下来";`setMetronome` 在预览中开关即时启停;`setBpm` 预览中改速按新速重锚。`auditionSwap` 换 buffer 不动 clock —— dur 恒整小节,相位天然连续。
+- **取舍**:子小节/非整小节片预览**也响、走稳定 bpm 网格**(节拍器 = 绝对速度参考,不跟随短 loop 重启)。
+- **范围**:覆盖所有 audition(库试听 `auditionSound` / 单 sample+整体乐器 `previewInstrument` / collage 片 `previewCollagePiece`)—— 全funnel `engine.audition()`,一处插入全覆盖。**零 UI/contract/undo/持久化改动,纯引擎加法。**
+
 ## 29. 鼓二段分离(Drum kit split / drumsep)—— 🚧 实现 · 2026-06-22
 **一句话**:已分离出的 **drums stem 可以再拆一层** —— 用专训鼓模型(drumsep)把鼓轨分成 **kick / snare / toms / cymbals** 四件孙 Sound。**只有鼓能再拆**(bass/other/vocals/guitar/piano 不行);拆出来的孙轨与父鼓轨逐样本对齐 → 继续继承同一条 warp → 仍**天然锁相**,可单独拖 pad/轨。
 

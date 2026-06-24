@@ -963,7 +963,12 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const clickInst = (id: string, additive: boolean) => {
     if (additive) {
       setMarkedIds((prev) => { const base = new Set(prev.size ? prev : selId ? [selId] : []); if (base.has(id)) base.delete(id); else base.add(id); return base; });
-    } else setMarkedIds(new Set());
+      selectInst(id);
+      return;
+    }
+    // 走带停 + 已选中该乐器 + 无多选 → 第二次点 = 试听切换(§28 previewInst,自带 toggle:再点停);否则选中(selectInst 会停掉上一个试听)。
+    if (!playing && selId === id && !markedIds.size) { previewInst(id); return; }
+    setMarkedIds(new Set());
     selectInst(id); // 主选中 + 底部编辑器聚焦(切片乐器自动聚焦最左片)
   };
   // §23 copy:抓多选集(空则退化到 selId)→ 深拷贝 detach 进剪贴板(剥活引用;paste 时再 clone 拿新 id)。不进 undo(瞬态)。
@@ -1282,7 +1287,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     pushHistory();
     const inst0 = findInst(cur, instId); // 兜底:bars 永远夹到「到下一片的空档」内,不论编辑器是否已 clamp(防重叠铁律)
     const bars = inst0?.payload.kind === 'collage' ? Math.min(clip.bars, roomAt(collageDocView(inst0.payload), clip.startStep, clip.id) / inst0.payload.stepsPerBar) : clip.bars;
-    const next = patchCollageClip(cur, instId, clip.id, { startSample: clip.startSample, endSample: clip.endSample, bars, timeMul: clip.timeMul, semitones: clip.semitones, fadeOutBars: clip.fadeOutBars, fadeSilenceBars: clip.fadeSilenceBars, gainDb: clip.gainDb });
+    const next = patchCollageClip(cur, instId, clip.id, { startSample: clip.startSample, endSample: clip.endSample, bars, timeMul: clip.timeMul, warpPts: clip.warpPts, semitones: clip.semitones, fadeOutBars: clip.fadeOutBars, fadeSilenceBars: clip.fadeSilenceBars, gainDb: clip.gainDb });
     updateSession(next);
     const inst = findInst(next, instId); if (inst) loadInstrumentToEngine(inst, true);
     const en = eng.current, c = ctxRef.current; // 片在试听中(按 clip.id)→ 不停就边界无缝换上新 region,沿用片自己的 gain/eq/pan(从 patch 后的片取,保留 eq)
@@ -1409,7 +1414,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (o.startSample === clip.startSample && o.endSample === clip.endSample && o.bars === clip.bars
           && (o.timeMul ?? 1) === (clip.timeMul ?? 1) && (o.semitones || 0) === (clip.semitones || 0)
           && (o.fadeOutBars || 0) === (clip.fadeOutBars || 0) && (o.fadeSilenceBars || 0) === (clip.fadeSilenceBars || 0)
-          && (o.gainDb || 0) === (clip.gainDb || 0)) return;
+          && (o.gainDb || 0) === (clip.gainDb || 0)
+          && JSON.stringify(o.warpPts ?? null) === JSON.stringify(clip.warpPts ?? null)) return; // §36:marker-only 改动也得过(否则被当 no-op 丢掉,标了不存)
     }
     const next = cur.instruments.map((i) => (i.id === instId && i.payload.kind === 'sample' ? { ...i, payload: { kind: 'sample' as const, clip } } : i));
     pushHistory();
@@ -1423,9 +1429,10 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const cur = soundToClip(s); // §28.8 ClipEditor 在「选中/换素材/analysis 到达」重挂时会回流一次 emit;与现有 warp 无实质差异 → 早退:不压栈(免污染 undo)、不落库、不触发 auditionSwap(长 loop 会孤儿化正在响的 player = 停不下来)
     if (cur.startSample === clip.startSample && cur.endSample === clip.endSample && cur.bars === clip.bars
         && (cur.timeMul ?? 1) === (clip.timeMul ?? 1) && (cur.semitones || 0) === (clip.semitones || 0)
-        && (cur.fadeOutBars || 0) === (clip.fadeOutBars || 0) && (cur.fadeSilenceBars || 0) === (clip.fadeSilenceBars || 0)) return;
+        && (cur.fadeOutBars || 0) === (clip.fadeOutBars || 0) && (cur.fadeSilenceBars || 0) === (clip.fadeSilenceBars || 0)
+        && JSON.stringify(cur.warpPts ?? null) === JSON.stringify(clip.warpPts ?? null)) return; // §36:marker-only 改动也得过
     pushHistory(); // §16:预调改 Sound.warp(快照口径②)→ 改动前压栈,可撤
-    const warp: SampleWarp = { startSample: clip.startSample, endSample: clip.endSample, bars: clip.bars, timeMul: clip.timeMul, semitones: clip.semitones, fadeOutBars: clip.fadeOutBars, fadeSilenceBars: clip.fadeSilenceBars, warpedBy: 'manual' };
+    const warp: SampleWarp = { startSample: clip.startSample, endSample: clip.endSample, bars: clip.bars, timeMul: clip.timeMul, semitones: clip.semitones, fadeOutBars: clip.fadeOutBars, fadeSilenceBars: clip.fadeSilenceBars, warpPts: clip.warpPts, warpedBy: 'manual' };
     const sounds = new Map(c.soundsById); sounds.set(soundId, { ...s, warp }); // 不可变更新:免污染已压栈的快照引用
     ctxRef.current = { ...c, soundsById: sounds }; setCtx(ctxRef.current);
     api.sounds.patch(soundId, { warp }).then(() => refreshGens()).catch(() => {});
