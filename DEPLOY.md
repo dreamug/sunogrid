@@ -120,7 +120,7 @@ NODE_ENV=production PORT=3000 npm start   # next start(默认 3000)
 ```bash
 BRANCH=main SERVICE_NAME=sunogrid ./release.sh
 HEALTHCHECK_URL=https://你的域名/api/health ./release.sh
-PORT=3007 ./release.sh
+PORT=<实际web端口> ./release.sh
 RESTART_CMD='supervisorctl restart sunogrid-web' ./release.sh
 RESTART_CMD='pm2 restart sunogrid' ./release.sh
 ```
@@ -154,7 +154,7 @@ git pull --ff-only
 ./release.sh
 ```
 
-`release.sh` 默认会尝试重启 `sunogrid`,并在 supervisord 场景自动尝试 `sunogrid-web`。健康检查默认请求 `/api/health`;如果 supervisord 进程环境里能读到 `PORT`,脚本会用实际端口,否则依次尝试 3000 和 3007。如果需要显式指定:
+`release.sh` 默认会尝试重启 `sunogrid`,并在 supervisord 场景自动尝试 `sunogrid-web`。健康检查只使用明确配置的地址:优先 `HEALTHCHECK_URL`,其次 `PORT`,再其次从 supervisord 进程环境或命令中读取实际 `PORT`;读不到就失败并要求显式配置。如果需要显式指定:
 
 ```bash
 cd /data/deploy/sunogrid
@@ -166,7 +166,9 @@ HEALTHCHECK_URL=https://你的域名/api/health ./release.sh
 
 ```bash
 supervisorctl status sunogrid-web sunogrid-stem
-curl -f http://127.0.0.1:3000/api/health
+curl -f https://你的域名/api/health
+# 或:
+curl -f http://127.0.0.1:<实际web端口>/api/health
 ```
 
 ---

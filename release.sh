@@ -7,6 +7,7 @@ set -Eeuo pipefail
 # Common overrides:
 #   BRANCH=main SERVICE_NAME=sunogrid ./release.sh
 #   HEALTHCHECK_URL=https://your-domain.example/api/health ./release.sh
+#   PORT=<actual-web-port> ./release.sh
 #   RESTART_CMD='supervisorctl restart sunogrid-web' ./release.sh
 #   RESTART_CMD='pm2 restart sunogrid' ./release.sh
 
@@ -130,7 +131,7 @@ detect_supervisor_port() {
   return 1
 }
 
-resolve_healthcheck_urls() {
+resolve_healthcheck_url() {
   if [[ -n "$HEALTHCHECK_URL" ]]; then
     printf '%s\n' "$HEALTHCHECK_URL"
     return
@@ -148,8 +149,7 @@ resolve_healthcheck_urls() {
     return
   fi
 
-  printf 'http://127.0.0.1:3000/api/health\n'
-  printf 'http://127.0.0.1:3007/api/health\n'
+  die "Healthcheck URL is unknown. Set HEALTHCHECK_URL=https://your-domain/api/health or PORT=<actual-port>."
 }
 
 healthcheck() {
@@ -161,17 +161,11 @@ healthcheck() {
   fi
 
   local healthcheck_url
-  while IFS= read -r healthcheck_url; do
-    [[ -n "$healthcheck_url" ]] || continue
-    log "Checking health: $healthcheck_url"
-    if curl --fail --silent --show-error \
-      --retry 12 --retry-delay 2 --retry-connrefused \
-      "$healthcheck_url" >/dev/null; then
-      return 0
-    fi
-  done < <(resolve_healthcheck_urls)
-
-  die "Healthcheck failed. Set HEALTHCHECK_URL=https://your-domain/api/health or PORT=<actual-port> and retry."
+  healthcheck_url="$(resolve_healthcheck_url)"
+  log "Checking health: $healthcheck_url"
+  curl --fail --silent --show-error \
+    --retry 12 --retry-delay 2 --retry-connrefused \
+    "$healthcheck_url" >/dev/null
 }
 
 need_cmd git
