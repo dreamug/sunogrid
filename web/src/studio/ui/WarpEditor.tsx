@@ -146,8 +146,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
   const srcDur = total / sampleRate;
   const beatsBar = beatsPerBar;
   const masterBar = (beatsBar * 60) / targetBpm;
-  const nativeBar = (beatsBar * 60) / (nativeBpm > 0 ? nativeBpm : 90); // 源真实每小节秒数 = 可靠锚(nativeBpm 靠生成时填的 BPM)
-  const STRETCH_BAND = Math.SQRT2; // 连续变速(Shift 拖)只许在源速 ±半个八度内微调;更大变速走 ÷2/×2(timeMul)。防 warp 漂到 360BPM 这种离谱值,且与八度步进无缝拼接
+  const STRETCH_BAND = Math.SQRT2; // 连续变速(Shift 拖)单次手势只许 ±半个八度(以按下那刻的速度为中心,见 stretch 分支);更大变速走 ÷2/×2(timeMul)。防一拖飞到 360BPM
 
   // 初始 secPerBar 用检测区间长/N(= 无缝速度,最准);兜底用 nativeBpm。
   const init = useMemo(() => {
@@ -483,11 +482,14 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
       setFadeOutBars((f) => Math.min(f, nm));
       setFadeSilenceBars((f) => Math.min(f, nm));
     } else if (d.mode === 'stretch') {
-      // 支点 = trim 起点,抓住的源点跟随光标 → 改 secPerBar;锚定到源速 ±半个八度(超出走 ÷2/×2)
+      // 支点 = trim 起点,抓住的源点跟随光标 → 改 secPerBar;以「按下那刻的速度」为中心 ±半个八度连续微调。
+      // 锚到 secPerBar0(而非固定 nativeBar):素材即便已停在源速 ±半八度的边沿,本次手势两个方向也都对称可拖,
+      // 不会单向卡死(老 bug:auto-warp 把 clip 钳到 nativeBar/√2 地板上,往「变长」方向再拖永远被 Math.max 钳回)。
+      // 单次手势仍只许走半个八度 → 防一拖飞到 360BPM;想跨整八度走 ÷2/×2(timeMul)。
       const pivotSrc = srcSecAt(trimStartBar);
       const denom = ob - trimStartBar;
       if (Math.abs(denom) > 1e-4) {
-        const sp = Math.min(Math.max((d.grabSrcSec - pivotSrc) / denom, nativeBar / STRETCH_BAND), nativeBar * STRETCH_BAND);
+        const sp = Math.min(Math.max((d.grabSrcSec - pivotSrc) / denom, d.secPerBar0 / STRETCH_BAND), d.secPerBar0 * STRETCH_BAND);
         setAnchorOutBar(trimStartBar);
         setAnchorSrcSec(pivotSrc);
         setSecPerBar(sp);
