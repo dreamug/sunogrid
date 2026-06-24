@@ -7,6 +7,7 @@ set -Eeuo pipefail
 # Common overrides:
 #   BRANCH=main SERVICE_NAME=sunogrid ./release.sh
 #   HEALTHCHECK_URL=https://your-domain.example/api/health ./release.sh
+#   RESTART_CMD='supervisorctl restart sunogrid-web' ./release.sh
 #   RESTART_CMD='pm2 restart sunogrid' ./release.sh
 
 IFS=$'\n\t'
@@ -67,7 +68,23 @@ restart_app() {
     return
   fi
 
-  die "No restart target found. Install systemd service '$SERVICE_NAME', create pm2 app '$SERVICE_NAME', or set RESTART_CMD."
+  if command -v supervisorctl >/dev/null 2>&1; then
+    supervisor_candidates=("$SERVICE_NAME")
+    if [[ "$SERVICE_NAME" != *-web ]]; then
+      supervisor_candidates+=("${SERVICE_NAME}-web")
+    fi
+
+    for supervisor_name in "${supervisor_candidates[@]}"; do
+      if supervisorctl status "$supervisor_name" >/dev/null 2>&1; then
+        log "Restarting supervisord program: $supervisor_name"
+        supervisorctl restart "$supervisor_name"
+        supervisorctl status "$supervisor_name" || true
+        return
+      fi
+    done
+  fi
+
+  die "No restart target found. Install systemd/supervisord/pm2 target '$SERVICE_NAME', or set RESTART_CMD."
 }
 
 healthcheck() {
