@@ -109,6 +109,20 @@ npm run build               # = prisma generate && next build(generate 已并进
 NODE_ENV=production PORT=3000 npm start   # next start(默认 3000)
 ```
 
+服务器上已经配置好 systemd/pm2 后,之后上线可以直接在仓库根目录运行:
+
+```bash
+./release.sh
+```
+
+默认流程:拉取 `origin/main` 的快进更新 → `npm ci` → `npm run build` → `npm run db:deploy` → 重启 `sunogrid` → 请求 `/api/health`。常用覆盖:
+
+```bash
+BRANCH=main SERVICE_NAME=sunogrid ./release.sh
+HEALTHCHECK_URL=https://你的域名/api/health ./release.sh
+RESTART_CMD='pm2 restart sunogrid' ./release.sh
+```
+
 建议用进程管理器常驻。**systemd 样例见 [`deploy/sunogrid.service.example`](deploy/sunogrid.service.example)**;或 pm2:
 
 ```bash
