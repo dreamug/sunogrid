@@ -6,7 +6,7 @@
 
 ## Conclusion
 
-生产机为 `cable00`,仓库根目录是 `/data/deploy/sunogrid`,web 服务由 supervisord 的 `sunogrid-web` 管理,当前 web 端口为 `3007`。以后常规上线在仓库根目录执行 `./release.sh`;脚本会对齐 `origin/main`,构建、迁移、重启 `sunogrid-web`,再检查 `/api/health`。`sunogrid-stem` 是独立服务,常规 web 上线不重启。
+生产机为 `cable00`,仓库根目录是 `/data/deploy/sunogrid`,web 服务由 supervisord 的 `sunogrid-web` 管理,当前 web 端口为 `3037`。以后常规上线在仓库根目录执行 `./release.sh`;脚本会对齐 `origin/main`,构建、迁移、重启 `sunogrid-web`,再检查 `/api/health`。`sunogrid-stem` 是独立服务,常规 web 上线不重启。
 
 ## Evidence
 
@@ -37,7 +37,7 @@ RESTART_CMD='supervisorctl restart sunogrid-web' ./release.sh
 supervisorctl status sunogrid-web sunogrid-stem
 curl -f https://你的域名/api/health
 # 或:
-curl -f http://127.0.0.1:3007/api/health
+curl -f http://127.0.0.1:3037/api/health
 ```
 
 ## Implications

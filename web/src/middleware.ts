@@ -20,7 +20,8 @@ function redirectUrl(req: NextRequest, pathname: string, search = '') {
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // 认证 API 永远放行(注册/登录本身)。
+  // 健康检查与认证 API 永远放行;健康检查由部署脚本和反代使用,不能要求登录 cookie。
+  if (pathname === '/api/health') return NextResponse.next();
   if (pathname.startsWith('/api/auth')) return NextResponse.next();
 
   const hasSession = req.cookies.has(SESSION_COOKIE);

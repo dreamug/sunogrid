@@ -17,4 +17,9 @@
 ## [2026-06-24] maintenance | 健康检查端口规则修正
 
 - 修正 `release-flow` 和 `current-production-deployment` 中把健康检查固定到 3000 的描述。
-- 记录当前线上 web 端口为 `3007`;健康检查应使用当前部署端口或显式 `HEALTHCHECK_URL`,不做端口猜测。
+- 记录当前线上 web 端口为 `3037`;健康检查应使用当前部署端口或显式 `HEALTHCHECK_URL`,不做端口猜测。
+
+## [2026-06-24] maintenance | 健康检查认证放行
+
+- 根据 20:23 部署日志,`release.sh` 已从 supervisord 读到实际端口 `3037`,但 `/api/health` 返回 401。
+- 结论:健康检查接口被登录中间件拦截,应在 middleware 中公开放行 `/api/health`。

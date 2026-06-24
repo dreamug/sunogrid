@@ -10,7 +10,7 @@ SunoGrid 的上线流程以服务器仓库根目录中的 `release.sh` 为入口
   - `REMOTE=origin`
   - `BRANCH=main`
   - `SERVICE_NAME=sunogrid`
-  - `DEFAULT_WEB_PORT=3007`
+  - `DEFAULT_WEB_PORT=3037`
   - `PORT` 默认为空;显式设置时优先于默认端口。
   - `RUN_DB_MIGRATIONS=1`
   - `RUN_HEALTHCHECK=1`
@@ -28,8 +28,8 @@ SunoGrid 的上线流程以服务器仓库根目录中的 `release.sh` 为入口
   - 然后尝试 pm2。
   - 然后尝试 supervisord 的 `SERVICE_NAME`,并在 `SERVICE_NAME` 不以 `-web` 结尾时自动尝试 `${SERVICE_NAME}-web`。
 - 当前线上 supervisord web program 是 `sunogrid-web`。
-- 当前线上 web 端口是 `3007`。
-- 健康检查不猜测端口:优先使用 `HEALTHCHECK_URL`,其次使用显式 `PORT`,再其次读取 supervisord 进程实际 `PORT`;读不到时使用项目记录的当前线上默认端口 `3007`。
+- 当前线上 web 端口是 `3037`。
+- 健康检查不猜测端口:优先使用 `HEALTHCHECK_URL`,其次使用显式 `PORT`,再其次读取 supervisord 进程实际 `PORT`;读不到时使用项目记录的当前线上默认端口 `3037`。
 
 ## Standard Command
 
@@ -52,7 +52,7 @@ RESTART_CMD='supervisorctl restart sunogrid-web' ./release.sh
 cd /data/deploy/sunogrid
 HEALTHCHECK_URL=https://你的域名/api/health ./release.sh
 # 或:
-PORT=3007 ./release.sh
+PORT=3037 ./release.sh
 ```
 
 ## Related Pages
