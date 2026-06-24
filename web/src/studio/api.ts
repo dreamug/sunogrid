@@ -70,4 +70,13 @@ export const api = {
     get: (signature: string): Promise<{ assetId: string; cdn: string } | null> => fetch(`/api/warp-render?signature=${encodeURIComponent(signature)}`).then(J),
     put: (b: Record<string, unknown>): Promise<{ assetId: string; cdn: string }> => post('/api/warp-render', b),
   },
+  // §35 AI 提示词助手:自然语言 → 一行 Suno 提示词。错误体是 { error },单独解析以拿干净文案。
+  ai: {
+    prompt: async (b: { idea: string; mode: 'sound' | 'advanced'; bpm?: number; key?: string }): Promise<{ prompt: string }> => {
+      const r = await fetch('/api/ai/prompt', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+      return j;
+    },
+  },
 };

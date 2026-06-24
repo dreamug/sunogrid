@@ -326,8 +326,35 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .gen-top-r { margin-left:auto; display:flex; align-items:center; gap:8px; }
 .gen-top .gen-mode { height:26px; }
 .gen-top .gen-mode button { display:flex; align-items:center; }
-.gen-ta { width:100%; resize:vertical; font-size:12px; color:var(--tx); background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); padding:8px 9px; font-family:inherit; line-height:1.5; transition:background .12s ease; }
+.gen-ta { width:100%; height:150px; resize:vertical; font-size:12px; color:var(--tx); background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); padding:8px 9px; font-family:inherit; line-height:1.5; transition:background .12s ease; }
 .gen-ta:focus { outline:none; background:var(--bg-2); } /* 不用扎眼的 focus 边框,轻轻提一档背景表示聚焦 */
+
+/* §35 AI 提示词助手:gen-ta 角落 sparkle 图标按钮(ghost,照 .ic/.proj-del:中性 rest,只 hover/激活才上暖色)+ 下拉浮层(走 .gen-ta-wrap 定位锚) */
+.gen-ta-wrap { position:relative; }
+.gen-ai { position:absolute; right:7px; bottom:7px; display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; padding:0; color:var(--tx-3); background:transparent; border:1px solid transparent; border-radius:var(--r); cursor:pointer; transition:color .1s, background .1s, border-color .1s; }
+.gen-ai:hover { color:var(--tx); background:var(--bg-2); border-color:var(--line-2); }
+.gen-ai.on { color:var(--acc); background:var(--acc-dim); border-color:var(--acc); }
+.pa-backdrop { position:fixed; inset:0; z-index:45; }
+.pa-pop { position:absolute; top:calc(100% + 6px); left:0; right:0; z-index:50; background:var(--bg-2); border:1px solid var(--line-2); border-radius:var(--r); box-shadow:0 10px 28px rgba(0,0,0,.55); overflow:hidden; }
+.pa-head { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--line); }
+.pa-tt { font-size:13px; font-weight:500; color:var(--tx); }
+.pa-body { padding:11px 12px; display:flex; flex-direction:column; gap:9px; }
+.pa-lab { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--tx-3); font-weight:500; margin-bottom:5px; }
+.pa-in { width:100%; resize:vertical; min-height:46px; font:inherit; font-size:12px; line-height:1.5; color:var(--tx); background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); padding:8px 9px; }
+.pa-in:focus { outline:none; background:var(--bg-1); }
+.pa-gen { align-self:flex-start; display:inline-flex; align-items:center; gap:6px; font:inherit; font-size:11px; font-weight:500; letter-spacing:.04em; color:var(--acc-ink); background:var(--acc); border:none; border-radius:var(--r); padding:6px 14px; cursor:pointer; }
+.pa-gen:hover:not(:disabled) { background:color-mix(in srgb, var(--acc) 88%, #fff); }
+.pa-gen:disabled { opacity:.4; cursor:not-allowed; }
+.pa-err { font-size:11px; line-height:1.5; color:var(--danger); }
+.pa-res { background:var(--bg-1); border:1px solid var(--line-2); border-radius:var(--r); padding:9px 10px; display:flex; flex-direction:column; gap:8px; }
+.pa-res-l { font-size:9.5px; letter-spacing:.08em; color:var(--tx-3); font-family:var(--mono); }
+.pa-res-t { font-size:12px; line-height:1.55; color:var(--tx); }
+.pa-acts { display:flex; gap:6px; }
+.pa-use { font:inherit; font-size:11px; font-weight:500; color:var(--acc-ink); background:var(--acc); border:none; border-radius:var(--r); padding:4px 12px; cursor:pointer; }
+.pa-use:hover { background:color-mix(in srgb, var(--acc) 88%, #fff); }
+.pa-redo { font:inherit; font-size:11px; color:var(--tx-2); background:transparent; border:1px solid var(--line-2); border-radius:var(--r); padding:4px 12px; cursor:pointer; }
+.pa-redo:hover:not(:disabled) { border-color:var(--acc); color:var(--acc); }
+.pa-redo:disabled { opacity:.4; cursor:not-allowed; }
 .gloop { height:26px; box-sizing:border-box; display:inline-flex; align-items:center; padding:0 10px; font:inherit; font-size:11px; color:var(--tx-2); background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); cursor:pointer; }
 .gloop:hover { color:var(--tx); border-color:var(--line-2); }
 .gloop.on, .gloop[aria-pressed="true"] { color:var(--acc); border-color:var(--acc); background:var(--acc-dim); }

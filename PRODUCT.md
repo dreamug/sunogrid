@@ -1351,3 +1351,32 @@ Splice 文件名编码了 BPM/调式(`NH_IAP_100_..._Dmaj`=100/D大、`SS_AXR2_1
 - **未实测**:拖块/stem 到 pad 播放、软删/undo、上传长素材路径(>32 小节走同一条 `ingestSound`)。
 - **code-review 修复(2026-06-23,high effort)**:① [stems.ts](web/src/lib/stems.ts) 块分离窗口改 **warp 优先**(原 analysis 优先 → 块被 ClipEditor trim 后会分错段)。② [studioGens.ts](web/src/studio/studioGens.ts) `ingestSound` 切块前加 `stopped()` 闸 + 中途取消软删歌(免取消留孤儿歌)。③④ 重切改**硬删**旧块:[sounds/[id]/route.ts](web/src/app/api/sounds/[id]/route.ts) 加 `?hard=1`(`db.sound.delete` → 级联清块的 stem、clip SetNull),`rechopSong` 用之 → 修「undo 复活旧块成重复」+「重切泄漏 stem」。**实测**:`?hard=1` 删带 stem 的块 → 块 + 其 6 stem 级联清掉、无外键报错、其余不动 ✓。
 - **缓修(非 bug,质量)**:跨设备/切声卡 SR 错位(既有 stem 机制老问题,同机已验对齐);阶段条给"不会切的 advanced 上传"也显示 Chop 段(纯视觉);`renderBlocks`/`renderStems` 与块创建 payload 的重复、`soundKind()` 统一判别、`ChopView.win`/`wavePath` 复用 —— 均留后续重构,避免一次动太多破坏在用功能。
+
+## §35 AI 提示词助手(gen-ta 角落 ✨ → 自然语言 → Suno 提示词)—— ✅ 已码已验外部链路 · 2026-06-24
+
+把"想要什么"用大白话写出来,LLM 翻成一行 Suno 风格提示词、写回生成框。**最小实现**,用最便宜的 qwen。
+
+### 35.0 决策(为什么这么放)
+- **位置 = app 的 `gen-ta`(左栏生成框),不是 suno.com 页面**:那才是你真正在写、再驱动 Suno 的提示词;React 原生,加按钮+浮层零成本;app 自带后端可安全托管 key。
+- **LLM 走服务端路由 `POST /api/ai/prompt`**:`DASHSCOPE_API_KEY` 只在服务端读,**绝不下发前端/不进开源仓库**(对齐"自带插件不做服务端"——这里是 app 自己的后端,非 Suno 代理;Suno token 仍只在浏览器)。
+- **隐私口径**:与 Suno token 不同,这里的自然语言 idea **会**经 app server → 阿里云百炼。**opt-in**:不配 key 则路由 503、前端报"未配置",生成功能照常。自托管者填自己的 key。
+- **模型 = `qwen-flash`(最便宜档)**,OpenAI 兼容接口,base/model 都可 env 覆盖。
+- **Sound vs Song 系统提示词分开**:Sound=单一乐器/音色的片段 loop(只描述那一个声音,~6–12 词);Song=一整首器乐曲(genre/mood/编配/能量/制作,可更丰满)。`systemFor(mode)` 切。
+- **界面全英文**;且**铁律:不管用户用什么语言写 idea,输出到 Suno 的提示词一定是英文**(系统提示词强约束 + 已用中文输入实测)。
+
+### 35.1 §15 持久化 / §16 undo 合规(零负担)
+- **§15**:**无新表无新列**。idea + 结果都是瞬态组件态;唯一落点是用户点 "Use this" 时调既有 `onGenPrompt`(写 `genPrompt`,本就随 `genPrefs` 持久化)。
+- **§16**:**不扩 7 项口径**。写回提示词等价于在生成框打字,不是独立可撤的交互(和 §34 同理,提示词不在 undo 范畴)。
+
+### 35.2 实现(每步 typecheck ✓)
+- **路由** [api/ai/prompt/route.ts](web/src/app/api/ai/prompt/route.ts):`getCurrentUser` 门 + `rateLimit`(用户+IP,30/min)+ key 缺失 503;两套 system prompt(`SYSTEM_SOUND`/`SYSTEM_SONG` + 共用 `COMMON_RULES`:一行逗号分隔 / 结尾 instrumental / 不写 BPM&Key / **永远英文**);去包裹引号/句末标点。
+- **客户端** [api.ts](web/src/studio/api.ts) `api.ai.prompt`(单独解析 `{error}` 拿干净文案)。
+- **浮层** [PromptAssist.tsx](web/src/studio/ui/PromptAssist.tsx):锚在 `.gen-ta-wrap` 下拉、backdrop 点外关、Esc 关、⌘↵ 生成;Generate → 结果模块(Use this / Redo);当前 mode·BPM·Key 当上下文带给模型(无标签、无脚注)。
+- **接入** [LoopManager.tsx](web/src/studio/ui/LoopManager.tsx):`gen-ta`(高 150px)包 `.gen-ta-wrap`,右下角 `.gen-ai` 按钮装 `SparkleIcon`(glyphs.tsx 的 monochrome sparkle,吃 currentColor),`onApply = onGenPrompt`。
+- **样式** [globals.css](web/src/app/globals.css):`.gen-ta{height:150px}` + `.gen-ai` **ghost**(照 `.ic`/`.proj-del`:中性 `--tx-3` rest、hover 才 `bg-2`+border、`.on` 才上 `--acc`;不再 rest 就暖色填充 → 修"太扎眼")+ `.pa-*`(照 `.fx-pop`/`.wb-ext-pop` 浮层范式)。
+- **env**:[.env.local](web/.env.local)(本机,已填 key)+ [.env.example](web/.env.example)(文档化 `DASHSCOPE_API_KEY`/`QWEN_MODEL`/`DASHSCOPE_BASE_URL`)。
+
+### 35.3 已验 / 未验(2026-06-24)
+- ✅ `tsc` 干净;`POST /api/ai/prompt` 未登录 401(路由已编译+鉴权门生效);**DashScope 直连实测**:`qwen-flash` 对"dark trap…"回干净提示词、114 token(成本可忽略)、模型名/endpoint/key 全对。
+- ✅ **中文输入实测**:"忧郁中国风古筝+lo-fi 嘶嘶声" → Sound 给单一古筝音色描述、Song 给整曲编配,**两者都纯英文**、都以 instrumental 收尾、未漏 BPM/Key。
+- **未走真机登录 UI 流**(避免在你 DB 造测试用户/项目):✨ 按钮渲染 + 浮层开合 + Use this 写回 —— 标准 React/CSS,留你本机点一眼。

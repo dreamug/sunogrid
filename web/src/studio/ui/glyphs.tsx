@@ -7,3 +7,12 @@ export function TransportIcon({ stop = false, size = 11 }: { stop?: boolean; siz
     </svg>
   );
 }
+
+// §35 AI 提示词助手:单点 sparkle(monochrome,吃 currentColor → 跟随按钮态变色,不像 emoji 那样扎眼)。
+export function SparkleIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style={{ display: 'block', flex: 'none' }}>
+      <path d="M12 1 Q13 10 23 12 Q13 14 12 23 Q11 14 1 12 Q11 10 12 1 Z" />
+    </svg>
+  );
+}

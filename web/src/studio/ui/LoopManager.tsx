@@ -3,7 +3,8 @@
 import { useState, Fragment } from 'react';
 import type { GenView, LoopView } from '@/contracts/studioViews';
 import { SunoStatus, type SunoConnState } from '@/studio/ui/SunoStatus';
-import { TransportIcon } from '@/studio/ui/glyphs';
+import { PromptAssist } from '@/studio/ui/PromptAssist';
+import { TransportIcon, SparkleIcon } from '@/studio/ui/glyphs';
 
 interface Props {
   gens: GenView[];
@@ -119,6 +120,7 @@ export function LoopManager(p: Props) {
   const gens = p.gens.filter((g) => !(g.status === 'complete' && g.sounds.length === 0));
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({}); // 变体 id → 二级收起
   const [sunoState, setSunoState] = useState<SunoConnState>('checking'); // 连接灯 → 红灯时禁用生成
+  const [assistOpen, setAssistOpen] = useState(false); // §35 AI 提示词助手浮层开关
   const toggle = (id: string) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
   // ▶ 三态:warm-up=转圈、在响=均衡条(点了停)、空闲=▶。
   const playInner = (id: string) => {
@@ -230,13 +232,25 @@ export function LoopManager(p: Props) {
               <SunoStatus onState={setSunoState} />
             </div>
           </div>
-          <textarea
-            className="gen-ta"
-            rows={3}
-            value={p.genPrompt}
-            onChange={(e) => p.onGenPrompt(e.target.value)}
-            placeholder={p.genMode === 'advanced' ? 'Describe the style / song (full instrumental)' : 'Describe the loop to generate (any style)'}
-          />
+          <div className="gen-ta-wrap">
+            <textarea
+              className="gen-ta"
+              rows={3}
+              value={p.genPrompt}
+              onChange={(e) => p.onGenPrompt(e.target.value)}
+              placeholder={p.genMode === 'advanced' ? 'Describe the style / song (full instrumental)' : 'Describe the loop to generate (any style)'}
+            />
+            <button type="button" className={'gen-ai' + (assistOpen ? ' on' : '')} onClick={() => setAssistOpen((v) => !v)} title="Write a Suno prompt from plain language (AI)" aria-label="AI prompt assist"><SparkleIcon /></button>
+            {assistOpen && (
+              <PromptAssist
+                mode={p.genMode}
+                bpm={p.genBpm}
+                musicalKey={p.genKey}
+                onApply={p.onGenPrompt}
+                onClose={() => setAssistOpen(false)}
+              />
+            )}
+          </div>
           <div className="gen-keyrow">
             <KeyKeyboard value={p.genKey} onChange={p.onGenKey} />
             <button
@@ -261,7 +275,6 @@ export function LoopManager(p: Props) {
           )}
         </div>
         <div className="lib-list">
-          {gens.length === 0 && <div className="muted small" style={{ padding: '6px 2px' }}>Nothing yet — hit Generate above</div>}
           {gens.map((g) => {
             const isUp = g.source === 'upload';
             const busy = g.status === 'generating' || g.status === 'streaming' || g.status === 'uploading' || g.status === 'detecting' || g.status === 'chopping';
