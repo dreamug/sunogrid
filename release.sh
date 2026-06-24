@@ -17,13 +17,14 @@ WEB_DIR="${WEB_DIR:-$APP_DIR/web}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
 SERVICE_NAME="${SERVICE_NAME:-sunogrid}"
-PORT="${PORT:-3000}"
+PORT="${PORT:-}"
 RUN_DB_MIGRATIONS="${RUN_DB_MIGRATIONS:-1}"
 RUN_TYPECHECK="${RUN_TYPECHECK:-0}"
 RUN_HEALTHCHECK="${RUN_HEALTHCHECK:-1}"
 FORCE_RESET="${FORCE_RESET:-0}"
-HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:${PORT}/api/health}"
+HEALTHCHECK_URL="${HEALTHCHECK_URL:-}"
 RESTART_CMD="${RESTART_CMD:-}"
+RESTARTED_SUPERVISOR_NAME=""
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"
@@ -79,12 +80,76 @@ restart_app() {
         log "Restarting supervisord program: $supervisor_name"
         supervisorctl restart "$supervisor_name"
         supervisorctl status "$supervisor_name" || true
+        RESTARTED_SUPERVISOR_NAME="$supervisor_name"
         return
       fi
     done
   fi
 
   die "No restart target found. Install systemd/supervisord/pm2 target '$SERVICE_NAME', or set RESTART_CMD."
+}
+
+detect_supervisor_port() {
+  [[ -n "$RESTARTED_SUPERVISOR_NAME" ]] || return 1
+  command -v supervisorctl >/dev/null 2>&1 || return 1
+
+  local pid
+  pid="$(supervisorctl pid "$RESTARTED_SUPERVISOR_NAME" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+
+  local value
+  if [[ -r "/proc/$pid/environ" ]]; then
+    value="$(tr '\0' '\n' <"/proc/$pid/environ" | awk -F= '$1 == "PORT" { print $2; exit }')"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  fi
+
+  if [[ -r "/proc/$pid/cmdline" ]]; then
+    local cmdline
+    cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline")"
+    if [[ "$cmdline" =~ (^|[[:space:]])PORT=([0-9]+)($|[[:space:]]) ]]; then
+      printf '%s\n' "${BASH_REMATCH[2]}"
+      return 0
+    fi
+    if [[ "$cmdline" =~ (^|[[:space:]])-p[[:space:]]+([0-9]+)($|[[:space:]]) ]]; then
+      printf '%s\n' "${BASH_REMATCH[2]}"
+      return 0
+    fi
+    if [[ "$cmdline" =~ (^|[[:space:]])--port=([0-9]+)($|[[:space:]]) ]]; then
+      printf '%s\n' "${BASH_REMATCH[2]}"
+      return 0
+    fi
+    if [[ "$cmdline" =~ (^|[[:space:]])--port[[:space:]]+([0-9]+)($|[[:space:]]) ]]; then
+      printf '%s\n' "${BASH_REMATCH[2]}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+resolve_healthcheck_urls() {
+  if [[ -n "$HEALTHCHECK_URL" ]]; then
+    printf '%s\n' "$HEALTHCHECK_URL"
+    return
+  fi
+
+  if [[ -n "$PORT" ]]; then
+    printf 'http://127.0.0.1:%s/api/health\n' "$PORT"
+    return
+  fi
+
+  local detected_port
+  detected_port="$(detect_supervisor_port || true)"
+  if [[ -n "$detected_port" ]]; then
+    printf 'http://127.0.0.1:%s/api/health\n' "$detected_port"
+    return
+  fi
+
+  printf 'http://127.0.0.1:3000/api/health\n'
+  printf 'http://127.0.0.1:3007/api/health\n'
 }
 
 healthcheck() {
@@ -95,10 +160,18 @@ healthcheck() {
     return
   fi
 
-  log "Checking health: $HEALTHCHECK_URL"
-  curl --fail --silent --show-error \
-    --retry 12 --retry-delay 2 --retry-connrefused \
-    "$HEALTHCHECK_URL" >/dev/null
+  local healthcheck_url
+  while IFS= read -r healthcheck_url; do
+    [[ -n "$healthcheck_url" ]] || continue
+    log "Checking health: $healthcheck_url"
+    if curl --fail --silent --show-error \
+      --retry 12 --retry-delay 2 --retry-connrefused \
+      "$healthcheck_url" >/dev/null; then
+      return 0
+    fi
+  done < <(resolve_healthcheck_urls)
+
+  die "Healthcheck failed. Set HEALTHCHECK_URL=https://your-domain/api/health or PORT=<actual-port> and retry."
 }
 
 need_cmd git
