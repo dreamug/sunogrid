@@ -19,6 +19,8 @@ export interface WarpRequest {
   conditioning: ConditioningMode;
   /** 指定目标小节数;不给则自动取能放下的最大整数小节。 */
   targetBars?: number;
+  /** §36 分段 warp 的中间控制点(已 normalize、按 beatFrac 升序)。srcFrac/beatFrac ∈ (0,1) = 占 trim 源 / 占整 loop 输出的比例(timeMul 无关)。空/缺 = 单段恒速(现状)。 */
+  warpFracs?: { srcFrac: number; beatFrac: number }[];
 }
 
 export interface WarpProgress {

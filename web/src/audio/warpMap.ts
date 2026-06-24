@@ -131,6 +131,24 @@ export function movePointBeat(pts: WarpPoint[] | undefined, startSample: number,
   return normalizeWarpPts(next, startSample, endSample, totalBeats);
 }
 
+/**
+ * 中间点 → 渲染用的分数控制点(srcFrac = 占 trim 源比例,beatFrac = 占整 loop 输出比例)。
+ * 分数 timeMul 无关(marker 与 loop 同步缩放),故渲染层不必知道 timeMul。先 normalize 保铁律。
+ */
+export function toFracs(
+  pts: WarpPoint[] | null | undefined,
+  startSample: number,
+  endSample: number,
+  totalBeats: number,
+): { srcFrac: number; beatFrac: number }[] {
+  const span = endSample - startSample;
+  if (span <= 0 || totalBeats <= 0) return [];
+  return normalizeWarpPts(pts, startSample, endSample, totalBeats).map((p) => ({
+    srcFrac: (p.src - startSample) / span,
+    beatFrac: p.beat / totalBeats,
+  }));
+}
+
 /** 缓存签名片段(改 marker → warp-render 缓存 bust)。空 = ''(与单段同签名 → 老缓存不失效)。 */
 export function warpPtsSig(pts?: WarpPoint[] | null): string {
   if (!pts || pts.length === 0) return '';

@@ -9,7 +9,7 @@ import type { WarpDone, WarpRequest } from '@/contracts';
  */
 export async function warpClip(req: WarpRequest): Promise<WarpDone> {
   const { default: SignalsmithStretch } = await import('signalsmith-stretch');
-  const { channels, sampleRate, nativeBpm, targetBpm, semitones, beatsPerBar, targetBars } = req;
+  const { channels, sampleRate, nativeBpm, targetBpm, semitones, beatsPerBar, targetBars, warpFracs } = req;
   const numCh = channels.length;
   const inDur = channels[0].length / sampleRate;
 
@@ -23,6 +23,11 @@ export async function warpClip(req: WarpRequest): Promise<WarpDone> {
   const targetDur = (bars * bpb * 60) / tgtBpm;
   const targetSamples = Math.max(1, Math.round(targetDur * sampleRate));
   const rate = inDur / targetDur; // 输出循环一圈 = targetDur
+
+  // §36 分段 warp:有中间控制点 → 走分段渲染(每段单渲 + 段边交叉淡化)。无 → 下面的单段恒速(产物与历史逐字一致,缓存兼容)。
+  if (warpFracs && warpFracs.length > 0) {
+    return warpClipPiecewise(req, { bars, targetSamples, semitones });
+  }
 
   // 渲染多圈,取稳态那一圈:跳过起始 latency、规避相位偏移、保证无缝
   const skipLoops = Math.max(1, Math.ceil(0.3 / targetDur));
@@ -67,6 +72,73 @@ export async function warpClip(req: WarpRequest): Promise<WarpDone> {
     loopStartSample: 0,
     loopEndSample: targetSamples,
   };
+}
+
+/** 把每声道一段重复 n 次拼一条(给「渲 3 份取中间份」跳起播暖机用)。 */
+const repeatCh = (seg: Float32Array[], n: number): Float32Array[] => seg.map((ch) => { const o = new Float32Array(ch.length * n); for (let k = 0; k < n; k++) o.set(ch, k * ch.length); return o; });
+
+/**
+ * 单段恒速一次性拉伸(复用单 schedule 路径,已验):segSrc → outSamples + tailX 个稳态样本(给段边交叉淡化用)。
+ * 渲 3 份取「中间份 + 进入第三份 tailX」→ 跳过 signalsmith 起播暖机/latency 且整段稳态;rate = inLen/outSamples。
+ */
+async function stretchSegmentSteady(SignalsmithStretch: (ctx: BaseAudioContext, o?: object) => Promise<{ addBuffers(b: Float32Array[]): Promise<number>; schedule(o: Record<string, number | boolean>): Promise<unknown>; connect(n: AudioNode): unknown }>, segSrc: Float32Array[], sampleRate: number, semitones: number, outSamples: number, tailX: number): Promise<Float32Array[]> {
+  const numCh = segSrc.length;
+  const inLen = segSrc[0].length;
+  const rate = inLen / outSamples;
+  const rep = repeatCh(segSrc, 3);
+  const total = 3 * outSamples + Math.round(0.1 * sampleRate);
+  const ctx = new OfflineAudioContext(numCh, total, sampleRate);
+  const st = await SignalsmithStretch(ctx, { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [numCh] });
+  await st.addBuffers(rep);
+  await st.schedule({ output: 0, input: 0, rate, semitones, loopStart: 0, loopEnd: rep[0].length / sampleRate, active: true });
+  st.connect((ctx as OfflineAudioContext).destination);
+  const r = await (ctx as OfflineAudioContext).startRendering();
+  return Array.from({ length: numCh }, (_, c) => r.getChannelData(c).slice(outSamples, 2 * outSamples + tailX)); // 中间份 + tailX
+}
+
+/**
+ * §36 分段 warp 渲染:warpFracs 把 trim 切成段,每段恒速拉伸到其输出长度(+X 尾),等功率淡入淡出后**环形 overlap-add**
+ * 拼成正好 targetSamples 一圈 —— 段边与「末↔首」loop 缝用同一套交叉淡化(末段尾 wrap 回叠首段头),无零隙、无方向错。
+ * spike 实测段边/缝跳变 ~3–6× 噪声底,与单段听感一致。
+ */
+async function warpClipPiecewise(req: WarpRequest, ctxv: { bars: number; targetSamples: number; semitones: number }): Promise<WarpDone> {
+  const { default: SignalsmithStretch } = await import('signalsmith-stretch');
+  const { channels, sampleRate, warpFracs } = req;
+  const { bars, targetSamples, semitones } = ctxv;
+  const numCh = channels.length;
+  const sliceLen = channels[0].length;
+  // 完整控制点(输出域用采样):首=(0,0)、中间点、尾=(sliceLen,targetSamples)。
+  const fr = (warpFracs ?? []).slice().sort((a, b) => a.beatFrac - b.beatFrac);
+  const cps = [{ src: 0, out: 0 }, ...fr.map((f) => ({ src: Math.round(f.srcFrac * sliceLen), out: Math.round(f.beatFrac * targetSamples) })), { src: sliceLen, out: targetSamples }];
+  const outLens = cps.slice(0, -1).map((a, i) => Math.max(1, cps[i + 1].out - a.out));
+  const X = Math.min(Math.round(0.006 * sampleRate), ...outLens.map((l) => Math.floor(l / 3))); // 交叉淡化长度
+
+  // 每段渲到 outLen+X(多出的 X 尾用于和下一段头叠混;末段的 X 尾 wrap 回叠首段头 = loop 缝)。
+  const parts: Float32Array[][] = [];
+  for (let i = 0; i < cps.length - 1; i++) {
+    const a = cps[i], b = cps[i + 1];
+    const segSrc = channels.map((ch) => ch.slice(Math.max(0, a.src), Math.max(a.src + 1, b.src)));
+    parts.push(await stretchSegmentSteady(SignalsmithStretch as never, segSrc, sampleRate, semitones, outLens[i], X));
+  }
+
+  // 每段头 X 淡入(sin)、尾 X 淡出(cos):重叠处 sin²+cos²=1 保功率。环形 overlap-add 到 targetSamples(末段尾 wrap)。
+  const out = Array.from({ length: numCh }, () => new Float32Array(targetSamples));
+  let off = 0;
+  for (let p = 0; p < parts.length; p++) {
+    const len = outLens[p], L = len + X;
+    for (let c = 0; c < numCh; c++) {
+      const dst = out[c], src = parts[p][c];
+      for (let i = 0; i < L; i++) {
+        let g = 1;
+        if (i < X) g *= Math.sin(((i + 0.5) / X) * (Math.PI / 2));       // 头淡入(与上一段/末段尾叠)
+        if (i >= len) g *= Math.cos(((i - len + 0.5) / X) * (Math.PI / 2)); // 尾淡出(与下一段/首段头叠)
+        const o = (off + i) % targetSamples;
+        dst[o] += src[i] * g;
+      }
+    }
+    off += len;
+  }
+  return { id: req.id, type: 'done', channels: out, sampleRate, bars, loopStartSample: 0, loopEndSample: targetSamples };
 }
 
 /** 按 [start,end) 取源(可越界):越界部分补零,保证返回长度恰为 end-start(平移/裁切自由,渲染长度仍准确)。 */

@@ -5,7 +5,7 @@ import type { ApiSound } from '@/studio/api';
 import { api, cdnUrl } from '@/studio/api';
 import type { Clip, CollageClip, Instrument, SampleWarp, Session, WarpPoint } from '@/contracts';
 import { clipTimeMul, defaultMixer, defaultSends, EQ_BANDS, fadeGain } from '@/contracts';
-import { warpPtsSig } from '@/audio/warpMap';
+import { warpPtsSig, toFracs } from '@/audio/warpMap';
 
 /** §36 从 JSON(Sound.warp)读 warpPts:只收形状对的 {src,beat} 数组;空/坏 → undefined。清洗留给渲染层 normalize。 */
 const parseWarpPts = (v: unknown): WarpPoint[] | undefined => {
@@ -38,18 +38,20 @@ async function decodedBuffer(assetId: string): Promise<AudioBuffer> {
 
 // fadeOutFrac/fadeSilenceFrac = 占 loop **整段**(渲染出的 buffer)的比例 0..0.5;在 region 层就换算成比例,
 // 这样 timeMul(buffer 拉长)时仍与编辑器里看到的"占后半多少"对齐,且 warpToBuffer 不必知道 bars/timeMul。
-export interface Region { startSample: number; endSample: number; bars: number; semitones: number; fadeOutFrac?: number; fadeSilenceFrac?: number; warpPts?: WarpPoint[] }
+export interface Region { startSample: number; endSample: number; bars: number; semitones: number; fadeOutFrac?: number; fadeSilenceFrac?: number; warpPts?: WarpPoint[]; warpFracs?: { srcFrac: number; beatFrac: number }[] }
+const BPB = 4; // 本 app 固定 4/4;marker beat 域 = 显示小节 × 4(timeMul 前,见 §36)
 const fadeFrac = (bars: number | undefined, loopBars: number): number => (bars && bars > 0 && loopBars > 0 ? Math.max(0, Math.min(0.5, bars / loopBars)) : 0);
 export function regionFromSound(s: ApiSound): Region {
   const w = (s.warp || {}) as Record<string, number>;
   const a = (s.analysis || {}) as Record<string, number>;
   if (typeof w.startSample === 'number' && typeof w.endSample === 'number') {
     const bars = w.bars ?? 1;
-    return { startSample: w.startSample, endSample: w.endSample, bars, semitones: w.semitones ?? 0, fadeOutFrac: fadeFrac(w.fadeOutBars, bars), fadeSilenceFrac: fadeFrac(w.fadeSilenceBars, bars), warpPts: parseWarpPts((s.warp as Record<string, unknown>).warpPts) };
+    const pts = parseWarpPts((s.warp as Record<string, unknown>).warpPts);
+    return { startSample: w.startSample, endSample: w.endSample, bars, semitones: w.semitones ?? 0, fadeOutFrac: fadeFrac(w.fadeOutBars, bars), fadeSilenceFrac: fadeFrac(w.fadeSilenceBars, bars), warpPts: pts, warpFracs: toFracs(pts, w.startSample, w.endSample, bars * BPB) };
   }
   return { startSample: a.startSample ?? 0, endSample: a.endSample ?? 0, bars: a.bars ?? 1, semitones: 0 };
 }
-export const regionFromClip = (c: Clip): Region => { const loopBars = c.bars * clipTimeMul(c); return { startSample: c.startSample, endSample: c.endSample, bars: loopBars, semitones: c.semitones, fadeOutFrac: fadeFrac(c.fadeOutBars, loopBars), fadeSilenceFrac: fadeFrac(c.fadeSilenceBars, loopBars), warpPts: c.warpPts }; }; // fade 比例的分母 = 渲染出的 buffer 总小节数(bars×timeMul);用 c.bars 会让 timeMul≠1 时淡出长度被成倍放大(字段语义=距 loop 尾 fadeOutBars 小节)
+export const regionFromClip = (c: Clip): Region => { const loopBars = c.bars * clipTimeMul(c); return { startSample: c.startSample, endSample: c.endSample, bars: loopBars, semitones: c.semitones, fadeOutFrac: fadeFrac(c.fadeOutBars, loopBars), fadeSilenceFrac: fadeFrac(c.fadeSilenceBars, loopBars), warpPts: c.warpPts, warpFracs: toFracs(c.warpPts, c.startSample, c.endSample, c.bars * BPB) }; }; // warpFracs 用显示小节域(c.bars×4,timeMul 前)→ 分数 timeMul 无关 // fade 比例的分母 = 渲染出的 buffer 总小节数(bars×timeMul);用 c.bars 会让 timeMul≠1 时淡出长度被成倍放大(字段语义=距 loop 尾 fadeOutBars 小节)
 
 /** Sound.warp(JSON 种子)→ 强类型 SampleWarp(与 Clip 同形)。缺字段按 analysis 兜底;出身默认 auto。 */
 export function warpFromSound(s: ApiSound): SampleWarp {
@@ -120,7 +122,7 @@ async function warpPure(s: ApiSound, masterBpm: number, region: Region): Promise
   const { channels, sampleRate } = await decodeAsset(s.assetId);
   const { warpClip, toAudioBuffer, sliceChannelsPadded } = await import('@/audio/signalsmithWarp');
   const sliced = sliceChannelsPadded(channels, region.startSample, region.endSample);
-  const done = await warpClip({ id: sig, channels: sliced, sampleRate, nativeBpm: s.sourceBpm, targetBpm: masterBpm, semitones: region.semitones || 0, beatsPerBar: 4, conditioning: 'trust-tempo', targetBars: region.bars });
+  const done = await warpClip({ id: sig, channels: sliced, sampleRate, nativeBpm: s.sourceBpm, targetBpm: masterBpm, semitones: region.semitones || 0, beatsPerBar: 4, conditioning: 'trust-tempo', targetBars: region.bars, warpFracs: region.warpFracs });
   const buf = toAudioBuffer(done);
   warpCache.set(sig, buf); lruTrim();
   return buf;
