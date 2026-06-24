@@ -10,6 +10,7 @@ import type { Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, Inst
 import { activeInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionRepeats, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
 import { normalize, diff, type Snapshot } from '@/studio/sync';
 import { StudioEngine } from '@/audio/studioEngine';
+import { warpPtsSig } from '@/audio/warpMap';
 import { buildBuffer, decodeAsset, loadLibrary, regionFromClip, regionFromSound, soundToClip, warpToBuffer } from '@/studio/realLibrary';
 import { loadGens, generateToLibrary, retryGen, uploadToLibrary, rechopSong, conciseError, type GenHooks } from '@/studio/studioGens';
 import { addSession as docAddSession, cloneInstrument, duplicateSessionAt, findInst, freeSlots, moveSession, patchCollageClip, patchMixer, patchSession, removeInstrument as docRemove, removeSessionAt } from '@/studio/sessionDoc';
@@ -1415,7 +1416,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
           && (o.timeMul ?? 1) === (clip.timeMul ?? 1) && (o.semitones || 0) === (clip.semitones || 0)
           && (o.fadeOutBars || 0) === (clip.fadeOutBars || 0) && (o.fadeSilenceBars || 0) === (clip.fadeSilenceBars || 0)
           && (o.gainDb || 0) === (clip.gainDb || 0)
-          && JSON.stringify(o.warpPts ?? null) === JSON.stringify(clip.warpPts ?? null)) return; // §36:marker-only 改动也得过(否则被当 no-op 丢掉,标了不存)
+          && warpPtsSig(o.warpPts) === warpPtsSig(clip.warpPts)) return; // §36:marker-only 改动也得过;用 warpPtsSig(beat 取 3 位)比,免非整数拍 FP 往返微差触发假重渲
     }
     const next = cur.instruments.map((i) => (i.id === instId && i.payload.kind === 'sample' ? { ...i, payload: { kind: 'sample' as const, clip } } : i));
     pushHistory();
@@ -1430,7 +1431,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     if (cur.startSample === clip.startSample && cur.endSample === clip.endSample && cur.bars === clip.bars
         && (cur.timeMul ?? 1) === (clip.timeMul ?? 1) && (cur.semitones || 0) === (clip.semitones || 0)
         && (cur.fadeOutBars || 0) === (clip.fadeOutBars || 0) && (cur.fadeSilenceBars || 0) === (clip.fadeSilenceBars || 0)
-        && JSON.stringify(cur.warpPts ?? null) === JSON.stringify(clip.warpPts ?? null)) return; // §36:marker-only 改动也得过
+        && warpPtsSig(cur.warpPts) === warpPtsSig(clip.warpPts)) return; // §36:marker-only 改动也得过;warpPtsSig 比对免 FP 往返假触发
     pushHistory(); // §16:预调改 Sound.warp(快照口径②)→ 改动前压栈,可撤
     const warp: SampleWarp = { startSample: clip.startSample, endSample: clip.endSample, bars: clip.bars, timeMul: clip.timeMul, semitones: clip.semitones, fadeOutBars: clip.fadeOutBars, fadeSilenceBars: clip.fadeSilenceBars, warpPts: clip.warpPts, warpedBy: 'manual' };
     const sounds = new Map(c.soundsById); sounds.set(soundId, { ...s, warp }); // 不可变更新:免污染已压栈的快照引用

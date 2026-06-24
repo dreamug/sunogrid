@@ -243,6 +243,17 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     return [{ ob: trimStartBar, s: baseSrcSec(trimStartBar) }, ...effPts.map((m) => ({ ob: m.outBar, s: m.srcSec })), { ob: trimEndBar, s: baseSrcSec(trimEndBar) }];
   }, [effPts, baseSrcSec, trimStartBar, trimEndBar]);
 
+  // §36 修复:闲时把 markers 剪枝成有效集(effPts)——滑 trim / Shift 变速后会留下落到 trim 外或 src 越界的「残留 marker」,
+  //   它们被 cps/emit(走 normalizeWarpPts)丢弃却仍在 markers 里,导致 ghost pin、拖拽夹错邻居、双击删到隐形点。
+  //   剪枝后 markers ≡ effPts → draw/命中/拖/删(都走 markers 下标)与渲染同一套。拖动中不剪(免拽掉正在拖的);sig 比对防循环。
+  const markersSig = (ms: { srcSec: number; outBar: number }[]) => ms.map((m) => `${Math.round(m.srcSec * sampleRate)}:${m.outBar.toFixed(4)}`).join(';');
+  useEffect(() => {
+    if (drag.current) return; // 拖动中不剪
+    const eff = effPts.map((p) => ({ srcSec: p.srcSec, outBar: p.outBar }));
+    if (markersSig(eff) !== markersSig(markers)) setMarkers(eff);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effPts, commitTick]); // commitTick:trim/变速拖松手后 effPts 可能没变但要补剪一次残留
+
   const srcSecAt = useCallback((outBar: number) => {
     if (!cps) return anchorSrcSec + (outBar - anchorOutBar) * secPerBar;
     let i = 0; while (i < cps.length - 2 && outBar > cps[i + 1].ob) i++; // 落在第 i 段;端点外用首/末段斜率外推
@@ -518,7 +529,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     const x = e.clientX - rectB.left, y = e.clientY - rectB.top;
     clickCand.current = null; // 压掉双击底下两次单击的试听候选
     if (y <= RULER_H + 12) for (let i = 0; i < markers.length; i++) {
-      if (Math.abs(x - (markers[i].outBar - vStart) * pxPerBar) <= ANCHOR_HIT) { setMarkers((p) => p.filter((_, k) => k !== i)); commitNow(); return; }
+      if (markers[i].outBar > trimStartBar + 1e-4 && markers[i].outBar < trimEndBar - 1e-4 && Math.abs(x - (markers[i].outBar - vStart) * pxPerBar) <= ANCHOR_HIT) { setMarkers((p) => p.filter((_, k) => k !== i)); commitNow(); return; } // 跳过 trim 外残留(与 draw/onDown 一致)
     }
     const ob = vStart + x / pxPerBar;
     if (ob <= trimStartBar + 1e-3 || ob >= trimEndBar - 1e-3) return; // 只在 trim 内加
@@ -528,8 +539,12 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
     const onset = best >= 0 && bestd <= 0.03; // 30ms 内吸 onset
     const srcSec = onset ? best : srcSec0;
     const outBar = onset ? outBarAt(best) : ob;
-    if (outBar <= trimStartBar + 1e-3 || outBar >= trimEndBar - 1e-3) return;
-    if (markers.some((m) => Math.abs(m.outBar - outBar) < gridBars * 0.5)) return; // 别和已有 marker 贴太近
+    // §36 修复:用渲染端同口径(normalizeWarpPts)判断这点能否落住——避免「加了但被归一丢弃」的幻影 pin(阈值与 cps/emit 统一)。
+    const srcStart = Math.round(baseSrcSec(trimStartBar) * sampleRate), srcEnd = Math.round(baseSrcSec(trimEndBar) * sampleRate);
+    const totalBeats = (trimEndBar - trimStartBar) * beatsBar;
+    const cand = { src: Math.round(srcSec * sampleRate), beat: (outBar - trimStartBar) * beatsBar };
+    const cur = effPts.map((p) => ({ src: p.src, beat: p.beat }));
+    if (normalizeWarpPts([...cur, cand], srcStart, srcEnd, totalBeats).length <= cur.length) return; // 落不住(太近/越界/破坏单调)→ 不加,不留幻影
     setMarkers((p) => [...p, { srcSec, outBar }].sort((a, b) => a.outBar - b.outBar));
     commitNow();
   };
@@ -578,6 +593,7 @@ function WarpCanvas({ channels, sampleRate, analysis, nativeBpm, targetBpm, beat
         setSecPerBar(sp);
       }
     } else if (d.mode === 'marker' && d.markerIdx != null) {
+      if (markersReadOnly) return; // §36.5 拖到一半走带开播 → 冻结这次 marker 拖(onDown 只挡起手,这里挡途中)
       // §36 拖 marker:只改 outBar(源点 srcSec 钉死)→ 把瞬态推到目标拍。吸网格;夹在左右邻居(/trim 边)之间留 1 格。
       const idx = d.markerIdx;
       const want = snapGrid(ob);
