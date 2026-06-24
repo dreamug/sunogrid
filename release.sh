@@ -7,7 +7,7 @@ set -Eeuo pipefail
 # Common overrides:
 #   BRANCH=main SERVICE_NAME=sunogrid ./release.sh
 #   HEALTHCHECK_URL=https://your-domain.example/api/health ./release.sh
-#   PORT=<actual-web-port> ./release.sh
+#   DEFAULT_WEB_PORT=3007 ./release.sh
 #   RESTART_CMD='supervisorctl restart sunogrid-web' ./release.sh
 #   RESTART_CMD='pm2 restart sunogrid' ./release.sh
 
@@ -18,6 +18,7 @@ WEB_DIR="${WEB_DIR:-$APP_DIR/web}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
 SERVICE_NAME="${SERVICE_NAME:-sunogrid}"
+DEFAULT_WEB_PORT="${DEFAULT_WEB_PORT:-3007}"
 PORT="${PORT:-}"
 RUN_DB_MIGRATIONS="${RUN_DB_MIGRATIONS:-1}"
 RUN_TYPECHECK="${RUN_TYPECHECK:-0}"
@@ -149,7 +150,7 @@ resolve_healthcheck_url() {
     return
   fi
 
-  die "Healthcheck URL is unknown. Set HEALTHCHECK_URL=https://your-domain/api/health or PORT=<actual-port>."
+  printf 'http://127.0.0.1:%s/api/health\n' "$DEFAULT_WEB_PORT"
 }
 
 healthcheck() {

@@ -17,4 +17,4 @@
 ## [2026-06-24] maintenance | 健康检查端口规则修正
 
 - 修正 `release-flow` 和 `current-production-deployment` 中把健康检查固定到 3000 的描述。
-- 记录健康检查应使用线上实际 web 端口或显式 `HEALTHCHECK_URL`,不做端口猜测。
+- 记录当前线上 web 端口为 `3007`;健康检查应使用当前部署端口或显式 `HEALTHCHECK_URL`,不做端口猜测。

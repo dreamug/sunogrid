@@ -120,7 +120,7 @@ NODE_ENV=production PORT=3000 npm start   # next start(默认 3000)
 ```bash
 BRANCH=main SERVICE_NAME=sunogrid ./release.sh
 HEALTHCHECK_URL=https://你的域名/api/health ./release.sh
-PORT=<实际web端口> ./release.sh
+DEFAULT_WEB_PORT=3007 ./release.sh
 RESTART_CMD='supervisorctl restart sunogrid-web' ./release.sh
 RESTART_CMD='pm2 restart sunogrid' ./release.sh
 ```
@@ -142,6 +142,7 @@ pm2 start "npm start" --name sunogrid --cwd /path/to/sunogrid/web \
 - 分支:`main`,远端:`origin/main`
 - 进程管理器:`supervisord`
 - web program:`sunogrid-web`
+- web 端口:`3007`
 - stem program:`sunogrid-stem`(独立服务,常规 web 上线不重启它)
 - 数据库:MySQL `sunogrid` at `127.0.0.1:3306`(由 `web/.env` 的 `DATABASE_URL` 决定)
 - 线上本地目录:`deploy/ssl/`,`stem-service/.torch/`,`web/public/downloads/` 已加入 `.gitignore`
@@ -154,7 +155,7 @@ git pull --ff-only
 ./release.sh
 ```
 
-`release.sh` 默认会尝试重启 `sunogrid`,并在 supervisord 场景自动尝试 `sunogrid-web`。健康检查只使用明确配置的地址:优先 `HEALTHCHECK_URL`,其次 `PORT`,再其次从 supervisord 进程环境或命令中读取实际 `PORT`;读不到就失败并要求显式配置。如果需要显式指定:
+`release.sh` 默认会尝试重启 `sunogrid`,并在 supervisord 场景自动尝试 `sunogrid-web`。健康检查优先使用 `HEALTHCHECK_URL`,其次使用显式 `PORT`,再其次从 supervisord 进程环境或命令中读取实际 `PORT`;读不到时使用当前线上默认 web 端口 `3007`。如果需要显式指定:
 
 ```bash
 cd /data/deploy/sunogrid
@@ -168,7 +169,7 @@ HEALTHCHECK_URL=https://你的域名/api/health ./release.sh
 supervisorctl status sunogrid-web sunogrid-stem
 curl -f https://你的域名/api/health
 # 或:
-curl -f http://127.0.0.1:<实际web端口>/api/health
+curl -f http://127.0.0.1:3007/api/health
 ```
 
 ---

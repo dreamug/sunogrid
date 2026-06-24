@@ -12,6 +12,7 @@ SunoGrid 当前生产环境运行在 `cable00` 上,仓库根目录为 `/data/dep
 - 部署分支:`main`,远端为 `origin/main`。
 - 进程管理器:supervisord。
 - web program:`sunogrid-web`。
+- web 端口:`3007`。
 - stem program:`sunogrid-stem`。
 - 常规 web 上线只重启 `sunogrid-web`,不重启 `sunogrid-stem`。
 - Prisma 部署日志显示数据库为 MySQL `sunogrid` at `127.0.0.1:3306`。
