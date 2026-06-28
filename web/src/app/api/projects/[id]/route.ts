@@ -26,7 +26,7 @@ export async function PATCH(req: Request, { params }: P) {
   if (!guard.ok) return guard.res;
   const b = await req.json();
   const data: Record<string, unknown> = {};
-  for (const k of ['name', 'masterBpm', 'masterKey', 'genPrefs', 'gridPrefs', 'fx', 'quantize', 'beatsPerBar', 'loopSong', 'playMode', 'showAutomation'] as const) if (k in b) data[k] = b[k];
+  for (const k of ['name', 'masterBpm', 'masterKey', 'genPrefs', 'gridPrefs', 'fx', 'quantize', 'beatsPerBar', 'loopSong', 'playMode', 'showAutomation', 'songLanes'] as const) if (k in b) data[k] = b[k];
   // §25:把项目标成/取消示例母版,只有 SUPER_ADMIN 能干(且只能标自己拥有的项目 —— ownedOr 已保证)。
   if ('isExample' in b) {
     const user = await getCurrentUser();

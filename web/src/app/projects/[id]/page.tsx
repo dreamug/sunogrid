@@ -3,7 +3,7 @@ import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { forkExampleProject } from '@/lib/forkProject';
 import { StudioApp } from '@/studio/StudioApp';
-import type { FxConfig, GenPrefs, GridPrefs, Quantize } from '@/contracts/models';
+import type { FxConfig, GenPrefs, GridPrefs, Quantize, SongLane } from '@/contracts/models';
 
 type P = { params: Promise<{ id: string }> };
 
@@ -35,6 +35,7 @@ export default async function ProjectStudioPage({ params }: P) {
       loopSong={project.loopSong}
       playMode={project.playMode === 'song' ? 'song' : 'live'}
       showAutomation={project.showAutomation}
+      songLanes={(project.songLanes as unknown as SongLane[] | null) ?? null}
     />
   );
 }

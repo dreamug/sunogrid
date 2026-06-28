@@ -73,7 +73,7 @@ export function AutomationLane({ auto, program, axis, bars, reps, px, editable, 
       style={{ display: 'block', width: W, cursor: editable ? 'crosshair' : 'pointer', touchAction: 'none' }} onPointerDown={down} onDoubleClick={dbl}>
       {grid}
       {poly.length > 0 && <polyline points={poly.join(' ')} fill="none" stroke={col} strokeWidth={1.5} strokeLinejoin="round" opacity={ghost ? 0.3 : editable ? 1 : 0.5} vectorEffect="non-scaling-stroke" />}
-      {editable && vis.map((p) => { const j = all.indexOf(p); return <circle key={j} cx={clamp(X(p.bar), 3.5, W - 3.5)} cy={Y(p.v)} r={3} fill={col} stroke="#1c1b19" strokeWidth={1} data-bi={j} style={{ cursor: 'grab' }} />; })}{/* cx 夹进视口:首/末点(bar=0/T)落边缘,否则 handle 被裁一半看不见(#4) */}
+      {editable && vis.map((p) => { const j = all.indexOf(p); return <circle key={j} cx={clamp(X(p.bar), 3, W - 3)} cy={Y(p.v)} r={3} fill={col} stroke="#1c1b19" strokeWidth={1} data-bi={j} style={{ cursor: 'grab' }} />; })}{/* cx 夹到点边缘刚好触边([3,W-3],r=3):首/末点贴边线、又不被裁一半(#4) */}
       {hidden > 0 && <text x={W - 4} y={11} textAnchor="end" fontSize={8} fill="#c2a24f" style={{ fontVariantNumeric: 'tabular-nums' }}>+{hidden} beyond</text>}
     </svg>
   );

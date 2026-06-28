@@ -64,6 +64,8 @@ model Project {
   loopSong    Boolean  @default(false) // §20 Song 线性模式:播到时间线末尾后循环整首
   playMode       String  @default("live") // §26 上次进的播放模式 live | song(UI 偏好,乐观持久化)
   showAutomation Boolean @default(true)   // §26 Song automation UI 是否显示(纯 UI 层隐藏,不影响效果回放)
+  songLayoutVersion Int @default(0) // §37 Song 多轨布局迁移标记:0=旧线性待推导,1=信任 songLane/songStartBar
+  songLanes   Json?    // §37 Song 多轨命名 track 列表 [{id,name,color}](下标 0=主轨);JSON 逃生口(§15.A),null=仅默认主轨
 
   // —— §25 示例项目 ——
   isExample           Boolean @default(false) // SUPER_ADMIN 标记:全局共享只读母版
@@ -226,6 +228,10 @@ model StudioSession {
   project     Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   name        String
   index       Int
+  songLane    Int                @default(0) // §37 Song 多轨:视觉/播放 lane(0=主轨)
+  songStartBar Int               @default(0) // §37 Song 多轨:全局起始小节(派生缓存)
+  songAnchorId String?           // §37 sub 轨锚定的主 session id;主轨/孤儿=null
+  songOffsetBar Int              @default(0) // §37 sub 锚定态:相对锚 session 起点偏移
   repeats     Int                @default(1) // §20 Song 线性模式:本场景连播次数(Live 模式忽略)
   color       String?            // §20 场景标识色(rail 彩色卡)
   xyAuto      Json?              // §26 Song 模式 XY 自动化(per-session 单效果,直线断点;null=无)

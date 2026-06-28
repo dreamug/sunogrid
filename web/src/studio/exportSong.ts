@@ -2,12 +2,12 @@
 // §32 总混音导出 —— 把 Song 模式整首歌离线渲成一个 AudioBuffer(再由 ExportDialog 编码成 WAV/MP3 下载)。
 // 核心:Tone.Offline 把全局 context 临时换成 OfflineAudioContext → 复用 live 的同一套节点构造
 // (FxBus/XYPad/三段 EQ/softClipCurve),配一条确定性预排时间线(所有 voice 起停 + XY 自动化采样点都
-// transport.scheduleOnce 预排),保证「导出 = 你听到的那一版」。时间线 1:1 照搬 §20 enterSongBlock 的累计小节算法。
+// transport.scheduleOnce 预排),保证「导出 = 你听到的那一版」。时间线按 §37 Song 多轨的 songStartBar/songLane 定位。
 // ⚠ 本环境(headless)测不了音频,音色正确性须真浏览器 A/B(尤其混响尾巴 / XY 扫滤波),见 PRODUCT.md §32.1/§32.6。
 import * as Tone from 'tone';
 import type { ApiSound } from '@/studio/api';
 import type { FxConfig, Session, XYProgram } from '@/contracts';
-import { sessionBars, sessionRepeats } from '@/contracts';
+import { sessionBars, sessionRepeats, sessionSongEndBar, sessionSongStartBar } from '@/contracts';
 import { buildBuffer } from './realLibrary';
 import { FxBus } from '@/audio/fxBus';
 import { XYPad } from '@/audio/xyPad';
@@ -29,18 +29,21 @@ export interface ExportInput {
 export interface SongBlock { session: Session; startBar: number; endBar: number; lenBars: number; }
 export interface ExportPlan { blocks: SongBlock[]; totalBars: number; totalSec: number; enabledCount: number; }
 
-/** 编排成线性 block 列表(同 enterSongBlock 累计小节)。 */
+/** 编排成定位 block 列表:session 可在不同 lane/不同 startBar 并行重叠。 */
 export function planSong(input: Pick<ExportInput, 'sessions' | 'bpm' | 'beatsPerBar'>): ExportPlan {
   const barSec = (input.beatsPerBar * 60) / input.bpm;
   const blocks: SongBlock[] = [];
-  let acc = 0, enabledCount = 0;
+  let totalBars = 0, enabledCount = 0;
   for (const s of input.sessions) {
     const lenBars = sessionRepeats(s) * sessionBars(s);
-    blocks.push({ session: s, startBar: acc, endBar: acc + lenBars, lenBars });
+    const startBar = sessionSongStartBar(s);
+    const endBar = sessionSongEndBar(s);
+    blocks.push({ session: s, startBar, endBar, lenBars });
     enabledCount += s.instruments.filter((i) => i.enabled).length;
-    acc += lenBars;
+    totalBars = Math.max(totalBars, endBar);
   }
-  return { blocks, totalBars: acc, totalSec: acc * barSec, enabledCount };
+  blocks.sort((a, b) => a.startBar - b.startBar);
+  return { blocks, totalBars, totalSec: totalBars * barSec, enabledCount };
 }
 
 export interface RenderProgress { phase: 'prepare' | 'render' | 'done'; done: number; total: number; }

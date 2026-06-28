@@ -1,0 +1,2 @@
+ALTER TABLE `Project`
+  ADD COLUMN `songLayoutVersion` INTEGER NOT NULL DEFAULT 0;

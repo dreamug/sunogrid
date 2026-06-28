@@ -89,8 +89,12 @@ export function rescaleAuto(auto: XYAutomation, ratio: number): XYAutomation {
   return { ...auto, x: scale(auto.x), y: scale(auto.y) };
 }
 
-/** 按 bar 升序的拷贝。 */
-export const sortPoints = (points: AutoPoint[]): AutoPoint[] => [...points].sort((a, b) => a.bar - b.bar);
+/** 按 bar 升序。⚡ 回放热路径(sampleXY 每帧×每 program×2 轴)的稳态:断点本就有序 → 先 O(n) 扫一遍,
+ *  已升序则**原样返回**(零分配、不排序),仅乱序时才拷贝+排序。编辑期断点保持有序,故几乎永不命中排序分支。 */
+export const sortPoints = (points: AutoPoint[]): AutoPoint[] => {
+  for (let i = 1; i < points.length; i++) if (points[i].bar < points[i - 1].bar) return [...points].sort((a, b) => a.bar - b.bar);
+  return points;
+};
 
 /**
  * 在 bar 位置采样断点序列(域 = bar,不归一)。

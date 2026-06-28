@@ -1,7 +1,7 @@
 // 操场 demo —— Session 的纯操作(无 React/音频/DOM)。同 history.ts:返回新对象、原对象不动。
 // enabled 是模型态(开关);mixer/collage 片 pitch 都走这里改 → UI 与引擎据此追上。
 import type { CollageClip, Instrument, Mixer, Session } from '@/contracts';
-import { SLOTS_PER_SESSION } from '@/contracts';
+import { SLOTS_PER_SESSION, sessionSongEndBar, sessionSongLane } from '@/contracts';
 
 const mapInst = (s: Session, id: string, f: (i: Instrument) => Instrument): Session => ({
   ...s,
@@ -44,6 +44,10 @@ type NewId = (prefix: string) => string;
 /** 按数组下标重排 index(增删/复制后保证 index = 数组序 = Song 歌曲顺序)。 */
 const reindex = (sessions: Session[]): Session[] => sessions.map((s, i) => (s.index === i ? s : { ...s, index: i }));
 
+/** 旧线性 Song 语义的插入点:同 lane 跟在当前最末块后面。 */
+const appendSongStart = (sessions: Session[], lane = 0): number =>
+  sessions.reduce((m, s) => (sessionSongLane(s) === lane ? Math.max(m, sessionSongEndBar(s)) : m), 0);
+
 /** 深拷贝一件乐器:重生乐器 id + 各 clip id;mixer/sends/payload 按值复制;assetId/soundId/bakedAssetId 共享(内容寻址,不必重 bake)。 */
 export function cloneInstrument(inst: Instrument, newId: NewId): Instrument {
   const base = { ...inst, id: newId('inst'), mixer: { ...inst.mixer, eq: { ...inst.mixer.eq } }, sends: { ...inst.sends } };
@@ -68,7 +72,8 @@ export function freeSlots(s: Session, n: number, anchor = 0): number[] {
 export function duplicateSessionAt(sessions: Session[], idx: number, newId: NewId): { sessions: Session[]; newIndex: number } {
   const src = sessions[idx];
   if (!src) return { sessions, newIndex: idx };
-  const copy: Session = { ...src, id: newId('sess'), name: `${src.name} copy`, instruments: src.instruments.map((i) => cloneInstrument(i, newId)) };
+  const copyStart = sessionSongEndBar(src);
+  const copy: Session = { ...src, id: newId('sess'), name: `${src.name} copy`, songStartBar: copyStart, instruments: src.instruments.map((i) => cloneInstrument(i, newId)) };
   const next = [...sessions.slice(0, idx + 1), copy, ...sessions.slice(idx + 1)];
   return { sessions: reindex(next), newIndex: idx + 1 };
 }
@@ -87,10 +92,10 @@ export function moveSession(sessions: Session[], from: number, to: number): Sess
 
 /** 新建空场景(追加到末尾);返回新数组 + 新场景下标。 */
 export function addSession(sessions: Session[], newId: NewId, name: string, color: string | null): { sessions: Session[]; newIndex: number } {
-  const s: Session = { id: newId('sess'), name, index: sessions.length, repeats: 1, color, instruments: [] };
+  const s: Session = { id: newId('sess'), name, index: sessions.length, songLane: 0, songStartBar: appendSongStart(sessions), repeats: 1, color, instruments: [] };
   return { sessions: [...sessions, s], newIndex: sessions.length };
 }
 
 /** 按 id 改场景外壳字段(改名 / 次数 / 颜色 / §26 XY 自动化)。 */
-export const patchSession = (sessions: Session[], id: string, patch: Partial<Pick<Session, 'name' | 'repeats' | 'color' | 'xyAuto'>>): Session[] =>
+export const patchSession = (sessions: Session[], id: string, patch: Partial<Pick<Session, 'name' | 'repeats' | 'color' | 'xyAuto' | 'songLane' | 'songStartBar' | 'songAnchorId' | 'songOffsetBar'>>): Session[] =>
   sessions.map((s) => (s.id === id ? { ...s, ...patch } : s));

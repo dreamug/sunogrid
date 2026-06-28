@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SunoGrid Song Multilane Prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-0:#1c1b19; --bg-1:#232220; --bg-2:#2a2825; --bg-3:#322f2b;
+      --line:#39352f; --line-2:#48433b;
+      --tx:#ece9e3; --tx-2:#a39d92; --tx-3:#6f6a60;
+      --acc:#c2724f; --acc-ink:#2a150b; --acc-dim:rgba(194,114,79,.13);
+      --on:#454039; --play:#d2ccc0; --queue:#c2a24f;
+      --solo:#e3b53f; --danger:#cf8a7a;
+      --r:3px; --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+      --z:34px;
+      --lane-label:78px;
+      --bars:36;
+      --track-w:calc(var(--bars) * var(--z));
+    }
+    * { box-sizing:border-box; }
+    html, body { margin:0; min-height:100%; background:var(--bg-0); color:var(--tx); font:13px/1.4 -apple-system,"SF Pro Text",system-ui,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; letter-spacing:.005em; }
+    body { overflow:hidden; user-select:none; }
+    button, input { font:inherit; }
+    .daw { height:100vh; display:grid; grid-template-rows:auto 1fr; overflow:hidden; background:var(--bg-0); }
+    .tbar { height:46px; display:flex; align-items:center; gap:9px; padding:0 12px; background:var(--bg-1); border-bottom:1px solid var(--line); }
+    .tp { width:34px; height:30px; display:flex; align-items:center; justify-content:center; background:var(--bg-3); border:1px solid var(--line-2); border-radius:var(--r); color:var(--tx-2); cursor:pointer; }
+    .tp.play { background:var(--acc); border-color:var(--acc); color:var(--acc-ink); }
+    .seg { display:inline-flex; height:30px; border:1px solid var(--line); border-radius:var(--r); overflow:hidden; background:var(--bg-0); }
+    .seg button { padding:0 11px; background:transparent; border:0; color:var(--tx-2); cursor:pointer; }
+    .seg button + button { border-left:1px solid var(--line); }
+    .seg button.on { background:var(--on); color:var(--tx); }
+    .tb-sep { width:1px; height:26px; background:var(--line); }
+    .tg { display:flex; align-items:center; gap:6px; }
+    .tg-l { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--tx-3); }
+    .tg-bpm { width:50px; height:30px; color:var(--tx); background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); padding:0 7px; text-align:right; font-family:var(--mono); }
+    .led { display:flex; align-items:baseline; gap:1px; font-family:var(--mono); }
+    .led b { font-size:15px; font-weight:500; min-width:12px; text-align:center; font-variant-numeric:tabular-nums; }
+    .led i { color:var(--tx-3); font-style:normal; }
+    .tb-proj { color:var(--tx); font-size:12px; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tspace { flex:1; }
+    .tb-meter { width:46px; display:flex; flex-direction:column; gap:3px; }
+    .mrow { height:4px; background:var(--bg-0); border-radius:1px; overflow:hidden; }
+    .mrow i { display:block; height:100%; background:#5dcaa5; }
+    .main { min-height:0; display:grid; grid-template-columns:312px minmax(0,1fr); }
+    .br { min-height:0; overflow:hidden; background:var(--bg-1); border-right:1px solid var(--line); display:flex; flex-direction:column; }
+    .br-h { height:30px; display:flex; align-items:center; gap:6px; padding:0 12px; border-bottom:1px solid var(--line); }
+    .sec-l { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--tx-3); font-weight:500; }
+    .gen { padding:12px; border-bottom:1px solid var(--line); display:grid; gap:9px; }
+    .prompt { height:72px; padding:9px; background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); color:var(--tx-2); font-size:12px; }
+    .chiprow { display:flex; gap:6px; flex-wrap:wrap; }
+    .chip { padding:4px 7px; background:var(--bg-3); border:1px solid var(--line-2); border-radius:var(--r); color:var(--tx-2); font-size:10px; }
+    .lib { min-height:0; overflow:auto; padding:10px 12px 16px; display:grid; gap:8px; }
+    .sound { height:48px; display:grid; grid-template-columns:34px 1fr auto; align-items:center; gap:8px; padding:7px; background:var(--bg-2); border:1px solid var(--line); border-radius:var(--r); }
+    .wave { height:25px; border-radius:2px; background:linear-gradient(90deg, rgba(236,233,227,.08), rgba(236,233,227,.18), rgba(236,233,227,.06)); position:relative; overflow:hidden; }
+    .wave:before { content:""; position:absolute; inset:0; background:repeating-linear-gradient(90deg, transparent 0 8px, rgba(236,233,227,.16) 8px 10px, transparent 10px 16px); opacity:.45; }
+    .ico { width:28px; height:28px; display:flex; align-items:center; justify-content:center; border-radius:var(--r); background:var(--bg-3); border:1px solid var(--line-2); color:var(--tx-2); }
+    .smeta { min-width:0; display:grid; gap:3px; }
+    .sname { color:var(--tx); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:12px; }
+    .ssub { color:var(--tx-3); font-family:var(--mono); font-size:10px; }
+    .stage { min-width:0; min-height:0; overflow:auto; display:flex; flex-direction:column; padding:0 16px 13px; gap:11px; background:var(--bg-0); }
+    .srail-sticky { position:sticky; top:0; z-index:20; background:var(--bg-0); margin:0 -16px 0; padding:13px 16px 10px; }
+    .song-ctl { display:flex; align-items:center; gap:8px; padding:0 0 9px; }
+    .song-ctl-l { display:flex; align-items:center; gap:7px; color:var(--tx-2); font-size:11px; font-weight:500; min-width:0; }
+    .dot { width:10px; height:10px; border-radius:50%; background:var(--c); box-shadow:0 0 0 1px rgba(255,255,255,.16); flex:none; }
+    .fx-chip { font-size:10px; padding:3px 7px; border-radius:var(--r); background:var(--bg-3); color:var(--tx-2); border:1px solid var(--line-2); }
+    .fx-chip.on { background:#78a98e; border-color:#78a98e; color:#1c1b19; }
+    .song-auto-tg { height:20px; display:flex; align-items:center; justify-content:center; padding:0 13px; background:var(--on); border:1px solid var(--line); border-radius:var(--r); color:var(--tx); }
+    .song-ctl-z { display:flex; align-items:center; gap:6px; color:var(--tx-3); font-size:9px; text-transform:uppercase; }
+    .song-ctl-z input { width:96px; accent-color:var(--tx-2); }
+    .timeline-shell { display:grid; grid-template-columns:var(--lane-label) minmax(0,1fr); min-width:0; }
+    .corner { height:22px; border:1px solid var(--line); border-right:0; background:var(--bg-1); display:flex; align-items:center; padding:0 8px; color:var(--tx-3); font-size:9px; letter-spacing:.08em; text-transform:uppercase; }
+    .scroll { overflow:auto hidden; scrollbar-width:none; border-left:1px solid var(--line); border-right:1px solid var(--line); }
+    .scroll::-webkit-scrollbar { display:none; }
+    .timeline { position:relative; width:var(--track-w); min-width:100%; }
+    .ruler { height:22px; position:relative; background:var(--bg-0); border-top:1px solid var(--line); border-bottom:1px solid var(--line); background-image:repeating-linear-gradient(90deg, rgba(236,233,227,.08) 0 1px, transparent 1px var(--z)); }
+    .rn { position:absolute; top:4px; left:calc(var(--b) * var(--z) + 3px); color:var(--tx-3); font-size:9px; font-variant-numeric:tabular-nums; }
+    .lanes { position:relative; background:var(--bg-0); background-image:repeating-linear-gradient(90deg, rgba(236,233,227,.032) 0 1px, transparent 1px var(--z)); }
+    .lane-row { display:grid; grid-template-columns:var(--lane-label) minmax(var(--track-w),1fr); min-height:92px; }
+    .lane-head { position:sticky; left:0; z-index:7; display:flex; align-items:flex-start; justify-content:space-between; gap:8px; padding:8px; background:var(--bg-1); border-left:1px solid var(--line); border-right:1px solid var(--line); border-bottom:1px solid var(--line); color:var(--tx-2); }
+    .lane-name { display:grid; gap:2px; min-width:0; }
+    .lane-title { font-size:11px; color:var(--tx); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .lane-sub { font-family:var(--mono); font-size:9px; color:var(--tx-3); }
+    .lane-tools { display:flex; flex-direction:column; gap:5px; }
+    .mini { width:18px; height:18px; display:flex; align-items:center; justify-content:center; border-radius:var(--r); border:1px solid var(--line-2); background:var(--bg-3); color:var(--tx-3); font-size:10px; }
+    .lane-track { position:relative; border-bottom:1px solid var(--line); min-width:var(--track-w); }
+    .barline { position:absolute; top:0; bottom:0; left:calc(var(--b) * var(--z)); width:1px; background:rgba(236,233,227,.032); pointer-events:none; }
+    .barline.strong { background:rgba(236,233,227,.115); }
+    .sblock { --c:#6f9e8b; position:absolute; top:9px; left:calc(var(--start) * var(--z)); width:calc(var(--bars) * var(--z)); height:74px; min-width:106px; display:flex; flex-direction:column; overflow:hidden; border-radius:var(--r); border:1px solid color-mix(in srgb, var(--c) 66%, var(--line-2)); background:var(--bg-1); outline:none; box-shadow:0 1px 0 rgba(0,0,0,.25); }
+    .sblock:hover { box-shadow:inset 0 0 0 1px rgba(255,255,255,.12), 0 1px 0 rgba(0,0,0,.25); }
+    .sblock.sel { border-color:rgba(255,255,255,.5); box-shadow:inset 0 0 0 1px rgba(255,255,255,.3); z-index:3; }
+    .sblock.playing { box-shadow:inset 0 0 0 1px rgba(255,255,255,.18), 0 0 0 1px color-mix(in srgb, var(--c) 30%, transparent); }
+    .sblk-name { height:25px; flex:none; display:flex; align-items:center; gap:6px; padding:0 7px; background:color-mix(in srgb, var(--c) 34%, var(--bg-1)); border-bottom:1px solid color-mix(in srgb, var(--c) 40%, var(--line)); min-width:0; }
+    .sblk-nm { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:color-mix(in srgb, var(--c) 34%, var(--tx)); font-size:11px; font-weight:500; }
+    .sblk-bars { flex:none; color:rgba(236,233,227,.55); font-size:9px; font-variant-numeric:tabular-nums; }
+    .sblk-nums { position:relative; height:18px; flex:none; background:color-mix(in srgb, var(--c) 22%, var(--bg-1)); border-bottom:1px solid color-mix(in srgb, var(--c) 30%, var(--line)); }
+    .sblk-rn { position:absolute; top:4px; left:calc(var(--rep) * var(--repw) + 4px); color:color-mix(in srgb, var(--c) 42%, var(--tx-2)); font-size:9px; font-variant-numeric:tabular-nums; }
+    .sblk-chip { position:absolute; right:5px; top:3px; height:12px; min-width:12px; padding:0 3px; border-radius:2px; background:color-mix(in srgb, var(--c) 32%, var(--bg-0)); border:1px solid color-mix(in srgb, var(--c) 48%, var(--line)); color:color-mix(in srgb, var(--c) 58%, var(--tx)); font-size:9px; line-height:10px; }
+    .sblock-auto { position:relative; height:31px; background:var(--bg-0); overflow:hidden; }
+    .auto { position:absolute; inset:0; width:100%; height:100%; }
+    .auto line.grid { stroke:rgba(236,233,227,.05); }
+    .auto line.mid { stroke:rgba(236,233,227,.1); stroke-dasharray:3 3; }
+    .auto polyline { fill:none; stroke:#78a98e; stroke-width:1.5; vector-effect:non-scaling-stroke; }
+    .auto circle { fill:#78a98e; stroke:#1c1b19; stroke-width:1; }
+    .clipgrid { display:grid; grid-template-columns:repeat(4,minmax(180px,1fr)); grid-auto-rows:120px; gap:0; border-radius:var(--r); overflow:hidden; border-top:1px solid rgba(255,255,255,.032); border-left:1px solid rgba(255,255,255,.032); flex:none; }
+    .clip { position:relative; padding:10px; border-right:1px solid rgba(255,255,255,.032); border-bottom:1px solid rgba(255,255,255,.032); background:var(--bg-1); overflow:hidden; }
+    .clip.on { background:color-mix(in srgb, var(--c) 18%, var(--bg-1)); }
+    .clip h4 { margin:0 0 8px; font-size:12px; font-weight:500; color:var(--tx); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .clip .stripe { position:absolute; left:0; top:0; bottom:0; width:4px; background:var(--c); }
+    .clip .cw { height:45px; border-radius:2px; background:linear-gradient(90deg, rgba(236,233,227,.06), rgba(236,233,227,.18), rgba(236,233,227,.07)); opacity:.82; }
+    .clip .cm { display:flex; align-items:center; gap:5px; margin-top:9px; color:var(--tx-3); font-size:10px; font-family:var(--mono); }
+    .song-ph { position:absolute; top:0; bottom:0; left:calc(13 * var(--z)); width:1px; margin-left:-.5px; background:var(--play); opacity:.9; z-index:6; pointer-events:none; box-shadow:0 0 4px color-mix(in srgb, var(--play) 55%, transparent); }
+    .loop-range { position:absolute; top:0; bottom:0; left:calc(8 * var(--z)); width:calc(12 * var(--z)); background:rgba(194,162,79,.055); border-left:1px solid rgba(194,162,79,.24); border-right:1px solid rgba(194,162,79,.24); pointer-events:none; }
+    .we-scroll { height:9px; margin-top:7px; background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); }
+    .we-thumb { height:100%; width:36%; margin-left:21%; background:#4b463d; border-radius:2px; }
+    @media (max-width:900px) {
+      .main { grid-template-columns:1fr; }
+      .br { display:none; }
+      .clipgrid { grid-template-columns:repeat(2,minmax(150px,1fr)); }
+      :root { --lane-label:64px; --z:28px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="daw">
+    <div class="tbar">
+      <button class="tp play">▶</button>
+      <button class="tp">■</button>
+      <div class="seg"><button>Live</button><button class="on">Song</button></div>
+      <button class="tp" data-on="true">↻</button>
+      <div class="tb-sep"></div>
+      <div class="tg"><span class="tg-l">BPM</span><input class="tg-bpm" value="92" /></div>
+      <div class="led"><b>014</b><i>:</i><b>1</b><i>:</i><b>1</b></div>
+      <div class="tb-sep"></div>
+      <div class="tb-proj">late night grid sketch</div>
+      <div class="tspace"></div>
+      <div class="tb-meter"><span class="mrow"><i style="width:72%"></i></span><span class="mrow"><i style="width:58%"></i></span></div>
+      <button class="tp">⇩</button>
+    </div>
+
+    <div class="main">
+      <aside class="br">
+        <div class="br-h"><span class="sec-l">Library</span><span style="margin-left:auto;color:var(--tx-3);font-size:11px;">24</span></div>
+        <div class="gen">
+          <div class="seg"><button>Sound</button><button class="on">Song</button></div>
+          <div class="prompt">dusty cassette house, soft Rhodes chords, muted club drums, warm sidechain, instrumental</div>
+          <div class="chiprow"><span class="chip">92 BPM</span><span class="chip">F minor</span><span class="chip">8 bars</span></div>
+        </div>
+        <div class="lib">
+          <div class="sound"><div class="ico">♪</div><div class="smeta"><span class="sname">Tape drums 04</span><span class="ssub">4b · stem</span></div><div class="wave"></div></div>
+          <div class="sound"><div class="ico">▥</div><div class="smeta"><span class="sname">Rhodes dusk loop</span><span class="ssub">8b · chop</span></div><div class="wave"></div></div>
+          <div class="sound"><div class="ico">◍</div><div class="smeta"><span class="sname">Sub pulse muted</span><span class="ssub">4b · bass</span></div><div class="wave"></div></div>
+          <div class="sound"><div class="ico">✦</div><div class="smeta"><span class="sname">Airy vocal texture</span><span class="ssub">8b · pad</span></div><div class="wave"></div></div>
+        </div>
+      </aside>
+
+      <main class="stage">
+        <div class="srail-sticky">
+          <div class="song-ctl">
+            <span class="song-ctl-l" style="--c:#7e8a9e"><span class="dot"></span><span>Song arrangement</span><span style="opacity:.55">· 3 lanes · 36 bars</span></span>
+            <span style="flex:1"></span>
+            <span class="fx-chip on">Filter</span><span class="fx-chip">Slicer</span><span class="fx-chip">Delay</span><span class="fx-chip">Brake</span>
+            <div class="seg" style="height:22px"><button class="on">X</button><button>Y</button></div>
+            <button class="song-auto-tg">⌁</button>
+            <span class="song-ctl-z">zoom <input type="range" min="20" max="56" value="34" /></span>
+          </div>
+
+          <div class="timeline-shell">
+            <div class="corner">lanes</div>
+            <div class="scroll">
+              <div class="timeline">
+                <div class="ruler">
+                  <span class="rn" style="--b:0">1</span><span class="rn" style="--b:4">5</span><span class="rn" style="--b:8">9</span><span class="rn" style="--b:12">13</span><span class="rn" style="--b:16">17</span><span class="rn" style="--b:20">21</span><span class="rn" style="--b:24">25</span><span class="rn" style="--b:28">29</span><span class="rn" style="--b:32">33</span>
+                </div>
+                <div class="lanes">
+                  <div class="loop-range"></div>
+                  <div class="song-ph"></div>
+                  <div class="lane-row">
+                    <div class="lane-head"><div class="lane-name"><span class="lane-title">A Main</span><span class="lane-sub">melodic</span></div><div class="lane-tools"><span class="mini">S</span><span class="mini">M</span></div></div>
+                    <div class="lane-track">
+                      <span class="barline strong" style="--b:0"></span><span class="barline" style="--b:4"></span><span class="barline strong" style="--b:8"></span><span class="barline" style="--b:12"></span><span class="barline strong" style="--b:16"></span><span class="barline" style="--b:20"></span><span class="barline strong" style="--b:24"></span><span class="barline" style="--b:28"></span><span class="barline strong" style="--b:32"></span>
+                      <section class="sblock sel" style="--c:#6f9e8b;--start:0;--bars:8">
+                        <div class="sblk-name"><span class="dot"></span><span class="sblk-nm">Intro chords</span><span class="sblk-bars">8b</span></div>
+                        <div class="sblk-nums"><span class="sblk-rn" style="--rep:0;--repw:136px">1</span><span class="sblk-chip">4</span></div>
+                        <div class="sblock-auto"><svg class="auto" viewBox="0 0 272 31" preserveAspectRatio="none"><line class="grid" x1="136" y1="0" x2="136" y2="31"/><line class="mid" x1="0" y1="15" x2="272" y2="15"/><polyline points="0,21 52,16 118,11 190,18 272,10"/><circle cx="52" cy="16" r="3"/><circle cx="190" cy="18" r="3"/></svg></div>
+                      </section>
+                      <section class="sblock" style="--c:#c2a24f;--start:8;--bars:8">
+                        <div class="sblk-name"><span class="dot"></span><span class="sblk-nm">Hook top line</span><span class="sblk-bars">8b</span></div>
+                        <div class="sblk-nums"><span class="sblk-rn" style="--rep:0;--repw:136px">1</span><span class="sblk-chip">5</span></div>
+                        <div class="sblock-auto"><svg class="auto" viewBox="0 0 272 31" preserveAspectRatio="none"><line class="grid" x1="136" y1="0" x2="136" y2="31"/><line class="mid" x1="0" y1="15" x2="272" y2="15"/><polyline points="0,15 84,9 156,24 272,12"/><circle cx="84" cy="9" r="3"/><circle cx="156" cy="24" r="3"/></svg></div>
+                      </section>
+                      <section class="sblock" style="--c:#b07f86;--start:24;--bars:8">
+                        <div class="sblk-name"><span class="dot"></span><span class="sblk-nm">Outro wash</span><span class="sblk-bars">8b</span></div>
+                        <div class="sblk-nums"><span class="sblk-rn" style="--rep:0;--repw:136px">1</span><span class="sblk-chip">3</span></div>
+                        <div class="sblock-auto"><svg class="auto" viewBox="0 0 272 31" preserveAspectRatio="none"><line class="mid" x1="0" y1="23" x2="272" y2="23"/><polyline points="0,18 96,18 180,23 272,26"/></svg></div>
+                      </section>
+                    </div>
+                  </div>
+
+                  <div class="lane-row">
+                    <div class="lane-head"><div class="lane-name"><span class="lane-title">B Rhythm</span><span class="lane-sub">drums</span></div><div class="lane-tools"><span class="mini">S</span><span class="mini">M</span></div></div>
+                    <div class="lane-track">
+                      <span class="barline strong" style="--b:0"></span><span class="barline" style="--b:4"></span><span class="barline strong" style="--b:8"></span><span class="barline" style="--b:12"></span><span class="barline strong" style="--b:16"></span><span class="barline" style="--b:20"></span><span class="barline strong" style="--b:24"></span><span class="barline" style="--b:28"></span><span class="barline strong" style="--b:32"></span>
+                      <section class="sblock playing" style="--c:#c2724f;--start:4;--bars:16">
+                        <div class="sblk-name"><span class="dot"></span><span class="sblk-nm">Tape drums build</span><span class="sblk-bars">4b x4</span></div>
+                        <div class="sblk-nums"><span class="sblk-rn" style="--rep:0;--repw:136px">1</span><span class="sblk-rn" style="--rep:1;--repw:136px">2</span><span class="sblk-rn" style="--rep:2;--repw:136px">3</span><span class="sblk-rn" style="--rep:3;--repw:136px">4</span><span class="sblk-chip">7</span></div>
+                        <div class="sblock-auto"><svg class="auto" viewBox="0 0 544 31" preserveAspectRatio="none"><line class="grid" x1="136" y1="0" x2="136" y2="31"/><line class="grid" x1="272" y1="0" x2="272" y2="31"/><line class="grid" x1="408" y1="0" x2="408" y2="31"/><line class="mid" x1="0" y1="15" x2="544" y2="15"/><polyline points="0,22 140,22 141,8 272,8 273,20 408,20 409,6 544,6"/></svg></div>
+                      </section>
+                      <section class="sblock" style="--c:#8a6f9e;--start:20;--bars:8">
+                        <div class="sblk-name"><span class="dot"></span><span class="sblk-nm">Break fill</span><span class="sblk-bars">8b</span></div>
+                        <div class="sblk-nums"><span class="sblk-rn" style="--rep:0;--repw:136px">1</span><span class="sblk-chip">2</span></div>
+                        <div class="sblock-auto"><svg class="auto" viewBox="0 0 272 31" preserveAspectRatio="none"><line class="mid" x1="0" y1="15" x2="272" y2="15"/><polyline points="0,26 70,22 118,10 200,6 272,19"/><circle cx="118" cy="10" r="3"/></svg></div>
+                      </section>
+                    </div>
+                  </div>
+
+                  <div class="lane-row">
+                    <div class="lane-head"><div class="lane-name"><span class="lane-title">C Low</span><span class="lane-sub">bass/fx</span></div><div class="lane-tools"><span class="mini">S</span><span class="mini">M</span></div></div>
+                    <div class="lane-track">
+                      <span class="barline strong" style="--b:0"></span><span class="barline" style="--b:4"></span><span class="barline strong" style="--b:8"></span><span class="barline" style="--b:12"></span><span class="barline strong" style="--b:16"></span><span class="barline" style="--b:20"></span><span class="barline strong" style="--b:24"></span><span class="barline" style="--b:28"></span><span class="barline strong" style="--b:32"></span>
+                      <section class="sblock playing" style="--c:#7e8a9e;--start:8;--bars:12">
+                        <div class="sblk-name"><span class="dot"></span><span class="sblk-nm">Sub pulse</span><span class="sblk-bars">4b x3</span></div>
+                        <div class="sblk-nums"><span class="sblk-rn" style="--rep:0;--repw:136px">1</span><span class="sblk-rn" style="--rep:1;--repw:136px">2</span><span class="sblk-rn" style="--rep:2;--repw:136px">3</span><span class="sblk-chip">3</span></div>
+                        <div class="sblock-auto"><svg class="auto" viewBox="0 0 408 31" preserveAspectRatio="none"><line class="grid" x1="136" y1="0" x2="136" y2="31"/><line class="grid" x1="272" y1="0" x2="272" y2="31"/><line class="mid" x1="0" y1="23" x2="408" y2="23"/><polyline points="0,24 70,24 150,18 220,20 300,13 408,15"/></svg></div>
+                      </section>
+                      <section class="sblock" style="--c:#6f9e8b;--start:28;--bars:4;min-width:92px">
+                        <div class="sblk-name"><span class="dot"></span><span class="sblk-nm">Impact</span><span class="sblk-bars">4b</span></div>
+                        <div class="sblk-nums"><span class="sblk-chip">1</span></div>
+                        <div class="sblock-auto"><svg class="auto" viewBox="0 0 136 31" preserveAspectRatio="none"><line class="mid" x1="0" y1="15" x2="136" y2="15"/><polyline points="0,4 35,20 136,27"/></svg></div>
+                      </section>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="we-scroll"><div class="we-thumb"></div></div>
+        </div>
+
+        <div class="clipgrid">
+          <div class="clip on" style="--c:#6f9e8b"><span class="stripe"></span><h4>Rhodes chords</h4><div class="cw"></div><div class="cm">ON · 8b · -2.0dB</div></div>
+          <div class="clip on" style="--c:#c2724f"><span class="stripe"></span><h4>Tape drums</h4><div class="cw"></div><div class="cm">ON · 4b · +0.0dB</div></div>
+          <div class="clip on" style="--c:#7e8a9e"><span class="stripe"></span><h4>Sub pulse</h4><div class="cw"></div><div class="cm">ON · 4b · -4.0dB</div></div>
+          <div class="clip" style="--c:#b07f86"><span class="stripe"></span><h4>Air texture</h4><div class="cw"></div><div class="cm">MUTED · 8b</div></div>
+          <div class="clip" style="--c:#c2a24f"><span class="stripe"></span><h4>Hook pluck</h4><div class="cw"></div><div class="cm">OFF · 8b</div></div>
+          <div class="clip" style="--c:#8a6f9e"><span class="stripe"></span><h4>Break fill</h4><div class="cw"></div><div class="cm">OFF · 8b</div></div>
+          <div class="clip"></div>
+          <div class="clip"></div>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

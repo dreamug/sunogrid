@@ -4,10 +4,10 @@
 // 设计:不逐个 mutation site 埋点(易漏),而是“当前树 vs 上次已落库快照”整体 diff —— 任何变更都不会漏,
 // 且天然合并(拖旋钮 100 次 → 只看最终值,产 1 条 field-level upd)。撤销/重做改了树也走同一条 diff。
 import type { Session } from '@/contracts';
-import { defaultSends } from '@/contracts';
+import { defaultSends, sessionSongLane, sessionSongStartBar, sessionSongAnchor, sessionSongOffset } from '@/contracts';
 
 // —— 扁平行(字段 = DB 列)——
-export interface NSession { id: string; name: string; index: number; repeats: number; color: string | null; xyAuto: unknown }
+export interface NSession { id: string; name: string; index: number; songLane: number; songStartBar: number; songAnchorId: string | null; songOffsetBar: number; repeats: number; color: string | null; xyAuto: unknown }
 export interface NInstrument {
   id: string; sessionId: string; slot: number; type: string; label: string; color: string | null; icon: string | null; enabled: boolean;
   gainDb: number; pan: number; eqLowDb: number; eqMidDb: number; eqHighDb: number;
@@ -45,7 +45,7 @@ const hasAsset = (assetId: string) => typeof assetId === 'string' && assetId.len
 export function normalize(sessions: Session[]): Snapshot {
   const snap: Snapshot = { sessions: {}, instruments: {}, clips: {} };
   for (const s of sessions) {
-    snap.sessions[s.id] = { id: s.id, name: s.name, index: s.index, repeats: s.repeats ?? 1, color: s.color ?? null, xyAuto: s.xyAuto ?? null };
+    snap.sessions[s.id] = { id: s.id, name: s.name, index: s.index, songLane: sessionSongLane(s), songStartBar: sessionSongStartBar(s), songAnchorId: sessionSongAnchor(s), songOffsetBar: sessionSongOffset(s), repeats: s.repeats ?? 1, color: s.color ?? null, xyAuto: s.xyAuto ?? null };
     for (const i of s.instruments) {
       snap.instruments[i.id] = {
         id: i.id, sessionId: s.id, slot: i.slot, type: i.payload.kind, label: i.label, color: i.color ?? null, icon: i.icon ?? null, enabled: !!i.enabled,
@@ -73,7 +73,7 @@ export function normalize(sessions: Session[]): Snapshot {
   return snap;
 }
 
-const SESS_FIELDS: (keyof NSession)[] = ['name', 'index', 'repeats', 'color', 'xyAuto'];
+const SESS_FIELDS: (keyof NSession)[] = ['name', 'index', 'songLane', 'songStartBar', 'songAnchorId', 'songOffsetBar', 'repeats', 'color', 'xyAuto'];
 const INST_FIELDS: (keyof NInstrument)[] = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'];
 const CLIP_FIELDS: (keyof NClip)[] = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'warpPts', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'];
 

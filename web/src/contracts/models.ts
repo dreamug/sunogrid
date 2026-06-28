@@ -82,11 +82,14 @@ export interface GenPrefs {
 }
 
 /** 编辑器网格偏好(per-project,持久化 → Project.gridPrefs JSON,见 §15.A)。记住不重置:
- *  arrange = chop 拼贴轨吸附格(bars/格),warp = clip warp 编辑器的网格,snap = warp 编辑器吸附开关。 */
+ *  arrange = chop 拼贴轨吸附格(bars/格),warp = clip warp 编辑器的网格,snap = warp 编辑器吸附开关,
+ *  §37 songZoom = Song 比例时间轴缩放(px/bar),songGrid = Song track 网格密度(每几 bar 一竖线)。 */
 export interface GridPrefs {
   arrange: number;
   warp: number;
   snap: boolean;
+  songZoom?: number; // §37 Song 时间轴缩放;缺省回退 SONG_ZOOM_DEFAULT
+  songGrid?: number; // §37 Song 网格密度;缺省回退 1
 }
 
 /** 主总线效果器配置(per-project,持久化 → Project.fx JSON,见 §15.A/§17)。
@@ -148,6 +151,13 @@ export const DEFAULT_FX: FxConfig = {
   xy: DEFAULT_XY,
 };
 
+/** §37 Song 多轨的一条命名 arrangement track。有序数组,下标 0 = 主轨(吸附,始终存在)。 */
+export interface SongLane {
+  id: string;
+  name: string;
+  color: string | null;
+}
+
 /** 一个工程(整套设置)。 */
 export interface Project {
   id: string;
@@ -163,6 +173,9 @@ export interface Project {
   fx: FxConfig | null;
   beatsPerBar: number;   // 目前固定 4
   quantize: Quantize;    // 默认 '1bar'
+  songLayoutVersion?: number; // Studio Song 多轨布局迁移标记;业务 UI 不直接使用
+  /** §37 Song 多轨命名 track 列表(下标 0=主轨);null/空 = 仅默认主轨。 */
+  songLanes?: SongLane[] | null;
   banks: Bank[];
   createdAt: string;
   updatedAt: string;

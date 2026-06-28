@@ -113,11 +113,20 @@ export interface Instrument {
 }
 
 /** 一个 Session = 操场(一组并行乐器)= Ableton 式"场景"。长度 = 最长乐器。
- *  §20:`index` 顺序即 Song 线性模式的歌曲顺序;`repeats` = 该场景连播次数(Live 模式忽略);`color` = rail 彩色卡标识色。 */
+ *  §20:`index` 保留为场景列表顺序;`songLane/songStartBar` 是 Song 多轨编排位置;`repeats` = 该场景连播次数(Live 模式忽略);`color` = rail 彩色卡标识色。 */
 export interface Session {
   id: string;
   name: string;
   index: number;
+  /** §37 Song 多轨:第几条视觉/播放 lane(0=主轨吸附,>0=sub 轨;= Project.songLanes 下标)。 */
+  songLane?: number;
+  /** §37 Song 多轨:全局第几小节开始(≥0)。
+   *  🔁 语义=派生缓存(resnapSong 重算):主轨=前面累加;sub 锚定=锚.start+offset;孤儿=自存绝对值。回放/导出直接读它。 */
+  songStartBar?: number;
+  /** §37 sub 轨锚定:link 到的主 session id;主轨块 / 孤儿 sub = null。 */
+  songAnchorId?: string | null;
+  /** §37 sub 轨锚定态:相对锚 session 起点的偏移(≥0)。 */
+  songOffsetBar?: number;
   /** §20 Song 线性模式:本场景连播次数(≥1;Live 切换模式忽略)。 */
   repeats: number;
   /** §20 场景标识色(rail 彩色卡;null = 默认色)。 */
@@ -129,6 +138,28 @@ export interface Session {
 
 /** 场景调色板(rail 彩色卡 / 新建场景轮取;暖色暗调,与乐器 pad 色互不强绑)。 */
 export const SESSION_COLORS = ['#6f9e8b', '#7e8a9e', '#c2a24f', '#c2724f', '#8a6f9e', '#b07f86'];
+/** §37 稳定兜底色:按 session id 哈希到调色板(id 不变→色不变;永不随数组下标洗牌)。仅当 s.color 为空时用。 */
+export function stableColorFor(id: string): string {
+  let h = 0; for (let i = 0; i < id.length; i++) h = (Math.imul(h, 31) + id.charCodeAt(i)) | 0;
+  return SESSION_COLORS[Math.abs(h) % SESSION_COLORS.length];
+}
+/** session 显示色:优先用户已设的 s.color,否则按 id 稳定兜底(绝不用数组下标)。 */
+export const sessionColor = (s: Pick<Session, 'id' | 'color'>): string => s.color || stableColorFor(s.id);
+/** 新建场景时挑「当前用得最少」的色(未用满→不撞色;用满→均衡分布)。只看已落 s.color,不看数组位置。 */
+export function pickSessionColor(sessions: Pick<Session, 'color'>[]): string {
+  const count = new Map<string, number>(SESSION_COLORS.map((c) => [c, 0]));
+  for (const s of sessions) if (s.color && count.has(s.color)) count.set(s.color, count.get(s.color)! + 1);
+  let best = SESSION_COLORS[0], bestN = Infinity;
+  for (const c of SESSION_COLORS) { const n = count.get(c)!; if (n < bestN) { bestN = n; best = c; } } // 调色板序优先(并列取靠前)→ 依次不同
+  return best;
+}
+/** 给所有「未设色」的场景补上不撞色的稳定色(加载迁移用;无 null 则原样返回不换引用)。 */
+export function backfillSessionColors<T extends Pick<Session, 'color'>>(sessions: T[]): T[] {
+  if (!sessions.some((s) => !s.color)) return sessions;
+  const out = sessions.slice();
+  for (let i = 0; i < out.length; i++) if (!out[i].color) out[i] = { ...out[i], color: pickSessionColor(out) };
+  return out;
+}
 /** 兜整次数(≥1 的有限整数)。 */
 export const sessionRepeats = (s: Pick<Session, 'repeats'>): number => {
   const r = Math.round(s.repeats);
@@ -156,6 +187,28 @@ export function instrumentBars(inst: Instrument): number {
 export function sessionBars(s: Session): number {
   return s.instruments.reduce((m, i) => Math.max(m, instrumentBars(i)), 1);
 }
+
+export const sessionSongLane = (s: Pick<Session, 'songLane'>): number => {
+  const lane = Math.floor(s.songLane ?? 0);
+  return Number.isFinite(lane) && lane >= 0 ? lane : 0;
+};
+
+export const sessionSongStartBar = (s: Pick<Session, 'songStartBar'>): number => {
+  const start = Math.floor(s.songStartBar ?? 0);
+  return Number.isFinite(start) && start >= 0 ? start : 0;
+};
+
+export const sessionSongEndBar = (s: Session): number => sessionSongStartBar(s) + sessionBars(s) * sessionRepeats(s);
+
+/** §37 是否主轨块(lane 0)。 */
+export const isMainLane = (s: Pick<Session, 'songLane'>): boolean => sessionSongLane(s) === 0;
+/** §37 sub 锚定的主 session id(主轨/孤儿 = null)。 */
+export const sessionSongAnchor = (s: Pick<Session, 'songAnchorId'>): string | null => (typeof s.songAnchorId === 'string' && s.songAnchorId ? s.songAnchorId : null);
+/** §37 sub 锚定态相对偏移(兜成 ≥0 有限整数)。 */
+export const sessionSongOffset = (s: Pick<Session, 'songOffsetBar'>): number => {
+  const o = Math.floor(s.songOffsetBar ?? 0);
+  return Number.isFinite(o) && o >= 0 ? o : 0;
+};
 
 /** §26.11 该 session 当前激活(`enabled`=随主走带量化播放)的乐器;徽章计数 + hover 名单共用。solo 是瞬态隔离、不计在内。 */
 export const activeInstruments = (s: Session): Instrument[] => s.instruments.filter((i) => i.enabled);

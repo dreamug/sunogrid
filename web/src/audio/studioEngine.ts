@@ -497,13 +497,15 @@ export class StudioEngine {
     }
   }
 
-  startTransport(): void {
+  // offsets:§39 song 跳播给每个 active voice 的相位 offset(秒);缺省 0 = 从 loop 头起(Live / song 从头播)。
+  startTransport(offsets?: Map<string, number>): void {
     this.stopAudition(); // 走带一开就停掉预览(预览只在走带停时用)
     const t = Tone.getTransport();
     this.scheduleMetro(); // 重挂节拍器(上次 stop 的 t.cancel() 清掉了)
     t.start();
+    const now = Tone.now();
     this.voices.forEach((v, id) => {
-      if (this.shouldRun(id, v)) { this.fire(v, Tone.now()); v.state = 'on'; } else v.state = 'off'; // §18:armed 或被 solo 点起的都起声
+      if (this.shouldRun(id, v)) { this.fire(v, now, offsets?.get(id) ?? 0); v.state = 'on'; } else v.state = 'off'; // §18:armed 或被 solo 点起的都起声;§39 按相位 offset 起
       v.muteGain.gain.value = this.isAudible(id, v) ? 1 : 0; // 起播即按 solo 置遮罩(瞬时,非斜坡)
     });
   }
@@ -745,11 +747,14 @@ export class StudioEngine {
     this.clickSynth = this.clickVol = undefined; this.split = this.analyserL = this.analyserR = undefined; this.master = undefined; this.masterClip = undefined;
   }
 
-  private fire(v: Voice, time: number): void {
+  // offset = loop 内秒偏移(§39 无极/相位起播:跨界 sub、sub-bar 跳播)。默认 0 = 从 loop 头起(老行为)。
+  private fire(v: Voice, time: number, offset = 0): void {
     if (v.player.disposed || !v.player.loaded) return;
-    if (v.player.state === 'started') v.player.restart(time);
-    else v.player.start(time);
-    v.startTime = time;
+    const dur = v.player.buffer?.duration ?? 0;
+    const off = dur > 0 ? Math.max(0, Math.min(offset, dur - 1e-4)) : 0; // clamp 进 buffer
+    if (v.player.state === 'started') v.player.restart(time, off);
+    else v.player.start(time, off);
+    v.startTime = time - off; // 虚拟相位锚:voicePhase = (now − startTime) % loopDur 从此连续
     v.loopDur = Math.max(0, v.player.loopEnd as number) || v.player.buffer.duration;
   }
   private clearScheduled(v: Voice): void {

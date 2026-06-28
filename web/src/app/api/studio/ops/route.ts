@@ -6,7 +6,7 @@ import { db } from '@/lib/db';
 import { getCurrentUser, unauthorized } from '@/lib/auth';
 import type { Op, NSession, NInstrument, NClip } from '@/studio/sync';
 
-const SESS_COLS = ['name', 'index', 'repeats', 'color', 'xyAuto'] as const;
+const SESS_COLS = ['name', 'index', 'songLane', 'songStartBar', 'songAnchorId', 'songOffsetBar', 'repeats', 'color', 'xyAuto'] as const;
 const INST_COLS = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'] as const;
 const CLIP_COLS = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'warpPts', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'] as const;
 

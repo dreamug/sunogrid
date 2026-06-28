@@ -4,7 +4,7 @@
 import { db } from '@/lib/db';
 import { getCurrentUser, unauthorized } from '@/lib/auth';
 import type { Clip, CollageClip, Instrument, InstrumentPayload } from '@/contracts';
-import { defaultSends } from '@/contracts';
+import { defaultSends, sessionBars, sessionRepeats, type Session } from '@/contracts';
 
 // —— DB 行 → contract 形状 ——
 type DbClip = {
@@ -51,7 +51,7 @@ export async function GET(req: Request) {
   if (!user) return unauthorized();
   const projectId = new URL(req.url).searchParams.get('projectId');
   if (!projectId) return Response.json({ error: 'projectId required' }, { status: 400 });
-  const proj = await db.project.findFirst({ where: { id: projectId, userId: user.id }, select: { id: true } });
+  const proj = await db.project.findFirst({ where: { id: projectId, userId: user.id }, select: { id: true, songLayoutVersion: true } });
   if (!proj) return new Response('not found', { status: 404 });
 
   const query = {
@@ -66,15 +66,30 @@ export async function GET(req: Request) {
   if (sessions.length === 0) {
     // 新工程只落地 1 个默认会话(确定性 id + skipDuplicates → StrictMode 双挂载/并发 GET 也不会建重复)。
     await db.studioSession.createMany({
-      data: [{ id: `${projectId}-scene1`, projectId, name: 'Scene 1', index: 0, color: null }],
+      data: [{ id: `${projectId}-scene1`, projectId, name: 'Scene 1', index: 0, songLane: 0, songStartBar: 0, color: null }],
       skipDuplicates: true,
     });
     sessions = await db.studioSession.findMany(query);
   }
-  return Response.json(
-    sessions.map((s) => ({
-      id: s.id, name: s.name, index: s.index, repeats: s.repeats ?? 1, color: s.color ?? null, xyAuto: s.xyAuto ?? null, // §26 Json 列,Prisma 已反序列化为对象
+  const migrateSongLayout = (proj.songLayoutVersion ?? 0) < 1;
+  let acc = 0;
+  const out = sessions.map((s) => {
+    const inferredStart = acc;
+    const songLane = s.songLane ?? 0;
+    const songStartBar = migrateSongLayout && songLane === 0 && (s.songStartBar ?? 0) === 0 && s.index > 0 ? inferredStart : (s.songStartBar ?? 0);
+    const row = {
+      id: s.id, name: s.name, index: s.index, songLane, songStartBar, songAnchorId: s.songAnchorId ?? null, songOffsetBar: s.songOffsetBar ?? 0, repeats: s.repeats ?? 1, color: s.color ?? null, xyAuto: (s.xyAuto ?? null) as Session['xyAuto'], // §26 Json 列,Prisma 已反序列化为对象
       instruments: (s.instruments as unknown as DbInstrument[]).map(instrumentFromDb),
-    })),
-  );
+    } satisfies Session;
+    // 老项目迁移兜底:版本 0 的旧线性 Song 按 index 推导一次,随后写回并升到版本 1。
+    acc += sessionBars(row) * sessionRepeats(row);
+    return row;
+  });
+  if (migrateSongLayout) {
+    await db.$transaction([
+      ...out.map((s) => db.studioSession.updateMany({ where: { id: s.id, projectId }, data: { songLane: s.songLane ?? 0, songStartBar: s.songStartBar ?? 0 } })),
+      db.project.update({ where: { id: projectId }, data: { songLayoutVersion: 1 } }),
+    ]);
+  }
+  return Response.json(out);
 }

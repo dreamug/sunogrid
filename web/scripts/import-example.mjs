@@ -82,6 +82,8 @@ async function main() {
         loopSong: bundle.project.loopSong,
         playMode: bundle.project.playMode,
         showAutomation: bundle.project.showAutomation,
+        songLayoutVersion: bundle.project.songLayoutVersion ?? 1,
+        songLanes: J(bundle.project.songLanes), // §37 命名 track
         isExample: true,          // §25 母版标记
         forkedFromExampleId: null, // 母版自身不回链
       },
@@ -109,11 +111,12 @@ async function main() {
     }
     const mapSound = (old) => (old ? soundMap.get(old) ?? null : null);
 
-    // Session 树:嵌套 create 自动生成新 id + 接 FK。
+    // Session 树:嵌套 create 自动生成新 id + 接 FK。§37:存 index→新 id,sub anchor 二遍按 index 重映射。
+    const sessIdByIndex = new Map();
     for (const s of bundle.sessions) {
-      await tx.studioSession.create({
+      const createdSess = await tx.studioSession.create({
         data: {
-          projectId: pid, name: s.name, index: s.index, repeats: s.repeats, color: s.color, xyAuto: J(s.xyAuto),
+          projectId: pid, name: s.name, index: s.index, songLane: s.songLane ?? 0, songStartBar: s.songStartBar ?? 0, songOffsetBar: s.songOffsetBar ?? 0, repeats: s.repeats, color: s.color, xyAuto: J(s.xyAuto),
           instruments: {
             create: s.instruments.map((i) => ({
               slot: i.slot, type: i.type, label: i.label, color: i.color, icon: i.icon, enabled: i.enabled,
@@ -133,7 +136,15 @@ async function main() {
             })),
           },
         },
+        select: { id: true },
       });
+      sessIdByIndex.set(s.index, createdSess.id);
+    }
+    // §37 二遍:sub 的 songAnchorId 按 songAnchorIndex→新 id 重映射(锚失效则留 null → resnap 当孤儿)。
+    for (const s of bundle.sessions) {
+      if (s.songAnchorIndex == null) continue;
+      const newId = sessIdByIndex.get(s.index), newAnchor = sessIdByIndex.get(s.songAnchorIndex);
+      if (newId && newAnchor) await tx.studioSession.update({ where: { id: newId }, data: { songAnchorId: newAnchor } });
     }
 
     // PadClip(warp 是非空 JSON,原样塞回)。

@@ -1432,3 +1432,153 @@ Splice 文件名编码了 BPM/调式(`NH_IAP_100_..._Dmaj`=100/D大、`SS_AXR2_1
 2. ✅ **渲染**:`warpClip` 分段(`warpClipPiecewise`)+ `regionFromClip`/`WarpRequest` 串 `warpFracs`(分数控制点,timeMul 无关)。
 3. ✅ **UI**:WarpEditor marker 双击增/拖钉到格/双击删 + 只读门(总走带播放中 marker 灰显不可编辑);编辑器 cps/emit/绘制/命中统一走 `normalizeWarpPts` → 所见==落库==渲染。
 4. ✅ **stems + 导出**:无需新代码——stem 子 Sound 整体继承 `parent.warp`(含 `warpPts`,逐样本锁相);导出 `renderSong→buildBuffer` 与 collage `buildCollageBuffer` 都过 `warpToBuffer→warpClip(warpFracs)`,自动落地。code-review(/code-review high)修了 collage 片/fork 落库漏 `warpPts`、编辑器三套阈值不一致 + ghost pin。
+
+## 37. Song 多轨 arranger — 主轨吸附 / Sub 轨锚定 link 模型 —— 📐 设计 · 2026-06-26
+
+§26.1 把 Song 视图改成了「按比例 arrange 时间轴」,但只有**单条线性** lane(所有 session 首尾相接)。本节把它扩成**真多轨 arranger**:一条**主轨**(吸附线性) + 任意多条**Sub 轨**(自由摆放、寄生锚定到主 session),语义对标剪映 / Final Cut 的「主视频轨 + 副轨 linked clip」。
+
+> ⚠ 起因:用户先自写过一版多轨(把多 lane 硬塞进 §26 的线性 block),交互/UI 双双不对——reorder 拖拽与 2D 定位互撞 → 退化成 `‹›˄˅` 微调按钮 + `+/−` 改 repeat;每块三条 tinted strip(name/nums/automation)~104px 太吵;lane 只是 scroll 内淡带、无 track header。本节是推倒重设计。
+
+### 37.1 心智模型 — 两套时间坐标系
+
+把「时间定位」拆成两套坐标,联动几乎全靠坐标系自动成立,**不靠监听器同步**:
+
+- **主轨(Main lane,`songLane===0`)= 吸附序列**。只有顺序、没有自由位置。session 的 `songStartBar` 是**派生量**(=前面所有主轨 session 的 `bars×reps` 累加,按 `index` 序),无空白、无重叠。「移动」=改顺序;「变长」(repeat 或内部最长乐器变)=后面整体重排。
+- **Sub 轨(`songLane>0`)= 寄生锚定**。不吸附、可放任意位。**双态定位**:
+  - **锚定态**:`{ songAnchorId, songOffsetBar }` → `songStartBar = 锚 session.songStartBar + songOffsetBar`(实时派生)。主 session 一动,sub 的绝对位置跟着变——**因为它根本没有独立位置可以不同步**。
+  - **孤儿态**:`songAnchorId===null` → `songStartBar` 就是它自己存的绝对小节,自由浮、不跟任何人。
+- **Sub 不能 repeat**:sub session 的 `repeats` 恒 `=1`,长度 = `sessionBars`(单遍)。UI 上 sub clip **无右缘 repeat 手柄**。
+
+一句话:**`songStartBar` 退化成「派生缓存」**——不再是用户直接编辑的自由量,而是每次 mutation 后由 `resnapSong()` 按上面的规则重算(主轨累加 / sub 锚点+偏移 / 孤儿保留)。回放与导出继续直接读 `songStartBar`(绝对小节),零改动。这正合 §15:第一公民结构关系(`songAnchorId`/`songOffsetBar`/lane)规范化落列,`songStartBar` 当反规范化缓存。
+
+### 37.2 Track 实体 — 命名 arrangement track
+
+lane 不是匿名层号,是**用户命名 + 上色**的 arrangement track。挂工程级(§15 JSON 逃生口,同 `fx`/`gridPrefs`):
+
+```ts
+interface SongLane { id: string; name: string; color: string | null }
+// Project.songLanes: SongLane[] | null   —— 有序;index 0 = 主轨(始终存在,不可删空到 0)
+// Session.songLane 仍是 lane 序号(0=主轨),= songLanes 的下标
+```
+
+左侧固定 **track gutter** 从 `Project.songLanes` 渲(**允许空 track**:命名了但还没 clip);不再 `max(songLane)+1` 推导 lane 数。表头 = 名字(双击改名) + 色点 + mute/solo(后续接 §18 路子)。
+
+### 37.3 数据模型 delta(Session)
+
+```ts
+interface Session {
+  // 现有:id,name,index,repeats,color,xyAuto,instruments,songLane
+  songLane?: number;        // 0=主轨;>0=sub 轨(= songLanes 下标)
+  songStartBar?: number;    // 🔁 语义变:派生缓存(resnapSong 重算),非自由量
+  songAnchorId?: string | null;  // 🆕 sub 锚定的主 session id;主轨/孤儿 = null
+  songOffsetBar?: number;        // 🆕 sub 锚定态:相对锚 session 起点的偏移(≥0)
+}
+```
+
+主轨吸附顺序复用 `index`(场景列表序),不另立字段:`resnapSong` 取 `songLane===0` 的 session 按 `index` 排,累加得各自 `songStartBar`。
+
+### 37.4 联动矩阵(已拍板)
+
+设 sub `S` 锚到主 session `A`:
+
+| 主轨对 A 的事件 | 锚定态 sub | 孤儿态 sub |
+|---|---|---|
+| 移动(改序)/ A 前块增删变长 / 改 repeat / 内部最长乐器变 bars | 相对 `offset` 不变 → 绝对位置**自动跟随**(`resnapSong` 重算 A.start 即可) | 不动 |
+| **复制 A→A'** | link 到 A 的 sub **各跟一份**(克隆成独立 sub,锚 A'、`offset` 不变,**不按 repeat 铺**) | 不动 |
+| **删除 A** | **脱锚变孤儿**:`songOffsetBar` 固化成绝对位置写进 `songStartBar`、`songAnchorId=null`,停原地 | — |
+| 用户横向拖 S | 落点起点落在某主 session 区间 → **重锚**它(`offset=起点−该.start`);落在主轨范围外 → 变孤儿 | 同左,可重新获锚 |
+
+**已拍板边界:**
+1. **被动变化不重锚**:主 session 变长/短/移时,锚定 sub 只跟相对 `offset`,**不主动改锚**——即便 `offset` 超出 A 尾、视觉压到后面 B 上方,仍 link A。**只有用户主动拖 sub** 才按落点重锚。
+2. **主轨 → sub**:默认**移动**(主轨塌缩补位);按住 **Alt** = **复制**(主轨原块留,sub 新增**独立**副本/全新 id 独立乐器)。两种都 `repeats` 清 1(repeat 信息丢失,破坏性 → 必 `pushHistory` 可 undo)。
+3. **sub → 主轨**:插回吸附序列(按落点定 `index`),`repeats` 默认 1,清 `songAnchorId`/`songOffsetBar`。
+4. **同 lane 禁叠放(全路径守恒)**:同一 sub lane 内两块不得相交(相交会一起出声)。**主动拖** = 落点(按夹后最终落点判定,不是裸 vbar)若与同 lane 他块相交 → 放置失败弹回 + 提示。**自动路径**(夹随 / 删主块 / 改 reps)不能弹回 → `resnapSong` 内夹后再**顺次往左堆**:同锚同 lane 子轨全被夹到末端时,最右块留夹后位、左侧块依次让到前块之前(bounded ≥0)。只动派生 `songStartBar`、不改存储 `songOffsetBar`(加长复原即回原位 → 可逆);孤儿不参与(手动放置、冻结原地)。
+
+### 37.5 交互(DAW arrangement,直接操作取代按钮)
+
+- **拖块身** = 2D 移动:横向吸 bar、纵向换 lane;松手按落点定主轨 `index` 或 sub 锚定/孤儿(见矩阵)。删除旧的 `‹›˄˅` 微调 + HTML5 reorder。
+  - **主轨 reorder = 看鼠标、不看块左缘**:插入位由**鼠标所在小节**(`songBarAt(clientX)` → `cursorBar`)与邻块**中心**比较得出,不是被拖块投影起点 `vbar`(抓宽块右半边时左缘滞后 → 换位不跟手)。被拖块**浮在鼠标下跟手**(`vbar`,`.dragging` 浮起样式)、其余块靠 `.song-reflow` 过渡**让位开空**、`song-drop-ghost` 占位指示落点,松手落进空位(Trello/dnd-kit reorder 范式)。
+  - **子轨拖拽**:被拖块渲染在**夹后落点**(受约束放置显落点能避免误跳,见 §37 #2),与浮动 reorder 分治。
+- **拖右缘**(仅主轨块) = 增减 `repeats`(吸到 `bars` 整数倍)。删除 `+/−` 按钮。
+- **点** = 选中(下方 pad grid 载它编辑);**双击名** = 改名;色点 = 换色。
+- **Del/⌫** = 删(主轨块连带其 sub 脱锚)。
+- 锚定关系画**虚线**:从 sub clip 起点连到锚 session 起点;孤儿 = 虚框 + `⚲` 标记、无连线。
+- **顶部 ruler** = bar 号 + 点 bar 起播 + 单播放头穿全 lane(沿用 §26.9)。**Alt+滚轮**缩放、滚轮平移(沿用 §26.9 `RailScroll`)。
+- **Automation** = clip 内 overlay 细曲线(`∿` toggle 时显;完整编辑仍在选中 clip 下方 pad 区的 `AutomationLane`),不再每块塞一条占高。
+
+### 37.6 回放 / 导出(几乎零改)
+
+`songActiveAt(bar)` 已是「`[start,end)` 含 bar 即发声」的纯几何判定,sub clip 只要 `resnapSong` 给了正确 `songStartBar` + `sessionBars`,**现有引擎(§37 `playingSongIds` 多块并发 + lookahead 预载)直接发声、无需改回放**。导出 `exportSong.planSong` 同理读 `songStartBar`,自动正确。改动只在「`songStartBar` 从存储值变成 resnap 产出」这一层,对下游透明。
+
+### 37.7 持久化
+
+- **Project 级**:`songLanes Json?` 列(prisma `Project`),走 `PATCH /api/projects/[id]` 白名单 + `ApiProject` + `Project` 契约 + page prop。
+- **Session 级**:`songAnchorId String?` + `songOffsetBar Int @default(0)` 两列(prisma `StudioSession`),进 `sync.ts` `NSession`/`SESS_FIELDS`/`normalize` + `api/studio/route.ts` 读 + `api/studio/ops` `SESS_COLS`。`songStartBar` 列保留(派生缓存照常落库,导出/回放读它)。
+- 迁移:加列(additive,默认安全);老数据 `songAnchorId=null` 全是主轨/孤儿,`resnapSong` 首跑把主轨重排成吸附(`songLayoutVersion` 再 +1 标记)。
+
+### 37.8 Undo 口径
+
+`pushHistory` 快照已含 sessions 全字段(`songLane`/`songStartBar`/新 `songAnchorId`/`songOffsetBar` 随快照走);需把 **`Project.songLanes`**(track 增删/改名/换色/重排)纳入快照口径(见 §16 + [[undo-constitution]])。破坏性操作(删主块级联脱锚、Alt 复制、主↔sub 转换、改 repeat)改前一律 `pushHistory`。
+
+### 37.9 阶段(doc-first)
+
+1. 📐 **文档**(本节)。
+2. 🔜 **契约 + 纯 link 模块 + 测**:`Session` 加字段 + `SongLane` 类型 + `studio/songLayout.ts`(`resnapSong`/`mainOrder`/`reanchorAt`/`detachToOrphan`/`laneCount` 纯函数)+ `songLayout.test.ts`(联动矩阵逐条断言)。**不接 UI、不翻行为**。
+3. 🔜 **持久化**:prisma 加列/迁移 + sync/api 三处 + project songLanes。
+4. 🔜 **UI 重写 + 回放接通 + undo**:track gutter + ruler + pointer-drag(移动/重锚/resize/删/Alt 复制)+ automation overlay;接 `resnapSong` 让行为切换与新 UI 原子落地;扩 undo 口径。
+5. 🔜 **review**:真机点测拖拽/重锚/孤儿/Alt 复制 + stems/导出回归。
+
+## 37.10 Live 场景卡对齐 §37(顶栏 session 块重画)—— 📐 设计 · 2026-06-28
+
+§37 把 Song 视图重做成主/Sub 多轨 arranger 后,Live 顶栏的场景卡(`.scard`)还停在 §20 老设计(三行:头条 + 乐器色块墙 + `N inst` 文字),且对主/Sub/孤儿模型完全无感——一个 Sub-overlay 在 Live 里和正经主场景长得一样、点一下就当整曲启动,语义错。本节把 Live 卡的**设计语言**对齐 §37 的 `.sblock`,但**不照搬其职能**。
+
+> Live 和 Song 共用同一个 `sessions.map`(`StudioApp.tsx`),分叉出 `.scard`(Live)/`.sblock`(Song)两套 DOM;颜色身份(`sessionColor` 绑 id,见 [[session-color-identity]])早已统一,是本对齐的地基。
+
+### 37.10.1 原则:对齐「身份」,不对齐「职能」
+
+- **Live = 场景启动器**(Ableton Session view):一次启动**一个**场景,无时间轴/lane/并发;场景无限循环到切走为止。
+- **Song = 编曲时间轴**(§37 arranger):2D 定位、时长、repeat、主/Sub 并发。
+
+故 **repeat 微调 / 2D 摆放 / 锚定虚线**是 Song 职能,**Live 不要**(repeat 在 Live 无意义,保持不对齐是对的)。要对齐的是「同一个场景在两视图里读起来是同一个东西」——身份、信息集、交互词汇。
+
+### 37.10.2 卡片解剖(对齐 `.sblock` 的「tinted 头条 + 内容带」二段)
+
+**头条 = `.sblk-name` 逐字搬**:同 `color-mix(--c 50%, --bg-1)` 底 + `color-mix(--c 52%, --line)` 下边框,顺序 = 色点 · 名字(`color-mix(--c 30%, --tx)`)· **乐器数胶囊** · `Nb`。
+- 乐器数胶囊**复用 `SongInstrumentCount`**(active/total + hover portal 弹乐器名单);样式同 `.sblk-icount`。
+- **删掉**旧版第三行 `N inst` 文字(被胶囊取代)。
+
+**内容带 = Live 专属富信息**(Song 此处是数字条,Live 无 repeat 语义):
+- 乐器**色块预览**(沿用 `.sc-chips`,对应下方 pad 颜色)。
+- 一行 meta:**automation chips**(`PROG_LABEL/PROG_COLOR`,同 `.sblk-achip` 的字母方块,标该场景挂了哪些效果——`xyAuto` 在 Live 同样为真,旧版白漏)+ Sub/孤儿标记。
+
+### 37.10.3 主/Sub/孤儿在 Live 的呈现(**已拍板:全列 + 打标**)
+
+Live **列出全部场景**(主轨 + Sub + 孤儿,不藏),保留每个场景可选中/可编辑;Sub/孤儿**降级显示**并带 §37 同款标记。点 Sub = 单独启动它(退化但无害,就是放它自己那几件乐器)。
+> 否决「只列主轨、Sub 仅在 Song 出现」:那样 Live 下无法选中/编辑 Sub 场景的乐器(得回 Song),把场景藏起来代价更大。
+
+- **Sub 卡**:略窄、name 条减淡(`color-mix(--c 38%, --bg-1)`)、meta 行带 `↳ Sub · {laneName}`(轨名取 `laneName(lane)`,与 §37 gutter 表头同名)。
+- **孤儿卡**:虚线边 + `⚲`,镜像 `.sblk-orphan` 的 `border-style:dashed` + 减淡 name 条。
+
+### 37.10.4 状态(对齐 §37 视觉语言)
+
+| 态 | Live 卡 | 对齐点 |
+|---|---|---|
+| 选中 `.on` | **不改边框/不抬灰底**,内容带(`.sc-body`)翻成 `color-mix(--c 35%, #fff)` 高明度同色淡彩 + 压深其上浅色文字(`+N`/`↳轨名`)+ 乐器数胶囊微提 | 逐字镜像 `.sblock.sblk-sel`(Song 选中 = 数字条染白、不动边框);Live 内容带 ↔ Song 数字条 |
+| 播放 `.playing` | **不变色**,只 `--play` 播放头竖线(`SessionPlayhead` 已在)+ 角落电平条 | §37「播放态只看播放头线」 |
+| 排队 `.queued` | `--queue` 呼吸边(`clippulse`)+ `queued` 字样 | 两模式共用 `clippulse` |
+
+> 旧版 Live 选中 = 白描边 + 抬灰底,与 §37 Song 选中(去白边、内容带染白)不一致;2026-06-28 改为镜像 `.sblk-sel`,两模式选中观感统一。
+
+### 37.10.5 排序与 reorder
+
+- Live 一排按 **Song 阅读序**渲染:主轨按 `index` 在前,锚定 Sub 紧跟其锚场景分组(不再按数组裸下标交错)——两视图讲同一个故事。
+- Live 拖卡 reorder 改的就是 §37 主轨 `index` = **重排歌曲段落**(同一操作)。约束:reorder 限主轨内;拖 Sub 卡不在 Live 里悄悄插进主序列(改 lane 得回 Song)。
+- 选配打磨:把 Live 的 HTML5 DnD 换成 §37 指针拖 reorder,手感统一(非必须)。
+
+### 37.10.6 落地(数据零改,UI-only)
+
+改动几乎全在共用 `sessions.map` 的 `playMode !== 'song'` 分支 + 一段 `.scard` CSS:
+- JSX:头条换成 `.sblk-name` 同构(色点 · 名 · `SongInstrumentCount` · `Nb`);删 `N inst` 行;内容带加 automation chips + Sub/孤儿标记;排序对齐。
+- CSS:`.scard` 头条 tint/边框对齐 `.sblk-name`;新增 `.scard.scard-sub`(减淡+窄)/`.scard.scard-orphan`(虚线);复用 `.sblk-achip`/`.sblk-icount` 视觉。
+- **无 schema / 无 undo 口径变化**(纯渲染;`xyAuto`/`songLane`/`songAnchorId` 已在快照口径,见 [[undo-constitution]])。
+- 高保真稿:见本次会话 mockup(Song block 参照 + Live 全状态卡 + before→after)。

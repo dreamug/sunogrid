@@ -117,6 +117,8 @@ async function main() {
       loopSong: project.loopSong,
       playMode: project.playMode,
       showAutomation: project.showAutomation,
+      songLayoutVersion: project.songLayoutVersion ?? 1,
+      songLanes: project.songLanes ?? null, // §37 命名 track
     },
     sounds: sounds.map((s) => ({
       id: s.id, name: s.name, mode: s.mode, sourceBpm: s.sourceBpm, musicalKey: s.musicalKey,
@@ -126,7 +128,9 @@ async function main() {
       assetId: s.assetId, tags: s.tags,
     })),
     sessions: sessions.map((s) => ({
-      name: s.name, index: s.index, repeats: s.repeats, color: s.color, xyAuto: s.xyAuto ?? null,
+      name: s.name, index: s.index, songLane: s.songLane ?? 0, songStartBar: s.songStartBar ?? 0,
+      songAnchorIndex: s.songAnchorId ? (sessions.find((x) => x.id === s.songAnchorId)?.index ?? null) : null, // §37 sub 锚定:存锚 session 的 index(稳定),导入按 index→新 id 重映射(不能存旧 id)
+      songOffsetBar: s.songOffsetBar ?? 0, repeats: s.repeats, color: s.color, xyAuto: s.xyAuto ?? null,
       instruments: s.instruments.map((i) => ({
         slot: i.slot, type: i.type, label: i.label, color: i.color, icon: i.icon, enabled: i.enabled,
         gainDb: i.gainDb, pan: i.pan, eqLowDb: i.eqLowDb, eqMidDb: i.eqMidDb, eqHighDb: i.eqHighDb,

@@ -48,11 +48,12 @@ export function MasterMeter({ engine, playing }: { engine: StudioEngine | null; 
   );
 }
 
-/** 顶栏走带位置 bar.beat.16th:自驱动。 */
-export function TransportPos({ engine, playing }: { engine: StudioEngine | null; playing: boolean }) {
+/** 顶栏走带位置 bar.beat.16th:自驱动。loopBars>0(song 循环)→ bar 按总长回绕,免走带单调递增时读数无限增大。 */
+export function TransportPos({ engine, playing, loopBars = 0 }: { engine: StudioEngine | null; playing: boolean; loopBars?: number }) {
   useFrame(playing && !!engine);
   const p = playing && engine ? engine.barBeat() : { bar: 1, beat: 1, sixteenth: 1 };
-  return <span className="tb-pos" title="bar · beat · 16th"><b>{p.bar}</b><i>.</i><b>{p.beat}</b><i>.</i><b className="dim">{p.sixteenth}</b></span>;
+  const bar = loopBars > 0 ? ((p.bar - 1) % loopBars + loopBars) % loopBars + 1 : p.bar; // §39 单调走带 → 回绕到 [1,loopBars]
+  return <span className="tb-pos" title="bar · beat · 16th"><b>{bar}</b><i>.</i><b>{p.beat}</b><i>.</i><b className="dim">{p.sixteenth}</b></span>;
 }
 
 /** 乐器实时电平 0..1:自驱动取数(给 tile launch fill / mixer fader 共用)。active=false → fallback。 */
@@ -123,11 +124,14 @@ export function SessionPlayhead({ engine, mode, startBar, barsPerRep, repeats, p
 }
 
 /** §26.9 列级播放头:song 模式整条时间轴(标尺+块)穿一条线。
- *  left = (blockStartBars + (songPosBars − blockTransportStart)) × px;减 blockTransportStart 使 loopSong 循环后(songPosBars 无限增长)仍定位到视觉块内。 */
-export function SongPlayhead({ engine, playing, px, blockStartBars, blockTransportStart }: { engine: StudioEngine | null; playing: boolean; px: number; blockStartBars: number; blockTransportStart: number }) {
+ *  走带单调递增不回零(§39),loopBars>0 时按 songPosBars % loopBars 取模 → 由时钟派生的回绕,
+ *  恰在时钟跨界(=音频换场 time)那刻翻折,不再随提前触发的 JS 早跳(旧 setTransportPosition 重置会让播放头提前约一个 lookahead 拽回头)。 */
+export function SongPlayhead({ engine, playing, px, blockStartBars, loopBars = 0 }: { engine: StudioEngine | null; playing: boolean; px: number; blockStartBars: number; loopBars?: number }) {
   useFrame(playing && !!engine);
   if (!playing || !engine) return null;
-  const x = Math.max(0, (blockStartBars + (engine.songPosBars() - blockTransportStart)) * px);
+  const raw = engine.songPosBars();
+  const pos = loopBars > 0 ? raw % loopBars : raw; // §39 时钟取模:循环回绕与音频换场同刻,无早跳
+  const x = Math.max(0, (blockStartBars + pos) * px);
   return <div className="song-ph" style={{ left: x }} aria-hidden="true" />;
 }
 

@@ -25,7 +25,8 @@
    │ web (next start, Node 20+)          │
    │   ├── MySQL 8            (必需)      │
    │   ├── web/storage/  持久卷 (必需)   │   ← 音频“模拟 CDN”,内容寻址
-   │   └── stem-service :8008 (可选)     │   ← Demucs 乐器分离,Python
+   │   ├── stem-service :8008 (可选)     │   ← Demucs 乐器分离,Python
+   │   └── DashScope 外呼     (可选)     │   ← §35 AI 提示词助手,服务端转发
    └─────────────────────────────────────┘
 ```
 
@@ -60,7 +61,15 @@ DATABASE_URL="mysql://用户:密码@数据库主机:3306/hiphop_gen"
 ```
 
 ### 2.2 数据库迁移
-**迁移基线已重做**:`prisma/migrations/20260622120000_baseline` 反映**当前完整 schema**(此前只有过期的 6/15 `init`,只有半套表,已替换)。建表二选一:
+**迁移基线已重做**:`prisma/migrations/20260622120000_baseline` 反映重做时的完整 schema(此前只有过期的 6/15 `init`,只有半套表,已替换)。基线之后又叠了几支增量迁移(§37 多轨 arranger):
+
+- `20260626090000_song_multilane`
+- `20260626103000_song_layout_version`
+- `20260626110000_song_sub_anchor`
+
+> `migrate deploy` 会按顺序自动跑全部迁移(基线 + 上面这些),无需手动逐条点名;这里列出只为让你知道线上 schema 已超出基线。今后加迁移就追加到 `prisma/migrations/`,部署时 `db:deploy` 自动带上。
+
+建表二选一:
 
 - **全新空库 · 走迁移(推荐)**:
   ```bash
@@ -83,7 +92,20 @@ cd web
 node scripts/promote-admin.mjs <username>     # 降回:加 --demote
 ```
 
-> 示例母版怎么从本地搬到线上:见 PRODUCT.md §30(`export-example` / `import-example` 脚本,待实现)。
+### 2.4 把示例母版从本地搬到线上(可选)
+示例项目(★Example 母版,见 PRODUCT.md §25/§30)的导出/导入脚本**已实现**。流程是:本地把一个项目连同它引用到的音频字节打包成 bundle,拷到生产机,再导入成归属站长的只读母版。
+
+```bash
+# ① 本地(读本机 DB + web/storage,不改任何东西):
+cd web && node scripts/export-example.mjs <本地projectId> ./out/example-bundle
+
+# ② 把 ./out/example-bundle 整个目录拷到生产机的 web/ 下(scp/rsync 均可)。
+
+# ③ 生产机(直连 prod DB、写 prod web/storage;先确保站长已 promote-admin):
+cd web && node scripts/import-example.mjs ./example-bundle <站长username>
+```
+
+> 导入会把 bundle 里的音频按内容寻址写进生产 `web/storage/`(已存在则去重跳过),并把项目挂成 `isExample=true` 归属该站长。新用户进入示例即 fork 出可编辑副本(连 Sound 库一起克隆)。设计与字段口径见 PRODUCT.md §30。
 
 ---
 
@@ -95,8 +117,13 @@ node scripts/promote-admin.mjs <username>     # 降回:加 --demote
 | `NODE_ENV=production` | ✅ | **不设的话登录 cookie 的 `secure` 不会开**(见 [`auth.ts`](web/src/lib/auth.ts));`next start` 也按生产跑 |
 | `PORT` | ⬜ | `next start` 默认 **3000**(注意:`npm run dev` 才是 3007)。反代后随意 |
 | `STEM_SERVICE_URL` | ⬜ | 乐器分离服务地址,默认 `http://127.0.0.1:8008`(见 [`stems.ts`](web/src/lib/stems.ts));不上 stem-service 可忽略 |
+| `DASHSCOPE_API_KEY` | ⬜ | §35 AI 提示词助手(gen-ta 角落 ✨ → 自然语言 → Suno 提示词)。阿里云百炼 DashScope key,**只在服务端读、绝不下发前端**(见 [`api/ai/prompt/route.ts`](web/src/app/api/ai/prompt/route.ts))。**不设则 ✨ 浮层返回 503 提示"未配置",生成主流程不受影响** |
+| `QWEN_MODEL` | ⬜ | AI 助手用的模型档,默认 `qwen-flash`(最便宜)。可换 `qwen-turbo` / `qwen-plus` |
+| `DASHSCOPE_BASE_URL` | ⬜ | DashScope OpenAI 兼容接口地址,默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`。**国际账号**换 `dashscope-intl` 那个域名 |
 
-`.env.example` 目前只有 `DATABASE_URL`,生产请按上表补齐。
+> **大模型(AI 助手)是纯可选的外呼依赖**:web 不内置任何模型,只在用户点 ✨ 时由服务端转发一次到 DashScope。不配 `DASHSCOPE_API_KEY` 整站照常跑,只是 ✨ 功能关闭。配了它会按用户 + IP 限流 30 次/分(进程内存计数,同 §10 的限流局限)。
+
+`.env.example` 已含上面全部变量(`DATABASE_URL` 必填,其余按需放开注释),生产请按上表补齐。
 
 ---
 

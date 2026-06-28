@@ -34,6 +34,7 @@ export async function POST(req: Request) {
       masterBpm: b.masterBpm ?? 90,
       quantize: b.quantize ?? '1bar',
       beatsPerBar: b.beatsPerBar ?? 4,
+      songLayoutVersion: 1,
     },
   });
   return Response.json(project, { status: 201 });

@@ -2,12 +2,13 @@
 // Studio —— 老 loop 机 .daw 外壳 + 新模型 Session › Instrument › Clip,接真实库 + 生成 + undo + 真 WarpEditor + 落库。
 // 左 = LoopManager(生成 + 真实库,可拖);中 = 操场(clip 画波形、拖库素材进空 slot=sample 乐器、hover 空 slot=＋sample/＋切片、拖进 collage=加片);
 // 底 = 编辑器(选库素材→预调 warp;选乐器→mixer + warp/collage 下钻)。生产 loop-machine 与 DB 的旧表不碰。
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import Link from 'next/link';
-import type { Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, InstrumentPayload, InstrumentSends, Mixer, Quantize, SampleWarp, Session, XYAutomation, XYAutoSet, XYProgram } from '@/contracts';
-import { activeInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionRepeats, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
+import type { Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, InstrumentPayload, InstrumentSends, Mixer, Quantize, SampleWarp, Session, SongLane, XYAutomation, XYAutoSet, XYProgram } from '@/contracts';
+import { activeInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionColor, sessionRepeats, sessionSongEndBar, sessionSongLane, sessionSongStartBar, sessionSongAnchor, isMainLane, pickSessionColor, backfillSessionColors, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
+import { resnapSong, mainLayout, anchorPatchAt, mainInsertIndex, moveMainTo, subDropLanding, nextFreeSubStart } from '@/studio/songLayout';
 import { normalize, diff, type Snapshot } from '@/studio/sync';
 import { StudioEngine } from '@/audio/studioEngine';
 import { warpPtsSig } from '@/audio/warpMap';
@@ -85,6 +86,7 @@ function setDragImage(ev: React.DragEvent, label: string): void {
 }
 const PX = 12;
 const FAINT = 'rgba(255,255,255,0.032)'; // 很浅的网格线
+const SONG_ZOOM_DEFAULT = 40; // §37 Song zoom 默认 px/bar = 滑块正中(范围 20..60);双击 slider 回到这里
 
 // 波形峰值采样点数:全用同一高密度值 —— pad/lane/编辑器/库卡共享 lanePeaksCache(同 region 同 key),
 // 且 peaksFromRegion 是 O(span)(与 n 无关,只多写几个数组元素),故拉高几乎免费,换来宽编辑器里不再有可见折线。
@@ -162,10 +164,50 @@ interface Ctx { soundsById: Map<string, ApiSound>; bpm: number; beatsPerBar: num
 
 // 空工程兜底:1 个默认会话(与服务端 /api/studio 一致;真正落库由首次保存的 sess.add 完成)
 const emptySessions = (): Session[] => [
-  { id: nid('sess'), name: 'Scene 1', index: 0, repeats: 1, color: null, instruments: [] },
+  { id: nid('sess'), name: 'Scene 1', index: 0, songLane: 0, songStartBar: 0, repeats: 1, color: SESSION_COLORS[0], instruments: [] }, // §37 默认场景即带色(非 null)→ 新工程不触发加载补色的早期 sess.add
 ];
 
-export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = null, genPrefs = null, gridPrefs = null, fx: fxProp = null, quantize: propQuantize = '1bar', beatsPerBar = 4, loopSong: propLoopSong = false, playMode: propPlayMode = 'live', showAutomation: propShowAutomation = true }: { projectId: string; name?: string; masterBpm: number; masterKey?: string | null; genPrefs?: GenPrefs | null; gridPrefs?: GridPrefs | null; fx?: FxConfig | null; quantize?: Quantize; beatsPerBar?: number; loopSong?: boolean; playMode?: 'live' | 'song'; showAutomation?: boolean }) {
+function normalizeSongLayout(sessions: Session[]): Session[] {
+  return resnapSong(sessions); // §37 加载即派生:主轨吸附 / sub 锚定跟随 / 失效锚降级孤儿
+}
+
+function songTotalBars(sessions: Session[]): number {
+  return sessions.reduce((m, s) => Math.max(m, sessionSongEndBar(s)), 0);
+}
+
+const SONG_TRACK_COUNT = 10; // §37 Song 固定 track 数(Main + Sub 1..9);不增删,空轨常驻,arranger 纵向 scroll。
+function songLaneCount(sessions: Session[]): number {
+  return sessions.reduce((m, s) => Math.max(m, sessionSongLane(s) + 1), 1);
+}
+
+function songActiveAt(sessions: Session[], bar: number): Session[] {
+  return sessions.filter((s) => {
+    const start = sessionSongStartBar(s), end = sessionSongEndBar(s);
+    return bar >= start && bar < end;
+  });
+}
+
+/** §37 多轨「前景块」= 驱动播放头跟随 / 视图 / XY automation 的那一块。统一口径:主轨块(lane 0)优先(歌的主干),否则当前重叠中最晚开始的 active 块。prime 与稳态 coordinator 必须用同一个,免 XY automation 来源在起播瞬间和稳态打架。 */
+function songForeground(active: Session[]): Session | undefined {
+  if (!active.length) return undefined;
+  return active.find(isMainLane) ?? [...active].sort((a, b) => sessionSongStartBar(b) - sessionSongStartBar(a))[0];
+}
+
+function songNextBoundaryAfter(sessions: Session[], bar: number): number | null {
+  let next: number | null = null;
+  for (const s of sessions) {
+    for (const b of [sessionSongStartBar(s), sessionSongEndBar(s)]) {
+      if (b > bar + 1e-6 && (next == null || b < next)) next = b;
+    }
+  }
+  return next;
+}
+
+const sessionInstIds = (sessions: Session[]): string[] => sessions.flatMap((s) => s.instruments.map((i) => i.id));
+// §37 只起「激活(enabled)」乐器的 voice:Song 播放起声路径用它(停声仍用全部 sessionInstIds),否则禁用乐器也会随块进 active 被点响。
+const enabledInstIds = (sessions: Session[]): string[] => sessions.flatMap((s) => activeInstruments(s).map((i) => i.id));
+
+export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = null, genPrefs = null, gridPrefs = null, fx: fxProp = null, quantize: propQuantize = '1bar', beatsPerBar = 4, loopSong: propLoopSong = false, playMode: propPlayMode = 'live', showAutomation: propShowAutomation = true, songLanes: songLanesProp = null }: { projectId: string; name?: string; masterBpm: number; masterKey?: string | null; genPrefs?: GenPrefs | null; gridPrefs?: GridPrefs | null; fx?: FxConfig | null; quantize?: Quantize; beatsPerBar?: number; loopSong?: boolean; playMode?: 'live' | 'song'; showAutomation?: boolean; songLanes?: SongLane[] | null }) {
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [projName, setProjName] = useState(name); // 顶栏可编辑工程名;改即乐观写 Project.name(同 quantize 套路,不进 undo/发件箱)
   // §19 桌面化:仅 Electron(注入 window.sunogrid)才显示顶栏的「Suno」按钮。useEffect 里读,避免 SSR 水合不一致。web 上恒 false → 不渲染,行为不变。
@@ -176,7 +218,14 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const sessionIdxRef = useRef(0); sessionIdxRef.current = sessionIdx; // 给 useCallback([]) 的 loadInstrumentToEngine 读最新查看场景(判 viewingSoundingBlock)
   const [playingIdx, setPlayingIdx] = useState(0); // §20 Song 模式:当前正在出声的块(高亮 + 播放头跟它);Live 模式播放块=sessionIdx,不用它
   const playingIdxRef = useRef(0); playingIdxRef.current = playingIdx; // §26 回放 rAF 闭包读最新播放块
-  const [songZoom, setSongZoom] = useState(34); // §26 Song 比例时间轴:px/bar(缩放;1 bar 默认较宽)
+  const [playingSongIds, setPlayingSongIds] = useState<Set<string>>(() => new Set()); // §37 Song 多轨:当前正在出声的 session id 集
+  const playingSongIdsRef = useRef<Set<string>>(new Set()); playingSongIdsRef.current = playingSongIds;
+  const [songZoom, setSongZoom] = useState(gridPrefs?.songZoom ?? SONG_ZOOM_DEFAULT); // §26/§37 Song 比例时间轴:px/bar。默认=滑块正中(范围 20..60);Alt 滚轮可越界,双击 slider 回正。§15.A 持久化(gridPrefs)
+  const [songGrid, setSongGrid] = useState(gridPrefs?.songGrid ?? 1); // §37 track 网格密度:每几 bar 一条竖线(全高、两边通);0=关。§15.A 持久化(gridPrefs)
+  const [arrangerH, setArrangerH] = useState(208); // §37 arranger(track 区)定高:内部纵向 scroll(默认露 ~3 条收起 track);分隔条拖动改它
+  const [songVScroll, setSongVScroll] = useState(0); // §37 lanes 纵向 scrollTop → gutter 表头同步平移(冻结窗格)
+  const stageRef = useRef<HTMLElement>(null); // §37 量 stage 可用高 → arranger 上限按它的一半(留给乐器区一半,而非整屏一半)
+  const [stageH, setStageH] = useState(0);
   const [autoAxis, setAutoAxis] = useState<'x' | 'y'>('x'); // §26 自动化 lane 当前显示轴(全局切换)
   const [autoProgram, setAutoProgram] = useState<XYProgram>('filter'); // §26.v2 当前编辑哪条效果 lane(每效果一条;顶栏 chip 切)
   const xyManual = useRef<{ down: boolean; program: XYProgram; x: number; y: number }>({ down: false, program: 'filter', x: 0.5, y: 0 }); // §26.4 手动板手势 → coordinator 读(手动板不再直调引擎)
@@ -186,21 +235,48 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [pendingIdx, setPendingIdx] = useState<number | null>(null);
   const [loopSong, setLoopSong] = useState(propLoopSong);
   const [showAutomation, setShowAutomation] = useState(propShowAutomation); // §26 automation UI 显隐(纯 UI 层,Project 列持久化);不影响效果回放
+  // §37 命名 track:Project.songLanes 稀疏覆盖数组(下标=lane;未自定义则回退默认 Main/Sub N)。改名/换色乐观持久化 + 进 undo。
+  const [songTracks, setSongTracks] = useState<SongLane[]>(songLanesProp ?? []);
+  const songTracksRef = useRef<SongLane[]>(songTracks); songTracksRef.current = songTracks;
   const playModeRef = useRef<'live' | 'song'>(propPlayMode); playModeRef.current = playMode;
   const loopSongRef = useRef(loopSong); loopSongRef.current = loopSong;
-  const songSchedId = useRef<number | null>(null); // Song 线性:下一块推进的 scheduleOnce 句柄
+  const songSchedId = useRef<number | null>(null); // Song 多轨:下一处 start/end 边界的 scheduleOnce 句柄
   const songBlockStart = useRef(0); // Song 线性:当前块从第几小节开始(播放态高亮"播到第几遍"用)
+  const songLapBars = useRef(0); // §39 loop:已循环圈数累计的 bar 偏移(走带单调递增不回零 → 播放头/边界换场对齐音频时钟,见 scheduleNextSongBoundary)。song-bar = songPosBars − songLapBars
   const viewFollows = useRef(true); // §20 Song 模式:pad 视图是否跟随播放块推进;点卡查看某场景即脱离(false),停/重播复位(true)
   const starting = useRef(false); // §20 起播重入锁:重置引擎可能异步(loadSession),起播窗口内挡住第二次起播 + 并发换场(switchSession),避免两次 loadSession 交错把多个场景混进引擎
   const liveSwapSchedId = useRef<number | null>(null); // Live 量化换场:已排在边界、还没触发的换场 scheduleOnce 句柄(连点换场要先撤上一个,否则两场同时起声)
   const swapGen = useRef(0); // 换场代号:更晚的一次换场会让先前那次还在 load 的 .then 作废(避免它过后再排边界)
   const [renamingId, setRenamingId] = useState<string | null>(null); // 场景改名内联编辑
   const [titleRenaming, setTitleRenaming] = useState(false); // §26 顶栏标题改名(独立 state,免和块名共用 renamingId 时双输入框)
+  const [renamingLane, setRenamingLane] = useState<number | null>(null); // §37 track gutter 表头改名
   // 场景拖拽换位:实时 preview(用 flex order 视觉重排,DOM/数组不动 → cur/索引逻辑无需改);松手才落库一次。
   const [dragId, setDragId] = useState<string | null>(null);            // 正在拖的场景 id(被拖卡压暗当占位)
   const [previewOrder, setPreviewOrder] = useState<string[] | null>(null); // 拖拽中的预览顺序(场景 id 数组),非拖拽=null
   const dragIdRef = useRef<string | null>(null);
   const previewOrderRef = useRef<string[] | null>(null);
+  // §37 Song 多轨指针拖拽:拖块身=2D 移动(吸 bar+lane,落主轨重排/落 sub 锚定·Alt 复制),拖右缘=改 repeat。
+  const [songDrag, setSongDrag] = useState<{ id: string; vbar: number; vlane: number; clone: boolean; cursorBar: number } | null>(null); // §37 vbar=块投影起点(浮动跟手用);cursorBar=鼠标所在小节(主轨 reorder 插入判据用)
+  const songDragRef = useRef<{ id: string; grabX: number; origStart: number; clone: boolean; moved: boolean; vbar: number; vlane: number; cursorBar: number } | null>(null);
+  const songLanesRef = useRef<HTMLDivElement>(null);
+  const gutterWheelCleanup = useRef<(() => void) | null>(null);
+  // §37 track 表头列上滚轮:gutter 是 overflow:hidden 的独立兄弟(不在 lane-scroll 里),原生滚轮够不到 lanes。
+  //   用 callback ref 在 gutter 真正挂载时绑非被动 wheel(用 useEffect 会在加载骨架阶段 el 还是 null 时跑一次、之后不再重跑)。
+  //   滚轮转发给 lane-scroll(纵滚 track)+ 直接驱动 gutter 平移(冻结窗格跟手,不依赖 scroll 事件回灌)。
+  const songGutterRef = useCallback((el: HTMLDivElement | null) => {
+    gutterWheelCleanup.current?.(); gutterWheelCleanup.current = null;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const sc = el.parentElement?.querySelector<HTMLElement>('.lane-scroll'); if (!sc) return;
+      e.preventDefault();
+      sc.scrollTop += e.deltaY;
+      setSongVScroll(sc.scrollTop);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    gutterWheelCleanup.current = () => el.removeEventListener('wheel', onWheel);
+  }, []);
+  const [songResize, setSongResize] = useState<{ id: string; reps: number } | null>(null);
+  const songResizeRef = useRef<{ id: string; grabX: number; bars: number; origReps: number } | null>(null);
   const [selId, setSelId] = useState<string | null>(null);
   const [selClipId, setSelClipId] = useState<string | null>(null);
   const [libSel, setLibSel] = useState<string | null>(null);
@@ -244,7 +320,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const fxRef = useRef<FxConfig>(fx); fxRef.current = fx;
   // 撤销快照口径(§16):① sessions 整树 ② 各库声音 warp ③ 主 bpm ④ 主总线效果器(§17)⑤ 活动 session(undo 跳回改动现场)⑥ 量化粒度 ⑦ 库存活集(声音/生成组软删可撤)
   // ⚠ 改这个口径(加/减可还原字段)→ 必须同步更新 `histDataKey`(空步判定的数据序列化,除 sessionId 外每个 data 字段都要进),否则空步跳过会漏判/误判。
-  type HistEntry = { sessions: Session[]; warps: Map<string, unknown>; bpm: number; fx: FxConfig; sessionId: string; quantize: Quantize; liveSounds: Set<string>; liveGens: Set<string> };
+  type HistEntry = { sessions: Session[]; warps: Map<string, unknown>; bpm: number; fx: FxConfig; sessionId: string; quantize: Quantize; liveSounds: Set<string>; liveGens: Set<string>; songTracks: SongLane[] };
   const [past, setPast] = useState<HistEntry[]>([]);
   const [future, setFuture] = useState<HistEntry[]>([]);
   // ⚠ undo/redo 的 snapshot()/applyEntry() 必须在 setState updater **外**只跑一次:React StrictMode(dev)会双调 updater,
@@ -316,7 +392,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         // arm 且该乐器属于「正在出声的块」→ 即时量化起声;否则只记意图(setWantOn),到换场边界由 swapVoicesAt 按 wantOn 起。
         // §20:Song 钉住查看非播放块时编辑/填充/加片一件 enabled 乐器,会走 arm=true 这条全量重载 —— 若直接 setEnabled 会把
         //   非出声块的乐器凭空点响(声音泄漏)。startPlayback 的 loadSession 即便落到 setWantOn 也无碍:随后 startTransport 按 wantOn 全量起声。
-        const soundingNow = playModeRef.current !== 'song' || sessionIdxRef.current === playingIdxRef.current;
+        const instSession = sessionsRef.current.find((s) => s.instruments.some((i) => i.id === inst.id));
+        const soundingNow = playModeRef.current !== 'song' || (instSession ? playingSongIdsRef.current.has(instSession.id) : sessionIdxRef.current === playingIdxRef.current);
         // 取 sessionsRef 里**最新**的 enabled,而非这次异步 build 捕获时的旧 inst.enabled:bake 期间用户点了激活 →
         //   捕获值已过期,旧值会把刚点的激活回写覆盖掉(同源的次生 desync)。乐器找不到(已删)则回落捕获值。
         const liveEnabled = sessionsRef.current.flatMap((s) => s.instruments).find((i) => i.id === inst.id)?.enabled ?? inst.enabled;
@@ -398,7 +475,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         let restored = false;
         const saved = await fetch(`/api/studio?projectId=${projectId}`).then((r) => (r.ok ? r.json() : [])).catch(() => []);
         if (Array.isArray(saved) && saved.length) {
-          sessions = (saved as Session[]).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto) })); // §26.v2 归一:老单形状 {program,...} → map;脏→null
+          sessions = normalizeSongLayout((saved as Session[]).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto) }))); // §26.v2 归一 + §37 旧线性 Song → lane0 布局
           restored = true;
         }
         if (!alive) return;
@@ -420,6 +497,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         // 故未恢复时基准留空 → 首次保存自带 sess.add,会话随乐器一起建。
         synced.current = restored ? normalize(sessions) : { sessions: {}, instruments: {}, clips: {} };
         loaded.current = true; // 之后任何 setSessions 才触发自动保存
+        // §37 一次性补色:给历史「未设色」场景钉上不撞色的稳定色(loaded 后 setSessions → autosave 落库;之后非 null 不再补)。颜色从此只随用户改色而变,不再随数组下标洗牌。
+        { const colored = backfillSessionColors(sessions); if (colored !== sessions) setSessions(colored); }
         // 后台预热其余场景的 warp/decode 缓存(只暖数据缓存,不在引擎里建 voice → 不违反 §20 常驻口径)。
         // 首切某场景时 buildBuffer 直接命中缓存 → 边界不被冷渲(网络 warpRender + signalsmith)拖过头 = 换场不延迟。best-effort,失败静默。
         (async () => { for (let i = 1; i < sessions.length && alive; i++) for (const inst of sessions[i].instruments) { if (!alive) return; try { await buildBuffer(inst, c.bpm, c.soundsById); } catch { /* 暖缓存失败不影响播放 */ } } })();
@@ -432,13 +511,23 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   // 走带启停只切 playing(setState 即重渲一次);高频视觉(电平/走带位置/播放头)由自驱动叶子按 playing 起停 rAF。
   const togglePlay = () => {
     const e = eng.current; if (!e) return;
-    if (e.isPlaying()) { cancelSongSchedule(); e.stopTransport(); e.stopAudition(); setPendingIdx(null); setPlaying(false); } // 停走带连带停掉「走带在跑时点起、跟随走带在响」的 clip/chop 预览
+    if (e.isPlaying()) { cancelSongSchedule(); e.stopTransport(); e.stopAudition(); setPendingIdx(null); setPlaying(false); setSongActiveIds(new Set()); } // 停走带连带停掉「走带在跑时点起、跟随走带在响」的 clip/chop 预览
     else startPlayback();
   };
   // §32 导出前停掉一切发声(走带 + 松散预览 + Song 待推进 + 排队态),免离线渲染与实时播放抢 context。
-  const stopAllAudio = () => { cancelSongSchedule(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false); };
+  const stopAllAudio = () => { cancelSongSchedule(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false); setSongActiveIds(new Set()); };
 
   const curSession = sessions[sessionIdx];
+  // §37 automation 单放(Ableton 式):clip 行(原版三层观感:名字条 tint + 数字条 tint·repeat 数字)+ 展开时下挂 automation 子行(原版暗底 strip,独立可编辑、指针手势分离不打架)。收起时数字条叠只读 ghost。
+  const SONG_CLIP_H = 62, SONG_AUTO_H = 46;
+  const songLaneH = showAutomation ? SONG_CLIP_H + SONG_AUTO_H : SONG_CLIP_H; // 108 : 62
+  // §37 arranger 高度上下限(随轨高联动):下限=标尺+1 轨(至少露一整轨);上限=铺满 10 轨 & 给乐器区留 ≥260。
+  const songMinH = 22 + songLaneH;
+  const songAvailH = stageH || ((typeof window !== 'undefined' ? window.innerHeight : 800) - 220); // stage 可用高(未量到时按 viewport−220 兜底)
+  const songMaxH = Math.max(songMinH, Math.min(22 + SONG_TRACK_COUNT * songLaneH, Math.round(songAvailH * 0.5) - 28)); // 上限:不超过 stage 一半(减 song-ctl+splitter 开销)→ 乐器区始终保住一半;再多的轨靠纵滚
+  const arrangerHc = Math.max(songMinH, Math.min(songMaxH, arrangerH)); // 布局用的钳过高(automation 切换/localStorage 恢复都不越界)
+  const songLanes = SONG_TRACK_COUNT; // §37 固定 10 条 track(Main + Sub 1..9),不增删;空轨也常驻,纵向 scroll 看下面的
+  const songTrackW = Math.max(1, songTotalBars(sessions) * songZoom);
   // §16 撤销宪法:快照口径 = sessions 整树 + 各库声音 warp(预调改 Sound.warp,不在 sessions 里)+ 主 bpm(项目级标量,亦在 sessions 外)。
   // sessionId 可显式指定(undo/redo 时让对侧快照携带"改动归属的 session",见 undo/redo);默认 = 当前活动 session。
   const snapshot = (sessionId?: string): HistEntry => {
@@ -450,23 +539,26 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       quantize: quantizeRef.current,
       liveSounds: new Set(sb ? sb.keys() : []),            // 当时存活(未软删)的库声音 id 全集(含 stem)
       liveGens: new Set(gensRef.current.map((g) => g.id)), // 当时存活的生成组 id
+      songTracks: songTracksRef.current,                   // §37 命名 track 快照(改名/换色可撤)
     };
   };
   const pushHistory = () => { const next = [...pastRef.current.slice(-49), snapshot()]; pastRef.current = next; setPast(next); futureRef.current = []; setFuture([]); };
-  const updateSession = (next: Session) => setSessions((ss) => ss.map((s, i) => (i === sessionIdx ? next : s)));
+  const updateSession = (next: Session) => setSessions((ss) => resnapSong(ss.map((s, i) => (i === sessionIdx ? next : s)))); // §37 改乐器可能改 sessionBars(最长乐器)→ 主轨长度变;必须 resnap 让 songStartBar 缓存跟上,否则渲染位置 + 播放边界一起漂(视觉/播放不统一的总根)
   const mutate = (fn: (s: Session) => Session) => { pushHistory(); updateSession(fn(sessionsRef.current[sessionIdx])); };
   const reconcile = useCallback(async (ss: Session[], idx: number) => { await loadSession(ss[idx]); setTick((t) => t + 1); }, [loadSession]);
   // 还原一格:sessions + 只把 warp 变了的库声音改回(+ 反向 patch;其余不碰,免误删之后生成的)+ 校验选中(还在就留→看见 snap back)+ 重灌引擎。
   const applyEntry = (entry: HistEntry) => {
     eng.current?.stopAudition();
     cancelSongSchedule(); setPendingIdx(null); // §20:undo/redo 前撤销 Song 待推进 + 清排队态(口径外瞬态)
+    if (eng.current?.isPlaying()) { eng.current.stopTransport(); playingRef.current = false; setPlaying(false); setSongActiveIds(new Set()); }
     clearSolo(); // §18:solo 瞬态、不在快照口径;undo/redo 重灌引擎前先清掉,避免对不上已被还原/重建的乐器
     xyManual.current.down = false; xyClearRef.current++; eng.current?.xyReleaseAll(); // §21.v2:XY 手势瞬态(对标 solo),undo/redo 释放全部效果 + 复位 coordinator(清 latch/glide),免残留 wet
+    sessionsRef.current = entry.sessions; // setState 下一帧才落;保存 diff/后续操作需要立刻读到还原后的树。
     setSessions(entry.sessions);
     // §16 口径⑤:undo/redo 跳回改动归属的 session(否则改动在别的 session 时 ⌘Z 表现为"毫无反应")。
     const found = entry.sessions.findIndex((s) => s.id === entry.sessionId);
     const idx = found >= 0 ? found : sessionIdx;
-    if (idx !== sessionIdx) { eng.current?.stopTransport(); setPlaying(false); setSessionIdx(idx); }
+    if (idx !== sessionIdx) setSessionIdx(idx);
     const c = ctxRef.current;
     if (c) {
       let changed = false; const sounds = new Map(c.soundsById);
@@ -487,6 +579,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     }
     // §16 口径⑥:量化粒度(项目级标量)不同则还原 —— 引擎 + state + 反向持久化。
     if (entry.quantize !== quantizeRef.current) { setQuantizeState(entry.quantize); eng.current?.setQuantize(entry.quantize); api.projects.update(projectId, { quantize: entry.quantize }).catch(() => {}); }
+    // §37 命名 track:改名/换色可撤 —— state + 反向持久化(同 fx 口径)。
+    if (JSON.stringify(entry.songTracks) !== JSON.stringify(songTracksRef.current)) { setSongTracks(entry.songTracks); api.projects.update(projectId, { songLanes: entry.songTracks }).catch(() => {}); }
     // §16 口径⑦:库软删可撤 —— 把声音/生成组的 trashed 状态对齐到快照。
     //   恢复:快照里存活、现在没了 → un-trash(undo 一次删除)。restore-only 永远安全。
     //   重删:现在存活、快照里没有,且该 id 曾真删过(在 trashable 白名单)→ re-trash(redo 一次删除)。
@@ -507,12 +601,12 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   };
   // §16:把一条快照的「数据口径」(不含活动 sessionId —— 那只决定 undo 跳回哪个 session,不算数据变化)序列化成稳定串,
   //   用于丢弃「空 undo 步」:还原它在数据上等同当前态的条目(纯点旋钮/把值拖回原位留下的无变化条目)。撤销它用户什么也看不到 → 透明跳过。
-  //   只可能因 JSON 键序差异把真·空步「多保留」(退化回原行为,安全);绝不会把真改动误判为空(两状态全部 6 项数据相等才判等)。
+  //   只可能因 JSON 键序差异把真·空步「多保留」(退化回原行为,安全);绝不会把真改动误判为空(两状态全部 8 项数据口径——sessions/bpm/fx/quantize/warps/liveSounds/liveGens/songTracks——相等才判等)。
   const histDataKey = (h: HistEntry): string => {
     const warps: string[] = [];
     for (const k of [...h.warps.keys()].sort()) warps.push(k + '=' + JSON.stringify(h.warps.get(k) ?? null));
     return JSON.stringify(h.sessions) + '' + h.bpm + '' + JSON.stringify(h.fx) + '' + h.quantize +
-      '' + warps.join(',') + '' + [...h.liveSounds].sort().join(',') + '' + [...h.liveGens].sort().join(',');
+      '' + warps.join(',') + '' + [...h.liveSounds].sort().join(',') + '' + [...h.liveGens].sort().join(',') + "" + JSON.stringify(h.songTracks);
   };
   // 对侧快照携带"改动归属 session"(prev/nx.sessionId)而非当前活动 session → redo/undo 都能跳回改动现场(否则切过 session 后 redo 会跳错)。
   const undo = () => { // §20 起播异步窗口内忽略 ⌘Z:applyEntry→loadSession 会与起播重灌交错混场
@@ -542,6 +636,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (confirmState) return; // 弹窗开着时,快捷键交给弹窗(Enter/Esc)
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return; // 含 <select>(量化下拉):聚焦时 Del/空格交给控件,别误删乐器/误触走带
+      if (e.key === 'Tab') { e.preventDefault(); return; } // 关掉键盘焦点遍历:Tab 不再在按钮/卡片间游走起 focus 环。点击仍会聚焦,§26 卡片热键(点卡=聚焦)不受影响;输入框内的 Tab 已由上面 editable 早返回放行
       if (e.code === 'Space' || e.key === ' ') { // 空格 = 走带启停;挡掉列表/页面滚动 + 按钮的空格触发
         e.preventDefault();
         if (e.repeat) return;
@@ -593,6 +688,16 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     document.addEventListener('paste', onPaste);
     return () => document.removeEventListener('paste', onPaste);
   });
+  // 全局禁用浏览器原生右键菜单 —— 自家菜单(如 WarpEditor)是 React 浮层、在自己的 onContextMenu 里已 preventDefault 并 setMenu,不依赖原生菜单,故不受影响。
+  // 想保留原生右键的局部区域(目前无),给元素或其祖先挂 data-app-menu 即可放行。冒泡阶段监听:不抢在组件自身 onContextMenu 之前。
+  useEffect(() => {
+    const onCtx = (e: MouseEvent) => {
+      if ((e.target as HTMLElement | null)?.closest('[data-app-menu]')) return;
+      e.preventDefault();
+    };
+    document.addEventListener('contextmenu', onCtx);
+    return () => document.removeEventListener('contextmenu', onCtx);
+  }, []);
   useEffect(() => { const clear = () => { setDragSoundId(null); setDragInstSlot(null); }; window.addEventListener('dragend', clear); return () => window.removeEventListener('dragend', clear); }, []); // 拖拽结束(落下/取消)→ 清掉"正在拖的素材/乐器"
 
   // §20 Song 线性:撤销待推进的 scheduleOnce(切歌/停播/undo 前)。
@@ -625,119 +730,152 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     });
   };
 
-  // §20 Song 线性:进入 id=blockId 的块(其声音已在响),预载下一块(lookahead)并排好"块末推进"。
-  // ⚠ 用 session **id** 而非下标定位:Song 播放途中若拖动重排 / 删除别的场景卡,下标会漂移 → 旧实现会在边界 swap 到错的场景
-  //   (停错、起错 → 残留场叠加 / 听到的不是该响的)。按 id 在边界**实时重算**"当前块 / 下一块",对结构变动免疫。
-  const enterSongBlock = (blockId: string, startBar: number) => {
+  const setSongActiveIds = (ids: Set<string>) => { playingSongIdsRef.current = ids; setPlayingSongIds(new Set(ids)); };
+  const primeSongAutomation = async (active: Session[], atBar: number) => {
     const e = eng.current; if (!e) return;
-    songBlockStart.current = startBar; // 播放态:本块起始小节(高亮当前第几遍)
-    cancelSongSchedule();
+    // §37 owner = 前景块(主轨优先,否则最晚开始)——与稳态 coordinator(读 playingIdx=applySongActiveSet 的 foreground)同一口径,免起播瞬间 prime 一块、稳态又换块。
+    const owner = songForeground(active);
+    const localBar = owner ? Math.max(0, atBar - sessionSongStartBar(owner)) : 0;
+    for (const program of PROG_ORDER) {
+      const a = owner?.xyAuto?.[program];
+      if (a && a.x.length && a.y.length) { const v = sampleXY(program, a, localBar); e.xySetValue(program, v.x, v.y); e.xySetActive(program, true); }
+      else e.xySetActive(program, false);
+    }
+    if (owner?.xyAuto) await new Promise((r) => setTimeout(r, 30));
+  };
+  const applySongActiveSet = (bar: number, time?: number) => {
+    const e = eng.current; if (!e) return;
     const list = sessionsRef.current;
-    const blockI = list.findIndex((x) => x.id === blockId);
-    const s = blockI >= 0 ? list[blockI] : undefined; if (!s) return;
-    const nextI = blockI + 1 < list.length ? blockI + 1 : (loopSongRef.current ? 0 : -1);
-    if (nextI >= 0 && list[nextI] && list[nextI].id !== blockId) loadSessionAdditive(list[nextI], false).catch(() => {}); // 提前热下一块 buffer,边界不卡
-    const len = sessionRepeats(s) * sessionBars(s);
-    const endBar = Math.max(startBar + len, e.currentBar() + 1); // §26 防御:重排时若新块尾已落在走带之前(播放中把 repeat 调小到播放头之后),钳到下一小节边界,否则 scheduleOnce 排在过去永不触发 = 块卡住不推进
-    songSchedId.current = e.scheduleAt(`${endBar}:0:0`, (time) => {
-      const cur = sessionsRef.current;
-      const fi = cur.findIndex((x) => x.id === blockId); // 当前块此刻真实下标(重排/删除后仍准;当前块被删 → -1 即停)
-      const from = fi >= 0 ? cur[fi] : undefined;
-      const ni = fi >= 0 ? (fi + 1 < cur.length ? fi + 1 : (loopSongRef.current ? 0 : -1)) : -1; // 下一块按当前 list 实时算
-      const tgt = ni >= 0 ? cur[ni] : undefined;
-      if (ni < 0 || !from || !tgt) { e.stopTransport(); setPlaying(false); setPendingIdx(null); songSchedId.current = null; setTick((t) => t + 1); return; } // 末块(不循环)/ 当前块被删 → 停
-      const fromIds = from.instruments.map((i) => i.id);
-      const tgtIds = tgt.instruments.map((i) => i.id);
-      // §18/§20:换到不同块前清掉 solo —— solo 是按"当前出声块"的瞬态隔离,soloIds 装的是旧块乐器 id,带进新块会让新块整块被遮罩静音
-      //   (新块没有任何乐器在 soloIds 里 → isAudible 全 false)。同 Live armSwap 的口径。单场循环 from===tgt 不清,solo 跨循环保留。
-      if (from.id !== tgt.id) clearSolo();
-      e.swapAndRelease(fromIds, tgtIds, time); // 过了边界再释放旧块,免切早尾音(单场循环时 from===tgt → 无缝重起)
-      e.retainOnly([...fromIds, ...tgtIds]); // §20 内存:只留旧块(待 80ms 优雅释放)+ 新块,收掉任何残渣;下一块 lookahead 随后由 enterSongBlock 重新预载
-      playingIdxRef.current = ni; setPlayingIdx(ni); setPendingIdx(null); // 播放块推进(高亮/播放头跟它);ref 同步置好,免回放 rAF 与 songBlockStart 错一帧
-      if (viewFollows.current) { setSessionIdx(ni); setSelId(null); setSelClipId(null); setLibSel(null); } // 视图未被点开钉住 → 跟随;已钉住则 pad 区停在用户查看的场景
-      setTick((t) => t + 1);
-      enterSongBlock(tgt.id, endBar);
+    const active = songActiveAt(list, bar);
+    const prev = playingSongIdsRef.current;
+    const next = new Set(active.map((s) => s.id));
+    const stopSessions = list.filter((s) => prev.has(s.id) && !next.has(s.id));
+    const startSessions = active.filter((s) => !prev.has(s.id));
+    const stopIds = sessionInstIds(stopSessions);     // 停:全部(把禁用的也停干净)
+    const startIds = enabledInstIds(startSessions);   // §37 起:只起激活乐器(禁用的不随块进 active 被点响)
+    for (const id of stopIds) e.setWantOn(id, false);
+    for (const id of startIds) e.setWantOn(id, true);
+    if (time != null) e.swapAndRelease(stopIds, startIds, time);
+    setSongActiveIds(next);
+    const foreground = songForeground(active); // §37 与 primeSongAutomation 同口径(主轨优先);驱动 playingIdx / songBlockStart / 视图跟随 / XY automation 源
+    if (foreground) {
+      const idx = list.findIndex((s) => s.id === foreground.id);
+      if (idx >= 0) { playingIdxRef.current = idx; setPlayingIdx(idx); }
+      songBlockStart.current = sessionSongStartBar(foreground);
+      if (viewFollows.current && idx >= 0) { setSessionIdx(idx); setSelId(null); setSelClipId(null); setLibSel(null); }
+    }
+    setTick((t) => t + 1);
+  };
+  const scheduleNextSongBoundary = (fromBar: number) => {
+    const e = eng.current; if (!e) return;
+    if (songSchedId.current != null) { e.clearSched(songSchedId.current); songSchedId.current = null; }
+    const total = songTotalBars(sessionsRef.current);
+    const next = songNextBoundaryAfter(sessionsRef.current, fromBar);
+    const boundary = next ?? (total > 0 ? total : null);
+    if (boundary == null) return;
+    // boundary == total(曲尾,total=最远 session 末)即整曲结束:loop 关→停、loop 开→回 0 重激活。
+    //   旧逻辑用 `next==null` 判尾——但最后那个 session 末本身就是个 next(=total),永远走不到 null 分支 → loop 关时不停、空转过尾。
+    const reachesEnd = boundary >= total - 1e-6;
+    // 排到**绝对**走带位置(含已循环的圈偏移)。走带全程单调递增、永不回零 →
+    //   边界回调虽在 lookahead 提前触发,但音频换场仍排在精确 time,而播放头(songPosBars % total)由走带时钟取模派生、
+    //   恰在时钟跨界(=音频 time)那刻翻折,不再随提前触发的 JS 早跳(旧 setTransportPosition('0:0:0') 会把播放头提前约一个 lookahead 拽回头)。
+    songSchedId.current = e.scheduleAt(`${songLapBars.current + boundary}:0:0`, (time) => {
+      if (!eng.current) return;
+      if (reachesEnd) {
+        if (!loopSongRef.current) { eng.current.stopTransport(); playingRef.current = false; setPlaying(false); setSongActiveIds(new Set()); songSchedId.current = null; setTick((t) => t + 1); return; } // 曲尾停(playingRef 即时复位,免 coordinator 多跑一帧读已停走带)
+        songLapBars.current += total; // loop:进下一圈,只挪偏移、不动走带 → 续排的绝对边界落在新圈、无缝重激活
+        for (const inst of sessionsRef.current.flatMap((s) => s.instruments)) eng.current.setWantOn(inst.id, false);
+        applySongActiveSet(0, time);
+        scheduleNextSongBoundary(0);
+        return;
+      }
+      applySongActiveSet(boundary, time);
+      scheduleNextSongBoundary(boundary);
     });
   };
 
-  // §20 起播(Live / Song 共用)—— 关键:起播前必须把引擎收敛到「仅当前选中场景」,否则 startTransport 会把残留的
-  //   别的场景 armed voice 一起点响(多场景叠加 / 听到的不是当前选中场景)。残留来源:Song 每块预载下一块、Live 连切被作废
-  //   的中间目标场;stopTransport 只停 player、不清 voice/不动 wantOn,故残留一直在。
-  //   两种收敛方式:① 当前场已在引擎(Live 常态)→ retainOnly 瞬时剔残留(保 solo、不重建);
-  //               ② 当前场不在引擎(Song 必走;或 Live 从 Song 钉住视图切回 —— 钉住时只 ensurePeaksForView 没建 voice)
-  //                  → loadSession 重灌(clearAll + 只装当前场,buffer 命中缓存故快),否则 retainOnly 会把引擎清空 = 静音。
-  //   起播期间是异步窗口(loadSession),用 starting 锁挡住重入起播 + 并发 switchSession(见 switchSession),避免两次 loadSession 交错混场。
+  // §39 无极起播:从任意全局 bar P(可小数)起播 Song —— ▶(P=0,从头)与点标尺跳播(P=点击位置)统一走这条。
+  //   相位模型:每个 active voice 按「它在 P 处所处的相位」offset 起声(offset = ((P−session起点) mod 乐器bars)×每bar秒数)。
+  //     · 主轨块在自己的 repeat 头 → offset 0;跨主轨边界的 sub 块 → 续在它真实的中段;sub-bar 点哪从哪起。
+  //     · buffer 是均匀时间(warp 已烤进、长=乐器bars×每bar秒数),故 相位→offset 线性成立(见 §39 设计)。
+  //   voice 复用:retainOnly(全 session 乐器)保住已载 voice + 只 load 缺的,不再每次 clearAll 重建 → 重复跳播/scrub 廉价;
+  //     全量(不只 active)预载是为了 boundary 换场时下一块的 voice 现成可起,无加载缝隙。
+  //   起播期间是异步窗口(load 缺的 voice),用 starting 锁挡住重入起播 + 并发 switchSession,避免交错混场。
+  const songPlayFrom = async (P: number) => {
+    const e = eng.current; if (!e || starting.current || playModeRef.current !== 'song') return;
+    if (e.auditioningId() != null) { e.stopAudition(); setTick((t) => t + 1); } // 先停松散预览
+    const list = sessionsRef.current; if (!list.length) return;
+    const total = songTotalBars(list);
+    const pos = Math.max(0, Math.min(P, Math.max(0, total - 1e-4))); // clamp 进曲长;不 floor(无极)
+    const active = songActiveAt(list, pos);
+    starting.current = true;
+    try {
+      await e.resume().catch(() => {});
+      cancelSongSchedule();
+      if (e.isPlaying()) { e.stopTransport(); setPendingIdx(null); }
+      clearSolo(); // song 不吃 solo(与旧 ▶ song 一致;retainOnly 不清 engine solo,故显式清)
+      // voice 复用 + 预载:保仍在的、丢已删的、补缺的(缺的命中 buffer 缓存,loadInstrument 廉价)
+      const allInstIds = list.flatMap((s) => s.instruments.map((i) => i.id));
+      e.retainOnly(allInstIds);
+      // ⚡ 长歌起播延迟:**只 await 起播位 active 块**的缺失 voice → 立即起声;其余块后台并行补
+      //   (boundary 换场前几乎必然渲完;命中 buffer 缓存=毫秒级)。swapVoicesAt 对尚未就绪的 voice 自然跳过,
+      //   极端慢载下该块那一遍静音、下一遍补上,不卡首播。
+      const activeIdSet = new Set(active.flatMap((s) => s.instruments).map((i) => i.id));
+      const missing = list.flatMap((s) => s.instruments).filter((i) => !e.hasVoice(i.id));
+      await Promise.all(missing.filter((i) => activeIdSet.has(i.id)).map((inst) =>
+        loadInstrumentToEngine(inst, false, false).catch((err) => console.warn('Song load skip:', inst.id, err))));
+      if (eng.current !== e) return;
+      const rest = missing.filter((i) => !activeIdSet.has(i.id));
+      if (rest.length) void Promise.all(rest.map((inst) => loadInstrumentToEngine(inst, false, false).catch((err) => console.warn('Song bg-load skip:', inst.id, err)))); // 后台补:不阻塞起播
+      // wantOn:全关 → 只起 active 块的激活乐器(§37 禁用乐器不随块进活跃)
+      for (const inst of list.flatMap((s) => s.instruments)) e.setWantOn(inst.id, false);
+      for (const inst of active.flatMap((s) => activeInstruments(s))) e.setWantOn(inst.id, true);
+      // per-voice 相位 offset(秒)
+      const mb = (beatsPerBar * 60) / (ctxRef.current?.bpm ?? masterBpm); // 每 bar 秒数(master 速率)
+      const offsets = new Map<string, number>();
+      for (const s of active) {
+        const sStart = sessionSongStartBar(s);
+        for (const inst of activeInstruments(s)) {
+          const ib = Math.max(1, instrumentBars(inst));
+          const phaseBars = (((pos - sStart) % ib) + ib) % ib; // 取模乐器bars:短乐器在 session 内循环多次
+          offsets.set(inst.id, phaseBars * mb);
+        }
+      }
+      // 前景块 / 视图跟随 / automation 起点(前景块驱动 XY,与稳态 coordinator 同口径)
+      const fg = songForeground(active);
+      viewFollows.current = true; playingRef.current = true; songLapBars.current = 0; songBlockStart.current = fg ? sessionSongStartBar(fg) : 0; // §39 起播=第 0 圈;走带置 pos(下方)即落在本圈
+      setSongActiveIds(new Set(active.map((s) => s.id)));
+      if (fg) { const bi = list.findIndex((s) => s.id === fg.id); if (bi >= 0) { setSessionIdx(bi); setPlayingIdx(bi); playingIdxRef.current = bi; setSelId(null); setSelClipId(null); setLibSel(null); } }
+      await primeSongAutomation(active, pos); if (eng.current !== e) return;
+      // 走带置 pos(小数 bar → Bars:Beats[可小数]:0)+ 各 voice 按相位 offset 起声
+      const bb = Math.floor(pos);
+      e.setTransportPosition(`${bb}:${(pos - bb) * beatsPerBar}:0`);
+      e.startTransport(offsets); setPlaying(true);
+      scheduleNextSongBoundary(pos);
+    } finally { starting.current = false; }
+  };
+
+  // §20 起播(Live):收敛到「仅当前选中场景」再起,否则 startTransport 把别场残留 armed voice 一起点响。
+  //   ① 当前场已在引擎(常态)→ retainOnly 瞬时剔残留(保 solo、不重建);② 不在(从 Song 钉住视图切回)→ loadSession 重灌。
+  //   Song 模式统一委派 songPlayFrom(0)(从头无极起播)。starting 锁挡重入 + 并发 switchSession。
   const startPlayback = async () => {
+    if (playModeRef.current === 'song') { void songPlayFrom(0); return; } // §39 Song:从头无极起播
     const e = eng.current; if (!e || starting.current) return;
-    if (e.auditioningId() != null) { e.stopAudition(); setTick((t) => t + 1); } // 点走带起播前先同步停掉松散的 clip/chop 预览(startTransport 也会停,但那在 resume/load/settle 之后,这里提前关掉重叠窗口)
-    const song = playModeRef.current === 'song';
-    const startIdx = song ? 0 : sessionIdx; // §26 Song:Play 永远从头(第一个 block);Live:选中场景。从具体位置起播走 startPlayFromBar(点标尺)
-    const s = sessionsRef.current[startIdx]; if (!s) return;
+    if (e.auditioningId() != null) { e.stopAudition(); setTick((t) => t + 1); } // 提前关掉松散预览窗口
+    const s = sessionsRef.current[sessionIdx]; if (!s) return;
     const ids = s.instruments.map((i) => i.id);
     starting.current = true;
     try {
       await e.resume().catch(() => {});
       cancelSongSchedule();
-      const loaded = ids.some((id) => e.hasVoice(id)); // 当前场至少有一个 voice 在引擎 = 已加载(空场 ids=[] → false,走重灌兜底,clearAll 后无声可放)
-      if (song || !loaded) {
-        await loadSession(s); // 重灌:引擎里只剩当前场
-        if (eng.current !== e) return; // 期间被卸载/重建 → 放弃
-        reapplySoloFor(ids); // §18 loadSession 的 clearAll 抹了引擎 soloIds → 把本场仍存活的 solo 推回(跨停/起走带常驻);跨块残留过滤掉
+      const loaded = ids.some((id) => e.hasVoice(id)); // 当前场已加载?(空场 ids=[] → false,走重灌兜底)
+      if (!loaded) {
+        await loadSession(s); if (eng.current !== e) return; // 重灌:引擎里只剩当前场
+        reapplySoloFor(ids); // §18 clearAll 抹了 engine solo → 把本场仍存活的 solo 推回
       } else {
-        e.retainOnly(ids); // Live 常态:当前场已在引擎 → 瞬时剔掉别场残留(保留 solo)
+        e.retainOnly(ids); // 常态:瞬时剔别场残留(保 solo)
       }
-      if (song) {
-        if (sessionIdx !== startIdx) { setSessionIdx(startIdx); setSelId(null); setSelClipId(null); setLibSel(null); } // 上次跟随播放停在别块 → 从头播要把 pad 视图也带回 block 0
-        e.setTransportPosition('0:0:0'); // Song 起播归零给干净播放头
-        // #2 起播前先把 block-0 各 automation 效果在 bar0 设值 + 激活(refs 同步就位让 coordinator 接上不撤),否则 coordinator 落后 ~1 帧 + 激活斜坡 = 头一拍漏覆盖
-        viewFollows.current = true; playingIdxRef.current = startIdx; playingRef.current = true; songBlockStart.current = 0;
-        if (s.xyAuto) {
-          for (const program of PROG_ORDER) { const a = s.xyAuto[program]; if (a && a.x.length && a.y.length) { const v = sampleXY(program, a, 0); e.xySetValue(program, v.x, v.y); e.xySetActive(program, true); } } // §26.v3 map presence=激活(非平);平滑斜坡(非 immediate),在静音里设值+激活
-          await new Promise((r) => setTimeout(r, 30)); if (eng.current !== e) return; // settle:等 prime 斜坡在静音里走完,startTransport 后音频第一拍就盖好(不漏不 click)
-        }
-      } // Live:不调 setTransportPosition(stopTransport 已把走带停回 0)
       e.startTransport(); setPlaying(true);
-      if (song) { setPlayingIdx(startIdx); enterSongBlock(s.id, 0); } // Song 从头(block 0)起播 + 排块末推进(viewFollows/playingIdxRef 上面已置)
-    } finally { starting.current = false; }
-  };
-
-  // §26.9 点标尺跳播:从全局 bar B 所在块的「该 bar 所在 repeat」起播。停 + 干净重起(可预测;复用 startPlayback 同款收敛/prime)。
-  //   末推进仍排在块**真正**末尾(blockStart+reps×bars)→ 从第 rep 遍起、播完剩余遍再进下一块;播放头 rel=pos−songBlockStart=rep×bars 正好落第 rep 遍。
-  const startPlayFromBar = async (B: number) => {
-    const e = eng.current; if (!e || starting.current || playModeRef.current !== 'song') return;
-    const list = sessionsRef.current; if (!list.length) return;
-    // cumBars 定位:落在哪个块、块起始小节(=该块前累计)、块的 bars/reps。每轮先记「本块起点=acc」再判,没 break(B≥total)即停在末块且 blockStart 正确。
-    let acc = 0, bi = 0, blockStart = 0, barsB = 1, repsB = 1;
-    for (let i = 0; i < list.length; i++) {
-      const bars = sessionBars(list[i]), reps = sessionRepeats(list[i]), len = bars * reps;
-      bi = i; blockStart = acc; barsB = bars; repsB = reps;
-      if (B < acc + len) break;
-      acc += len;
-    }
-    const s = list[bi]; if (!s) return;
-    const rep = Math.max(0, Math.min(repsB - 1, Math.floor(Math.max(0, B - blockStart) / barsB)));
-    const repStart = blockStart + rep * barsB; // 全局走带起点(该遍起始)
-    const localBar = rep * barsB;              // 块内偏移(automation prime 用)
-    starting.current = true;
-    try {
-      await e.resume().catch(() => {});
-      // 走带中点同一块的另一遍:该块 voice 已在引擎、已 warp、正出声 —— 无需 clearAll+逐件重建 buffer(那一整套同步拆/建音频图就是卡顿源)。
-      const sameBlock = e.isPlaying() && playingIdxRef.current === bi;
-      if (e.isPlaying()) { cancelSongSchedule(); e.stopTransport(); setPendingIdx(null); }
-      cancelSongSchedule();
-      // 同块:只剔掉 lookahead 预载的下一块 voice(否则 startTransport 会把它们一并点响),其余瞬时复用(同 §20 retainOnly 套路)。跨块/冷起仍重灌,引擎里只剩目标块。
-      if (sameBlock) e.retainOnly(s.instruments.map((i) => i.id));
-      else { await loadSession(s); if (eng.current !== e) return; }
-      reapplySoloFor(s.instruments.map((i) => i.id)); // §18 跳播同样跨停/起常驻 solo:同块 retainOnly 已留 soloIds(原样推回),跨块重灌则按本场过滤掉残留
-      setSessionIdx(bi); setSelId(null); setSelClipId(null); setLibSel(null);
-      viewFollows.current = true; playingIdxRef.current = bi; playingRef.current = true; songBlockStart.current = blockStart;
-      if (s.xyAuto) { // prime 在 localBar(不是 0):从第 rep 遍起,automation 相位对齐
-        for (const program of PROG_ORDER) { const a = s.xyAuto[program]; if (a && a.x.length && a.y.length) { const v = sampleXY(program, a, localBar); e.xySetValue(program, v.x, v.y); e.xySetActive(program, true); } }
-        await new Promise((r) => setTimeout(r, 30)); if (eng.current !== e) return;
-      }
-      e.setTransportPosition(`${repStart}:0:0`); // voice 由 startTransport 在当下相位 0 fire,与走带起点无关 → 干净
-      e.startTransport(); setPlaying(true);
-      setPlayingIdx(bi); enterSongBlock(s.id, blockStart); // 末推进排块真正末尾(blockStart+reps×bars)
     } finally { starting.current = false; }
   };
 
@@ -747,7 +885,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     if (idx === sessionIdx && pendingIdx === null) return;
     const e = eng.current;
     if (!e || !e.isPlaying()) {
-      cancelSongSchedule(); clearSolo(); e?.stopAudition(); setPendingIdx(null); setPlaying(false);
+      cancelSongSchedule(); clearSolo(); e?.stopAudition(); setPendingIdx(null); setPlaying(false); setSongActiveIds(new Set());
       setSessionIdx(idx); setPlayingIdx(idx); setSelId(null); setSelClipId(null); setLibSel(null);
       loadSession(sessionsRef.current[idx]).then(() => setTick((t) => t + 1));
       return;
@@ -764,7 +902,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const changePlayMode = (m: 'live' | 'song') => {
     if (starting.current) return; // 起播异步窗口(含 §26 prime 的 30ms settle)内忽略切模式,否则 isPlaying() 还 false → 不停走带,留下不一致的块推进调度
     if (m === playModeRef.current) return;
-    if (eng.current?.isPlaying()) { cancelSongSchedule(); eng.current.stopTransport(); setPendingIdx(null); setPlaying(false); }
+    if (eng.current?.isPlaying()) { cancelSongSchedule(); eng.current.stopTransport(); setPendingIdx(null); setPlaying(false); setSongActiveIds(new Set()); }
     setPlayMode(m);
     api.projects.update(projectId, { playMode: m }).catch(() => {}); // §26 记住上次模式(乐观持久化,不进 undo)
   };
@@ -776,11 +914,19 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
 
   // §20 场景 CRUD —— 改 sessions 数组(口径①,免费可撤);改后按 id 保持活动场景不漂移。
   const mutateSessionsKeepActive = (next: Session[]) => {
+    const snapped = resnapSong(next); // §37 唯一重算入口:主轨吸附 startBar 派生 / sub 锚定跟随 / 孤儿保留;放在 setSessions 前,下游(播放头/调度/持久化)读派生好的绝对位置
     const curId = sessionsRef.current[sessionIdx]?.id;
     const playId = playingRef.current ? sessionsRef.current[playingIdxRef.current]?.id : undefined; // §26 播放块也按 id 锚:播放中增删/重排别的块会移动它的下标,不重锚则播放头(cum[playingIdx])与高亮漂到错块 = 进度条跑偏
-    pushHistory(); setSessions(next);
-    if (curId) { const ni = next.findIndex((s) => s.id === curId); if (ni >= 0 && ni !== sessionIdx) setSessionIdx(ni); }
-    if (playId) { const pi = next.findIndex((s) => s.id === playId); if (pi >= 0 && pi !== playingIdxRef.current) { playingIdxRef.current = pi; setPlayingIdx(pi); } }
+    pushHistory(); setSessions(snapped);
+    if (curId) { const ni = snapped.findIndex((s) => s.id === curId); if (ni >= 0 && ni !== sessionIdx) setSessionIdx(ni); }
+    if (playId) { const pi = snapped.findIndex((s) => s.id === playId); if (pi >= 0 && pi !== playingIdxRef.current) { playingIdxRef.current = pi; setPlayingIdx(pi); } }
+    if (playingRef.current && playModeRef.current === 'song') {
+      sessionsRef.current = snapped;
+      const bar = eng.current?.currentBar() ?? 0;
+      const active = songActiveAt(snapped, bar);
+      setSongActiveIds(new Set(active.map((s) => s.id)));
+      scheduleNextSongBoundary(bar);
+    }
   };
   const moveSessionTo = (from: number, to: number) => { if (from === to) return; mutateSessionsKeepActive(moveSession(sessionsRef.current, from, to)); };
   // 拖拽换位的实时 preview:拖起 → 记 id + 初始顺序;拖过别的卡 → 把被拖 id 插到那张卡的槽位(整排实时滑动让位,像已经挪过去);松手 → 落库一次。
@@ -808,15 +954,126 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     if (oldR === next) return; // 没变:不压空 undo、不重排调度
     const patch: Partial<Pick<Session, 'repeats' | 'xyAuto'>> = { repeats: next };
     if (s?.xyAuto) { const r = next / oldR, set: XYAutoSet = {}; for (const p of PROG_ORDER) { const a = s.xyAuto[p]; if (a) set[p] = rescaleAuto(a, r); } patch.xyAuto = set; } // #2 改 repeat → 每条 automation 按比例缩放点重分布
-    const updated = patchSession(sessionsRef.current, id, patch);
-    mutateSessionsKeepActive(updated);
-    // §26 播放中改正在出声块的 repeat:块末推进是 enterSongBlock 起播时按旧 reps 排死的(endBar=startBar+reps×bars)。不重排则块被画宽/窄了,播放头仍按旧长度提前/滞后跳块 = 进度条跑偏。
-    if (playingRef.current && playModeRef.current === 'song' && sessionsRef.current[playingIdxRef.current]?.id === id) {
-      sessionsRef.current = updated; // ref 渲染滞后一帧;先就位让 enterSongBlock 立即读到新 reps
-      enterSongBlock(id, songBlockStart.current); // 用新 reps 重算 endBar 重排(songBlockStart 不变,块头不动)
-    }
+    mutateSessionsKeepActive(patchSession(sessionsRef.current, id, patch)); // #4 调度/ref 已在 mutateSessionsKeepActive 内按 resnap 后的派生位置重排;此前这里又用未 resnap 的 updated 覆盖 ref + 重排 = 这一拍调度跑在陈旧位置上
   };
   const setSessionColor = (id: string, color: string) => { if (sessionsRef.current.find((x) => x.id === id)?.color === color) return; mutateSessionsKeepActive(patchSession(sessionsRef.current, id, { color })); }; // 选同色不压空 undo 步
+  // §37 指针拖拽:lane 命中(钉 lanes 容器顶,clamp 现有 lane 数)
+  const songLaneAt = (clientY: number): number => {
+    const el = songLanesRef.current; if (!el) return 0;
+    return Math.max(0, Math.min(songLanes - 1, Math.floor((clientY - el.getBoundingClientRect().top) / songLaneH)));
+  };
+  // §37 指针 X → 绝对小节(鼠标真实位置;lanes 容器是滚动内容,其 rect.left 自带滚动偏移 → 不用加 scrollLeft)。主轨 reorder 用它当插入判据。
+  const songBarAt = (clientX: number): number => {
+    const el = songLanesRef.current; if (!el) return 0;
+    return Math.max(0, (clientX - el.getBoundingClientRect().left) / songZoom);
+  };
+  const cloneSessionDeep = (src: Session): Session => ({ ...src, id: nid('sess'), index: sessionsRef.current.length, songAnchorId: null, songOffsetBar: 0, color: pickSessionColor(sessionsRef.current), instruments: src.instruments.map((i) => cloneInstrument(i, nid)) }); // §37 复制=新场景,取不撞色(不继承源色)
+  const commitSongDrag = (id: string, vbar: number, vlane: number, clone: boolean, cursorBar: number) => {
+    const list = sessionsRef.current;
+    const src = list.find((s) => s.id === id); if (!src) return;
+    if (playingRef.current && playModeRef.current === 'song') { cancelSongSchedule(); eng.current?.stopTransport(); setPlaying(false); setSongActiveIds(new Set()); }
+    let next = list, workId = id;
+    if (clone) { const cl = cloneSessionDeep(src); next = [...list, cl]; workId = cl.id; } // Alt=复制成独立 session(全新 id/乐器)
+    if (vlane === 0) { // → 主轨:转主块(清锚)+ 按【鼠标所在小节】插入吸附序列(reorder 看指针,不看块左缘)
+      next = patchSession(next, workId, { songLane: 0, songAnchorId: null, songOffsetBar: 0 });
+      next = moveMainTo(next, workId, mainInsertIndex(next, cursorBar, workId));
+    } else { // → sub:落点重锚(落主轨外=孤儿),reps 清 1(sub 不能 repeat)
+      // §37 子轨禁止移动叠放:落点 [sb, sb+bars) 与同 lane 其他块相交 → 放置失败、弹回原位(叠放会一起出声,见 songActiveAt)。
+      // #2 判定坐标必须 = 真实落点:别手算夹后位(主→sub 时块锚到自己→锚失效→落成孤儿 @裸 vbar、不夹,手算会偏)。
+      //   subDropLanding = commit/单测共用纯函数:套同款 resnap 管线(被拖块排除出 #1 让位)算真实落点 + 叠放。
+      if (subDropLanding(next, workId, vbar, vlane).overlap) {
+        setStatus('放置失败:子轨 session 不能与同轨其他块重叠'); return; // 不提交 → 块弹回(songDrag 已在 up 清空,渲染回到已提交位置)
+      }
+      next = patchSession(next, workId, anchorPatchAt(next, vbar, vlane));
+    }
+    mutateSessionsKeepActive(next);
+  };
+  const songBlockDown = (e: React.PointerEvent, s: Session, idx: number) => {
+    if (renamingId === s.id || e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('.sblk-rs')) return; // 右缘 resize 自理
+    switchSession(idx); // 点即选
+    songDragRef.current = { id: s.id, grabX: e.clientX, origStart: sessionSongStartBar(s), clone: e.altKey && isMainLane(s), moved: false, vbar: sessionSongStartBar(s), vlane: sessionSongLane(s), cursorBar: songBarAt(e.clientX) };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setSongDrag({ id: s.id, vbar: songDragRef.current.vbar, vlane: songDragRef.current.vlane, clone: songDragRef.current.clone, cursorBar: songDragRef.current.cursorBar });
+  };
+  const songBlockMove = (e: React.PointerEvent) => {
+    const d = songDragRef.current; if (!d) return;
+    const vbar = Math.max(0, d.origStart + Math.round((e.clientX - d.grabX) / songZoom));
+    const vlane = songLaneAt(e.clientY);
+    const cursorBar = songBarAt(e.clientX); // 鼠标真实小节(主轨 reorder 判据;vbar 仅供浮块跟手)
+    if (!d.moved && Math.abs(e.clientX - d.grabX) < 4 && vlane === d.vlane) return; // 阈值内不算拖(留给 click 选/改名)
+    d.moved = true; d.vbar = vbar; d.vlane = vlane; d.cursorBar = cursorBar;
+    setSongDrag({ id: d.id, vbar, vlane, clone: d.clone, cursorBar });
+  };
+  const songBlockUp = () => {
+    const d = songDragRef.current; songDragRef.current = null; setSongDrag(null);
+    if (d && d.moved) commitSongDrag(d.id, d.vbar, d.vlane, d.clone, d.cursorBar);
+  };
+  // §37 右缘拖拽改 repeat(仅主轨;拖时 transient 预览,松手一次落库=一条 undo)
+  const songResizeDown = (e: React.PointerEvent, s: Session) => {
+    e.stopPropagation(); e.preventDefault();
+    songResizeRef.current = { id: s.id, grabX: e.clientX, bars: sessionBars(s), origReps: sessionRepeats(s) };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setSongResize({ id: s.id, reps: sessionRepeats(s) });
+  };
+  const songResizeMove = (e: React.PointerEvent) => {
+    const r = songResizeRef.current; if (!r) return;
+    const dR = Math.round((e.clientX - r.grabX) / Math.max(1, r.bars * songZoom));
+    setSongResize({ id: r.id, reps: Math.max(1, Math.min(16, r.origReps + dR)) });
+  };
+  const songResizeUp = () => {
+    const r = songResizeRef.current, cur = songResize; songResizeRef.current = null; setSongResize(null);
+    if (r && cur && cur.reps !== r.origReps) setSessionRepeats(r.id, cur.reps);
+  };
+  // §37 拖动中预览布局:把进行中的 move/resize 套到 sessions 副本上 resnap(不落库),让【其他】块在拖动中实时跟随(主轨重排吸附 / 联动 sub 跟随),而非落位才变。
+  const dragPreview = useMemo(() => {
+    try {
+      if (songResize) return resnapSong(patchSession(sessions, songResize.id, { repeats: songResize.reps }));
+      if (songDrag) {
+        const id = songDrag.id; let next = sessions;
+        if (songDrag.vlane === 0) { next = patchSession(next, id, { songLane: 0, songAnchorId: null, songOffsetBar: 0 }); next = moveMainTo(next, id, mainInsertIndex(next, songDrag.cursorBar, id)); }
+        else next = patchSession(next, id, anchorPatchAt(next, songDrag.vbar, songDrag.vlane));
+        return resnapSong(next, id); // 拖动中的块排除出 #1 让位:预览落点 = 真实落点,与松手时的叠放判定/落库一致(不会预览说能放、松手又弹回)
+      }
+    } catch { /* 预览容错:出错就退回已提交布局 */ }
+    return sessions;
+  }, [sessions, songDrag, songResize]);
+  const posById = useMemo(() => {
+    const m = new Map<string, { start: number; lane: number; reps: number }>();
+    for (const s of dragPreview) m.set(s.id, { start: sessionSongStartBar(s), lane: sessionSongLane(s), reps: sessionRepeats(s) });
+    return m;
+  }, [dragPreview]);
+  // §37 邻接判定:同 lane 内有别的 session 末端正好接到本块起点 → 本块去掉左边框(相连处不画双线)。按预览布局算 → 拖动中也即时。
+  const joinLeft = useMemo(() => {
+    const set = new Set<string>(); const byLane = new Map<number, { start: number; end: number; id: string }[]>();
+    // 主轨与子轨同理:同 lane 内首尾相接的块去掉后块左框(相连处不画双线);各 lane 独立分组,不跨轨连体
+    for (const s of dragPreview) { const lane = sessionSongLane(s); const arr = byLane.get(lane) ?? (byLane.set(lane, []), byLane.get(lane)!); arr.push({ start: sessionSongStartBar(s), end: sessionSongEndBar(s), id: s.id }); }
+    for (const arr of byLane.values()) for (const a of arr) if (arr.some((b) => b.id !== a.id && Math.abs(b.end - a.start) < 1e-6)) set.add(a.id);
+    return set;
+  }, [dragPreview]);
+  // §37 命名 track:取显示名/色(未自定义回退默认),改名/换色(乐观持久化 + 进 undo)。
+  const laneName = (lane: number) => songTracks[lane]?.name || (lane === 0 ? 'Main' : 'Sub ' + lane);
+  const laneColor = (lane: number) => songTracks[lane]?.color ?? null;
+  const setLane = (lane: number, patch: Partial<SongLane>) => {
+    pushHistory();
+    const next = songTracksRef.current.slice();
+    while (next.length <= lane) next.push({ id: nid('lane'), name: next.length === 0 ? 'Main' : 'Sub ' + next.length, color: null });
+    next[lane] = { ...next[lane], ...patch };
+    setSongTracks(next);
+    api.projects.update(projectId, { songLanes: next }).catch(() => {});
+  };
+  // §37 分隔条:拖动改 arranger(track 区)高度,pad(乐器区)吃剩余。clamp:≥1 条 track+标尺,≤ 视口减底部。
+  const splitterDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startY = e.clientY, startH = arrangerHc; // 从钳过的当前高起拖(避免越界值起跳)
+    let finalH = startH;
+    const mv = (ev: PointerEvent) => { finalH = Math.max(songMinH, Math.min(songMaxH, startH + (ev.clientY - startY))); setArrangerH(finalH); };
+    const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); document.body.style.cursor = ''; try { localStorage.setItem('songArrangerH', String(Math.round(finalH))); } catch { /* */ } };
+    document.body.style.cursor = 'ns-resize';
+    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+  };
+  useEffect(() => { try { const v = localStorage.getItem('songArrangerH'); if (v && Number(v) >= 96) setArrangerH(Number(v)); } catch { /* */ } }, []); // §37 恢复上次 arranger 高(localStorage,免 SSR 水合不一致 → 用 effect 而非 lazy init)
+  useEffect(() => { const el = stageRef.current; if (!el) return; const upd = () => setStageH(el.clientHeight); upd(); const ro = new ResizeObserver(upd); ro.observe(el); window.addEventListener('resize', upd); return () => { ro.disconnect(); window.removeEventListener('resize', upd); }; }, []); // §37 量 stage 高(随窗口/底部编辑器变)→ arranger 上限
   // §26.v3 Song XY 自动化:改 session.xyAuto[program]。激活=自动判定——**非平才入 map,平则删该键**(=失效);全空 → null。无显式插入/toggle:在 lane 上画即激活。history=false → 实时更新不压栈(画线拖每帧)。活动场景不变。
   const changeXyAuto = (id: string, program: XYProgram, auto: XYAutomation | null, history = false) => {
     if (history) pushHistory();
@@ -831,8 +1088,16 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   useEffect(() => {
     let raf = 0;
     type Src = 'manual' | 'auto' | 'glide' | 'latch' | 'bypass';
-    const rt: Record<string, { prev: Src; t0: number; fx: number; fy: number }> = {};
-    for (const p of PROG_ORDER) rt[p] = { prev: 'bypass', t0: 0, fx: 0.5, fy: 0 };
+    const rt: Record<string, { prev: Src; t0: number; fx: number; fy: number; px: number; py: number }> = {};
+    for (const p of PROG_ORDER) rt[p] = { prev: 'bypass', t0: 0, fx: 0.5, fy: 0, px: NaN, py: NaN }; // px/py=上帧已推给引擎的值;NaN=未推
+    // ⚡ 去重推值:auto/latch 稳态逐帧推**同一** (x,y) → 每帧重排一条 20ms biquad rampTo = 无谓 AudioParam 事件洪流。
+    //   ε 内未变则跳过(滤波 Q/freq 不再每帧重排);手动/glide 帧帧变,push 照发。旁路/复位时把 px 置 NaN,重新接管必推。
+    const EPS = 1e-3;
+    const pushXY = (en: import('@/audio/studioEngine').StudioEngine, program: XYProgram, x: number, y: number): void => {
+      const st = rt[program];
+      if (Math.abs(x - st.px) < EPS && Math.abs(y - st.py) < EPS) return;
+      st.px = x; st.py = y; en.xySetValue(program, x, y);
+    };
     let lastClear = xyClearRef.current;
     const tick = (now: number) => {
       const e = eng.current;
@@ -842,28 +1107,28 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         const songMode = playingRef.current && playModeRef.current === 'song';
         const block = (cfg.on && songMode) ? sessionsRef.current[playingIdxRef.current] : null;
         const set = block?.xyAuto ?? null;
-        const localBar = songMode ? Math.max(0, e.songPosBars() - songBlockStart.current) : 0;
+        const localBar = songMode ? Math.max(0, e.songPosBars() - songLapBars.current - songBlockStart.current) : 0; // §39 扣圈偏移:走带单调递增,song-bar = songPosBars − songLapBars
         for (const program of PROG_ORDER) {
           const st = rt[program];
-          if (!cfg.on) { e.xySetActive(program, false); st.prev = 'bypass'; continue; }
-          if (!playingRef.current && !(m.down && m.program === program)) { e.xySetActive(program, false); st.prev = 'bypass'; continue; } // 停播且非手动 → 旁路:清掉 latch/glide,否则按停后 latch 效果永远卡 wet(stopTransport 不碰 XY)
+          if (!cfg.on) { e.xySetActive(program, false); st.prev = 'bypass'; st.px = NaN; continue; }
+          if (!playingRef.current && !(m.down && m.program === program)) { e.xySetActive(program, false); st.prev = 'bypass'; st.px = NaN; continue; } // 停播且非手动 → 旁路:清掉 latch/glide,否则按停后 latch 效果永远卡 wet(stopTransport 不碰 XY)
           const auto = set?.[program];
           const autoOn = !!(auto && auto.x.length && auto.y.length); // §26.v3 map presence=激活(非平,changeXyAuto/normalize 守门),热路径不重算 isActiveAuto
           const ground = (): { x: number; y: number } => (autoOn ? sampleXY(program, auto!, localBar) : { x: NEUTRAL[program].x, y: NEUTRAL[program].y });
           if (m.down && m.program === program) { // ① 手动接管该效果
-            e.xySetValue(program, m.x, m.y); e.xySetActive(program, true); // 平滑斜坡(20ms):biquad 滤波器快变会 click,一律慢变
+            pushXY(e, program, m.x, m.y); e.xySetActive(program, true); // 平滑斜坡(20ms):biquad 滤波器快变会 click,一律慢变
             st.prev = 'manual'; st.fx = m.x; st.fy = m.y; continue;
           }
           if (st.prev === 'manual') { if (cfg.mode === 'latch') st.prev = 'latch'; else { st.prev = 'glide'; st.t0 = now; } } // 刚松手 → latch 冻结 / spring 起滑
-          if (st.prev === 'latch') { e.xySetValue(program, st.fx, st.fy); e.xySetActive(program, true); continue; }
+          if (st.prev === 'latch') { pushXY(e, program, st.fx, st.fy); e.xySetActive(program, true); continue; }
           if (st.prev === 'glide') { // 交还滑行:手位 → 地面值
             const e01 = Math.min(1, (now - st.t0) / Math.max(30, cfg.springMs)), k = 1 - Math.pow(1 - e01, 3), g = ground();
-            e.xySetValue(program, st.fx + (g.x - st.fx) * k, st.fy + (g.y - st.fy) * k); e.xySetActive(program, true);
+            pushXY(e, program, st.fx + (g.x - st.fx) * k, st.fy + (g.y - st.fy) * k); e.xySetActive(program, true);
             if (e01 >= 1) st.prev = autoOn ? 'auto' : 'bypass';
             continue;
           }
-          if (autoOn) { const { x, y } = sampleXY(program, auto!, localBar); e.xySetValue(program, x, y); e.xySetActive(program, true); st.prev = 'auto'; } // ② 自动化(平滑斜坡;起播由 prime 盖好,块边界平滑过渡不 click)
-          else { e.xySetActive(program, false); st.prev = 'bypass'; } // ③ 旁路
+          if (autoOn) { const { x, y } = sampleXY(program, auto!, localBar); pushXY(e, program, x, y); e.xySetActive(program, true); st.prev = 'auto'; } // ② 自动化(平滑斜坡;起播由 prime 盖好,块边界平滑过渡不 click)
+          else { e.xySetActive(program, false); st.prev = 'bypass'; st.px = NaN; } // ③ 旁路
         }
       }
       raf = requestAnimationFrame(tick);
@@ -871,20 +1136,27 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     raf = requestAnimationFrame(tick);
     return () => { cancelAnimationFrame(raf); eng.current?.xyReleaseAll(); };
   }, []);
-  const duplicateSession = (idx: number) => { const { sessions: ns } = duplicateSessionAt(sessionsRef.current, idx, nid); mutateSessionsKeepActive(ns); };
-  const duplicateSessionOnce = (idx: number) => { const { sessions: ns, newIndex } = duplicateSessionAt(sessionsRef.current, idx, nid); ns[newIndex] = { ...ns[newIndex], repeats: 1 }; mutateSessionsKeepActive(ns); }; // 标题栏 ⧉:复制本 scene 但只留 1 个 repeat,插在其后
+  // §37 子轨副本落位:同 lane、紧贴原块之后的第一个空档(不够则顺次贴到下一块之后)→ anchorPatchAt 定锚。
+  //   主轨副本不走这条(走 duplicateSessionAt 的吸附序列插队)。修「子轨 ⌘D 复制体跑到原块前面」:旧逻辑复制了 src 的锚+offset,resnap 把它拽回原位再被 #1 让位推到左边。
+  const placeSubDuplicate = (list: Session[], src: Session | undefined, copy: Session): Session => {
+    if (!src || isMainLane(src)) return copy;
+    const start = nextFreeSubStart(list, sessionSongLane(src), sessionSongEndBar(src), sessionBars(src));
+    return { ...copy, ...anchorPatchAt(list, start, sessionSongLane(src)) };
+  };
+  const duplicateSession = (idx: number) => { const list = sessionsRef.current; const { sessions: ns, newIndex } = duplicateSessionAt(list, idx, nid); ns[newIndex] = placeSubDuplicate(list, list[idx], { ...ns[newIndex], color: sessionColor(list[idx]) }); mutateSessionsKeepActive(ns); }; // 复制继承源场景显示色(主/sub 同);sessionColor 解析 explicit 或 id 稳定兜底;子轨副本紧贴原块之后
+  const duplicateSessionOnce = (idx: number) => { const list = sessionsRef.current; const { sessions: ns, newIndex } = duplicateSessionAt(list, idx, nid); ns[newIndex] = placeSubDuplicate(list, list[idx], { ...ns[newIndex], repeats: 1, color: sessionColor(list[idx]) }); mutateSessionsKeepActive(ns); }; // 标题栏 ⧉:复制本 scene 但只留 1 个 repeat,插在其后;继承源场景显示色;子轨副本紧贴原块之后
   // §26 session 剪贴板(⌘C/⌘V;同工程内,粘贴=末尾追加独立副本,乐器全新 id、引用同库素材)。
   const sessionClipRef = useRef<Session | null>(null);
   const copySession = (idx: number) => { const s = sessionsRef.current[idx]; if (s) { sessionClipRef.current = s; setStatus(`Copied session “${s.name}”`); } };
   const pasteSession = () => {
     const src = sessionClipRef.current; if (!src) return;
-    const copy: Session = { ...src, id: nid('sess'), index: sessionsRef.current.length, instruments: src.instruments.map((i) => cloneInstrument(i, nid)) };
+    const copy: Session = { ...src, id: nid('sess'), index: sessionsRef.current.length, songStartBar: sessionSongEndBar(src), color: pickSessionColor(sessionsRef.current), instruments: src.instruments.map((i) => cloneInstrument(i, nid)) }; // §37 粘贴=新场景,取不撞色
     mutateSessionsKeepActive([...sessionsRef.current, copy]); setStatus(`Pasted session “${copy.name}”`);
   };
   const addNewSession = () => {
-    const color = SESSION_COLORS[sessionsRef.current.length % SESSION_COLORS.length];
+    const color = pickSessionColor(sessionsRef.current); // §37 取当前最少用的色=不撞;存进 s.color → 生成即定、永不洗牌
     const { sessions: ns } = docAddSession(sessionsRef.current, nid, `Scene ${sessionsRef.current.length + 1}`, color);
-    pushHistory(); setSessions(ns); // 新场景在末尾,活动场景不动
+    pushHistory(); setSessions(resnapSong(ns)); // §37 新场景在末尾 → resnap 让它吸附接到主轨尾;活动场景不动
   };
   const removeSession = (idx: number) => {
     const list = sessionsRef.current;
@@ -892,17 +1164,17 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const curId = list[sessionIdx]?.id;
     const playId = playingRef.current ? list[playingIdxRef.current]?.id : undefined;
     const removingPlaying = playingRef.current && idx === playingIdxRef.current; // 删的正是正在出声的块
-    const ns = removeSessionAt(list, idx);
+    const ns = resnapSong(removeSessionAt(list, idx)); // §37 删除必须重算:主轨塌缩吸附 + 锚到被删块的 sub 降级孤儿(冻结绝对位置)
     pushHistory(); setSessions(ns);
     if (idx === sessionIdx) {
       const nextIdx = Math.min(idx, ns.length - 1);
-      cancelSongSchedule(); clearSolo(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false);
+      cancelSongSchedule(); clearSolo(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false); setSongActiveIds(new Set());
       setSessionIdx(nextIdx); setSelId(null); setSelClipId(null); setLibSel(null);
       loadSession(ns[nextIdx]).then(() => setTick((t) => t + 1));
     } else {
       if (curId) { const ni = ns.findIndex((s) => s.id === curId); if (ni >= 0 && ni !== sessionIdx) setSessionIdx(ni); }
       if (removingPlaying) { // §26 删了正在出声但非查看的块(Song 钉住视图)→ 干净停播,免播放头无主漂移、声音拖到块末才停
-        cancelSongSchedule(); clearSolo(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false);
+        cancelSongSchedule(); clearSolo(); eng.current?.stopTransport(); eng.current?.stopAudition(); setPendingIdx(null); setPlaying(false); setSongActiveIds(new Set());
       } else if (playId) { // 删的是出声块前面的块 → 出声块下标左移,按 id 重锚播放头/高亮,否则 cum[playingIdx] 漂到错块
         const pi = ns.findIndex((s) => s.id === playId); if (pi >= 0 && pi !== playingIdxRef.current) { playingIdxRef.current = pi; setPlayingIdx(pi); }
       }
@@ -916,7 +1188,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
 
   // §20:查看场景是否 == 正在出声的块。Song 模式钉住查看非播放块时为 false —— 此时改播放态(enable/solo)绝不能碰引擎,
   //   否则会把预载的别块 voice 凭空点响 / 把正在播的块整块静音(违反「同时只一个块出声」)。Live 模式播放块恒 = sessionIdx。
-  const viewingSoundingBlock = () => playModeRef.current !== 'song' || sessionIdx === playingIdxRef.current;
+  const viewingSoundingBlock = () => playModeRef.current !== 'song' || playingSongIdsRef.current.has(sessionsRef.current[sessionIdx]?.id ?? '');
 
   // §18 独奏(瞬态):改集合 → 推引擎 setSolo;副作用在 setState updater 外只跑一次(同 undo 机制坑,见 §16)。
   const applySolo = (next: Set<string>) => { soloRef.current = next; setSoloIds(next); eng.current?.setSolo(next); setTick((t) => t + 1); };
@@ -1102,6 +1374,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const t = setTimeout(() => api.projects.update(projectId, { fx }).catch(() => {}), 300);
     return () => clearTimeout(t);
   }, [projectId, fx]);
+  // §37 Song 视图偏好:缩放 / 网格密度改即乐观持久化 gridPrefs(防抖 300ms,合并滑块/滚轮连续变化;§15.A 同 gridPrefs 套路)。视图态不进 undo(§16:缩放/网格=视图,排除)。
+  const songViewHydrated = useRef(false);
+  useEffect(() => {
+    if (!songViewHydrated.current) { songViewHydrated.current = true; return; } // 首帧是 load 进来的值,不回写
+    const t = setTimeout(() => { gridRef.current = { ...gridRef.current, songZoom, songGrid }; api.projects.update(projectId, { gridPrefs: gridRef.current }).catch(() => {}); }, 300);
+    return () => clearTimeout(t);
+  }, [projectId, songZoom, songGrid]);
   const onGenBpm = (n: number) => { if (Number.isFinite(n)) setGbpm(n); };
   const onGenKey = (k: string) => { setGkey(k); api.projects.update(projectId, { masterKey: k || null }).catch(() => {}); }; // 即写工程调
 
@@ -1586,7 +1865,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         </span>
         {playMode === 'song' && (<button className="tp" data-on={loopSong} onClick={toggleLoopSong} title="Loop song" style={{ width: 30, fontSize: 13 }}>↻</button>)}
         <Metronome on={metroOn} vol={metroVol} iv={metroIv} onToggle={toggleMetro} onVol={changeMetroVol} onIv={changeMetroIv} />
-        <TransportPos engine={e} playing={playing} />
+        <TransportPos engine={e} playing={playing} loopBars={playMode === 'song' && loopSong ? songTotalBars(sessions) : 0} />{/* §39 song 循环走带单调递增 → bar 读数回绕 */}
 
         {/* 音乐设置 */}
         <span className="tb-sep" />
@@ -1672,14 +1951,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
           />
         </aside>
 
-        <section className="stage" style={{ minWidth: 0, paddingBottom: arrangeInst ? arrangeH + 24 : undefined }}>
+        <section ref={stageRef} className={'stage' + (playMode === 'song' ? ' song' : '')} style={{ minWidth: 0, paddingBottom: arrangeInst ? arrangeH + 24 : undefined }}>
           <div className="srail-sticky">
           {playMode === 'song' && (
             <div className="song-ctl">
               {/* §26 顶栏标题 = 当前选中 session:色块换色 + 点名改名(和块标题一致),后缀 bar 数。 */}
               <span className="song-ctl-l" style={{ display: 'flex', alignItems: 'center', gap: 6, textTransform: 'none', letterSpacing: 0, fontSize: 11, fontWeight: 500, color: 'var(--tx-2)' }}>
-                <button className="song-dup" title="Duplicate (1 repeat)" aria-label="Duplicate scene" onMouseDown={(ev) => ev.preventDefault()} onClick={(ev) => { ev.stopPropagation(); duplicateSessionOnce(sessionIdx); }}>⧉</button>
-                <SessionColorDot color={curSession.color || SESSION_COLORS[sessionIdx % SESSION_COLORS.length]} onPick={(c) => setSessionColor(curSession.id, c)} />
+                <SessionColorDot color={sessionColor(curSession)} onPick={(c) => setSessionColor(curSession.id, c)} />
                 {titleRenaming ? (
                   <input autoFocus defaultValue={curSession.name}
                     onClick={(ev) => ev.stopPropagation()}
@@ -1710,44 +1988,59 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
               <button className={'song-auto-tg' + (showAutomation ? ' on' : '')} onMouseDown={(ev) => ev.preventDefault()} onClick={toggleAutomationUi} aria-pressed={showAutomation} title={showAutomation ? '隐藏 automation 界面(效果照常播)' : '显示 automation 界面'}>
                 <svg width="14" height="10" viewBox="0 0 14 10" fill="none" aria-hidden="true"><polyline points="1,8 5,4 8,2.5 13,5.5" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round" /><circle cx="8" cy="2.5" r="1.4" fill="currentColor" /></svg>
               </button>
-              <span className="song-ctl-z" title="Zoom (px per bar)">
+              {/* §37 track 网格密度:每几 bar 一条全高竖线;— = 关。纯显示,不动 snap。 */}
+              <span className="song-ctl-z" title="Grid (每几 bar 一条网格线;— 关)">
+                <span className="song-ctl-zl">grid</span>
+                <div className="seg sm" role="group" aria-label="Grid density">
+                  {[1, 2, 4].map((g) => <button key={g} className={songGrid === g ? 'on' : ''} onMouseDown={(ev) => ev.preventDefault()} onClick={() => setSongGrid(g)}>{g}</button>)}
+                </div>
+              </span>
+              <span className="song-ctl-z" title="Zoom (px per bar) — 双击回到中线">
                 <span className="song-ctl-zl">zoom</span>
-                <input type="range" min={20} max={56} step={1} value={songZoom} onChange={(ev) => setSongZoom(Number(ev.target.value))} />
+                <input type="range" min={20} max={60} step={1} value={songZoom} onChange={(ev) => setSongZoom(Number(ev.target.value))} onDoubleClick={() => setSongZoom(SONG_ZOOM_DEFAULT)} />
               </span>
             </div>
           )}
-          <RailScroll song={playMode === 'song'} zoom={songZoom} onZoom={setSongZoom} sessions={sessions} selectedIdx={sessionIdx} engine={e} playing={playing} playingIdx={playingIdx} blockTransportStart={songBlockStart.current} onSeekBar={startPlayFromBar}>
-            <div className={'banks srail' + (playMode === 'song' ? ' song' : '')}>
+          <div style={playMode === 'song' ? { display: 'flex', alignItems: 'stretch', minWidth: 0, height: arrangerHc, marginLeft: -16, marginRight: -16 } : undefined}>{/* §37 负 16 抵掉 .srail-sticky 的左右 padding → track 区顶到 stage 两边,无 padding */}
+          {/* §37 固定左侧 track gutter:10 条命名 track 表头钉在横滚区外(横滚不动);纵滚时表头随 lane 同步平移(冻结窗格),顶部 22px ruler 占位冻结。 */}
+          {playMode === 'song' && (
+            <div className="song-gutter" ref={songGutterRef}>
+              <div className="song-gutter-ruler" aria-hidden="true" />
+              <div className="song-gutter-tracks" style={{ transform: `translateY(${-songVScroll}px)` }}>
+              {Array.from({ length: songLanes }, (_, lane) => {
+                const tc = laneColor(lane) || (lane === 0 ? 'var(--acc)' : SESSION_COLORS[lane % SESSION_COLORS.length]);
+                return (
+                <div key={'th' + lane} className={'song-thead' + (lane === 0 ? ' main' : '')} style={{ height: songLaneH, ['--c' as string]: tc } as React.CSSProperties}>
+                  <div className="song-thead-top">
+                    <SessionColorDot color={tc} onPick={(c) => setLane(lane, { color: c })} />
+                    {renamingLane === lane ? (
+                      <input className="tb-proj-in" autoFocus defaultValue={laneName(lane)} style={{ flex: 1, minWidth: 0, height: 18 }}
+                        onBlur={(ev) => { const v = ev.target.value.trim(); if (v) setLane(lane, { name: v }); setRenamingLane(null); }}
+                        onKeyDown={(ev) => { if (ev.key === 'Enter') (ev.target as HTMLInputElement).blur(); else if (ev.key === 'Escape') setRenamingLane(null); }} />
+                    ) : (
+                      <span className="song-thead-nm" title="双击改名" onDoubleClick={() => setRenamingLane(lane)}>{laneName(lane)}</span>
+                    )}
+                  </div>
+                </div>
+                );
+              })}
+              </div>
+            </div>
+          )}
+          <div style={playMode === 'song' ? { flex: 1, minWidth: 0, height: '100%' } : undefined}>
+          <RailScroll song={playMode === 'song'} zoom={songZoom} onZoom={setSongZoom} sessions={sessions} selectedIdx={sessionIdx} engine={e} playing={playing} onSeekBar={songPlayFrom} onVScroll={setSongVScroll} gridEvery={songGrid}>
+            <div ref={songLanesRef} className={'banks srail' + (playMode === 'song' ? ' song' : '') + ((songDrag || songResize) ? ' song-reflow' : '')} style={playMode === 'song' ? { position: 'relative', display: 'block', width: songTrackW, minWidth: '100%', height: songLanes * songLaneH } : undefined}>{/* §37 minWidth:100% 让 lane 横线铺满可视宽;song-reflow:拖动/resize 时给其他块加位置过渡=平滑滑动不跳 */}
+              {playMode === 'song' && Array.from({ length: songLanes }, (_, lane) => (
+                <div key={'lane' + lane} className={'song-lane-bg' + (lane === 0 ? ' main' : '')} style={{ top: lane * songLaneH, height: songLaneH }} aria-hidden="true" />
+              ))}
               {sessions.map((s, i) => {
                 const chips = s.instruments.slice(0, 6);
                 const more = s.instruments.length - chips.length;
                 const cur = i === sessionIdx; // 选中/查看中(白描边 + 下方 pad 区显示它)
-                const playHere = playing && (playMode === 'song' ? i === playingIdx : cur); // 正在出声的块:Song=playingIdx、Live=当前场景 → 高亮 + 播放头跟它(与「查看」解耦)
+                const playHere = playing && (playMode === 'song' ? playingSongIds.has(s.id) : cur); // 正在出声的块:Song=active id 集、Live=当前场景 → 高亮 + 播放头跟它(与「查看」解耦)
                 const n = sessionRepeats(s);
                 const bars = sessionBars(s);
-                const sc = s.color || SESSION_COLORS[i % SESSION_COLORS.length]; // per-session 上色:Live 卡 + Song 块共用(§26.9 设计一致);播放态不变色,只看播放头线
-                // §26.9 对齐 Song 块设计:色点(换色) + 名字(选中点名改名) + 右端 bar 数;无 ⧉/✕ 按钮 → 走热键(Del/⌫ 删 · ⌘D 复制 · ⌘C/⌘V,见 onKey)。
-                const head = (
-                  <div className="sc-h">
-                    <SessionColorDot color={sc} onPick={(c) => setSessionColor(s.id, c)} />
-                    {renamingId === s.id ? (
-                      <input className="tb-proj-in" autoFocus defaultValue={s.name} style={{ flex: 1, minWidth: 0, height: 20 }} onClick={(ev) => ev.stopPropagation()}
-                        onBlur={(ev) => { const v = ev.target.value.trim(); if (v) renameSession(s.id, v); setRenamingId(null); }}
-                        onKeyDown={(ev) => { if (ev.key === 'Enter') (ev.target as HTMLInputElement).blur(); else if (ev.key === 'Escape') setRenamingId(null); }} />
-                    ) : (
-                      // 选中(当前)态再点名字 = 改名;未选中时点名走卡片 onClick 切场景
-                      <span className="sc-nm" style={{ cursor: cur ? 'text' : 'pointer' }} title={cur ? '点击改名' : s.name} onClick={(ev) => { if (cur) { ev.stopPropagation(); setRenamingId(s.id); } }}>{s.name}</span>
-                    )}
-                    <span className="sc-bars">{bars}b</span>
-                  </div>
-                );
-                const chipsRow = (
-                  <div className="sc-chips">
-                    {chips.map((inst) => (<span key={inst.id} className="sc-chip" style={{ background: inst.color || 'rgba(236,233,227,.4)' }} />))}
-                    {more > 0 && <span className="sc-more">+{more}</span>}
-                  </div>
-                );
-                const meta = <div className="sc-meta">{s.instruments.length} inst</div>;
+                const sc = sessionColor(s); // §37 per-session 上色绑 id(非数组下标)→ 生成即定、移动/复制/增删不洗牌;Live 卡 + Song 块共用
                 // 拖拽换位(HTML5 DnD,自有数据类型不撞 pad/素材);改名时禁拖,让输入框正常用。被拖卡压暗当占位,整排靠 flex order 实时让位。
                 const dndCls = (s.id === dragId ? ' dragging' : '');
                 const cardOrder = previewOrder ? previewOrder.indexOf(s.id) : i; // 拖拽中按预览顺序;否则原序
@@ -1759,69 +2052,129 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                   onDragEnd: () => { if (dragIdRef.current) sessDragClear(); }, // 没经 drop(拖出界/Esc)→ 撤销预览,不落库
                 };
                 if (playMode !== 'song') {
+                  // §37.10 Live 卡对齐 §37 sblock:tinted 头条(色点·名·乐器数胶囊·bar 数)+ 内容带(乐器色块预览 + automation chips/sub 标记)。
+                  // 全列主/Sub/孤儿(已拍板),Sub/孤儿降级打标——读起来与 Song 块同身份。repeat 在 Live 无意义故不显(职能差异,见 §37.10.1)。
+                  const isSub = !isMainLane(s);
+                  const orphan = isSub && !sessionSongAnchor(s);
+                  const autoSet = s.xyAuto ?? null;
+                  const activePrograms = autoSet ? PROG_ORDER.filter((p) => autoSet[p]) : []; // 该场景已激活(非平)的效果 → 头条同款字母方块(§37.10.2)
                   return (
-                    <div key={s.id} data-sid={s.id} tabIndex={0} className={'scard' + (cur ? ' on' : '') + (playHere ? ' playing' : '') + (pendingIdx === i ? ' queued' : '') + dndCls} style={{ order: cardOrder, '--c': sc } as React.CSSProperties} onClick={() => switchSession(i)} title={s.name} {...sessDnd}>
-                      {head}{chipsRow}{meta}
+                    <div key={s.id} data-sid={s.id} tabIndex={0} className={'scard' + (cur ? ' on' : '') + (playHere ? ' playing' : '') + (pendingIdx === i ? ' queued' : '') + dndCls + (isSub ? ' scard-sub' : '') + (orphan ? ' scard-orphan' : '')} style={{ order: cardOrder, '--c': sc } as React.CSSProperties} onClick={() => switchSession(i)} title={s.name} {...sessDnd}>
+                      <div className="sc-h">
+                        <SessionColorDot color={sc} onPick={(c) => setSessionColor(s.id, c)} />
+                        {renamingId === s.id ? (
+                          <input className="tb-proj-in" autoFocus defaultValue={s.name} style={{ flex: 1, minWidth: 0, height: 18 }} onClick={(ev) => ev.stopPropagation()}
+                            onBlur={(ev) => { const v = ev.target.value.trim(); if (v) renameSession(s.id, v); setRenamingId(null); }}
+                            onKeyDown={(ev) => { if (ev.key === 'Enter') (ev.target as HTMLInputElement).blur(); else if (ev.key === 'Escape') setRenamingId(null); }} />
+                        ) : (
+                          // 选中(当前)态再点名字 = 改名;未选中时点名走卡片 onClick 切场景
+                          <span className="sc-nm" style={{ cursor: cur ? 'text' : 'pointer' }} title={cur ? '点击改名' : s.name} onClick={(ev) => { if (cur) { ev.stopPropagation(); setRenamingId(s.id); } }}>{s.name}</span>
+                        )}
+                        {orphan && <span className="sblk-orf" title="未锚定(孤儿):不跟随任何主块">⚲</span>}
+                        <SongInstrumentCount session={s} />{/* §37.10 复用 Song 块的乐器数胶囊(active/total + hover 名单) */}
+                        <span className="sc-bars">{bars}b</span>
+                      </div>
+                      <div className="sc-body">
+                        <div className="sc-chips">
+                          {chips.map((inst) => (<span key={inst.id} className="sc-chip" style={{ background: inst.color || 'rgba(236,233,227,.4)' }} />))}
+                          {more > 0 && <span className="sc-more">+{more}</span>}
+                        </div>
+                        <div className="sc-meta">
+                          {activePrograms.map((p) => (
+                            <span key={p} className="sblk-achip" title={`${PROG_LABEL[p]} automation`} style={{ background: PROG_COLOR[p], borderColor: PROG_COLOR[p], color: '#1c1b19' }}>{PROG_LABEL[p][0]}</span>
+                          ))}
+                          {isSub && <span className="sc-subtag" title={orphan ? '未锚定(孤儿)' : `子轨叠层,锚定主场景(${laneName(sessionSongLane(s))})`}>↳ {laneName(sessionSongLane(s))}</span>}
+                        </div>
+                      </div>
                       {playHere && <SessionPlayhead engine={e} mode="live" startBar={0} barsPerRep={bars} repeats={n} playing={playing} />}
                     </div>
                   );
                 }
                 // §26 Song = 比例 arrange 时间轴:一个 block 整段(宽=bars×reps×zoom,内部 loop 刻度线)+ 下方内联自动化 lane。
                 // 头:名字/小节竖排(左上)· 每遍序号(左下)· repeat 方角 +/−(右上,选中显)。效果/X-Y/清除在顶栏全局。
-                const bw = bars * n * songZoom;
+                // §37 拖拽/resize 实时态。pv=预览解析位(其他块让位后的位 / 被拖块的落点)。
+                const isDragging = songDrag?.id === s.id;
+                const pv = posById.get(s.id);
+                // 主轨 reorder:被拖块「浮在鼠标下跟手」(vbar=保持抓取点的投影起点)、其余块靠 pv 让位开空(ghost 占位)。
+                // 子轨拖拽(vlane>0):被拖块仍渲染在夹后落点(pv),约束放置显落点能避免误跳(#2)。
+                const floatMain = isDragging && songDrag!.vlane === 0;
+                const effLane = floatMain ? 0 : (pv?.lane ?? sessionSongLane(s));
+                const effStart = floatMain ? songDrag!.vbar : (pv?.start ?? sessionSongStartBar(s));
+                const effReps = pv?.reps ?? n;
+                const isSub = !isMainLane(s);
+                const orphan = isSub && !sessionSongAnchor(s);
+                const bw = bars * effReps * songZoom; // §37 所有块都按 bars×reps×zoom 比例(随 zoom 一起变宽窄、与 bar 网格对齐);不再 floor(那会让 sub 不随 zoom 缩放 + 错位)——「太小」改由更大的 zoom 范围/默认解决
                 const autoSet = s.xyAuto ?? null;             // §26.v3 该 session 的全部激活效果(map 只存非平;未触碰=不存=隐含中性平直线·非激活)
-                const auto = autoSet?.[autoProgram] ?? defaultAutomation(autoProgram, bars * n); // §26.v3 当前显示那条;没有 → 可编辑的中性平直线(画即激活)
+                const auto = autoSet?.[autoProgram] ?? defaultAutomation(autoProgram, bars * effReps); // §26.v3 当前显示那条;没有 → 可编辑的中性平直线(画即激活)
+                const activePrograms = autoSet ? PROG_ORDER.filter((p) => autoSet[p]) : []; // 该 clip 已激活(非平)的效果
                 return (
-                  <div key={s.id} data-sid={s.id} tabIndex={0} className={'sblock' + (cur ? ' sblk-sel' : '') + (playHere ? ' playing' : '') + (pendingIdx === i ? ' queued' : '') + dndCls} style={{ order: cardOrder, width: bw, '--c': sc } as React.CSSProperties} title={s.name} onClick={() => switchSession(i)}>
-                    {/* 名字条:名字置顶(过窄截断)+ 右端 Xb;兼拖拽换位手柄。无删/复制按钮 → 键盘:Del/⌫ 删 · ⌘C/⌘V 复制粘贴 · ⌘D 复制(Win=Ctrl,见 onKey)。 */}
-                    <div className="sblk-name" {...sessDnd}>
+                  // §37 session 块:name + repeat 数字条 +(展开时)automation 子行,三段同一边框包住=一体(§旧包裹观感)。
+                  //   automation 仍是独立子元素但嵌在块内:指针手势靠它自身 onPointerDown stopPropagation 与块拖拽分离。
+                  <div data-sid={s.id} tabIndex={0} key={s.id}
+                    className={'sblock' + (cur ? ' sblk-sel' : '') + (playHere ? ' playing' : '') + (pendingIdx === i ? ' queued' : '') + (isDragging ? ' dragging' : '') + (isSub ? ' sblk-sub' : '') + (orphan ? ' sblk-orphan' : '') + (!isDragging && joinLeft.has(s.id) ? ' sblk-joinl' : '')}
+                    style={{ position: 'absolute', left: effStart * songZoom, top: effLane * songLaneH, height: showAutomation ? SONG_CLIP_H + SONG_AUTO_H : SONG_CLIP_H, width: bw, '--c': sc } as React.CSSProperties}
+                    title={s.name}
+                    onPointerDown={(ev) => songBlockDown(ev, s, i)} onPointerMove={songBlockMove} onPointerUp={songBlockUp}>
+                    {/* 头条:色点 · 名字 · automation 标识(始终显,标这块挂了哪些效果)· 孤儿 · 乐器数 · bar 数。 */}
+                    <div className="sblk-name">
                       <SessionColorDot color={sc} onPick={(c) => setSessionColor(s.id, c)} />
                       {renamingId === s.id ? (
-                        <input className="tb-proj-in" autoFocus defaultValue={s.name} onClick={(ev) => ev.stopPropagation()}
+                        <input className="tb-proj-in" autoFocus defaultValue={s.name} onPointerDown={(ev) => ev.stopPropagation()} onClick={(ev) => ev.stopPropagation()}
                           onBlur={(ev) => { const v = ev.target.value.trim(); if (v) renameSession(s.id, v); setRenamingId(null); }}
                           onKeyDown={(ev) => { if (ev.key === 'Enter') (ev.target as HTMLInputElement).blur(); else if (ev.key === 'Escape') setRenamingId(null); }} />
                       ) : (
-                        <span className="sblk-nm" style={{ cursor: cur ? 'text' : 'pointer' }} title={cur ? '点击改名' : s.name} onClick={(ev) => { if (cur) { ev.stopPropagation(); setRenamingId(s.id); } }}>{s.name}</span>
+                        <span className="sblk-nm" title={cur ? '双击改名' : s.name} onDoubleClick={(ev) => { ev.stopPropagation(); setRenamingId(s.id); }}>{s.name}</span>
                       )}
-                      {/* §26.v3 纯标识(不可点):该 session 已激活(线非平=在 map)的效果各显一个单字母色块,只表「这块挂了哪些效果」。选哪条编辑去顶栏 4 选 1。§26.10:automation UI 隐藏时一并收起。 */}
-                      {showAutomation && autoSet && PROG_ORDER.filter((p) => autoSet[p]).map((p) => (
-                        <span key={p} className="sblk-achip" title={`${PROG_LABEL[p]} automation`}
-                          style={{ background: PROG_COLOR[p], borderColor: PROG_COLOR[p], color: '#1c1b19' }}>
-                          {PROG_LABEL[p][0]}
-                        </span>
-                      ))}
+                      {orphan && <span className="sblk-orf" title="未锚定(孤儿):不跟随任何主块">⚲</span>}
+                      <SongInstrumentCount session={s} />{/* §37 乐器数移到 name 条右侧(原在数字条左下) */}
                       <span className="sblk-bars">{bars}b</span>
+                      {activePrograms.map((p) => (/* §37 automation 状态放最右(与 4b 调换位置) */
+                        <span key={p} className="sblk-achip" title={`${PROG_LABEL[p]} automation`}
+                          style={{ background: PROG_COLOR[p], borderColor: PROG_COLOR[p], color: '#1c1b19' }}>{PROG_LABEL[p][0]}</span>
+                      ))}
                     </div>
-                    {/* 数字条:repeat 一格 + 数字(各格左上);末格右侧 +/−(仅选中)。与 automation 条等高。 */}
+                    {/* 数字条(原版观感:session 色 tint + 每遍 repeat 序号 + 左下乐器数胶囊);收起 automation 时叠一层只读 ghost 曲线(淡、pointer-events:none → 拖它=移动 clip,不冲突)。 */}
                     <div className="sblk-nums">
-                      {Array.from({ length: n }, (_, k) => (<span key={'rn' + k} className="sblk-rn" style={{ left: k * bars * songZoom + 4 }}>{k + 1}</span>))}
-                      {Array.from({ length: n - 1 }, (_, k) => (<span key={'t' + k} className="sblk-tick" style={{ left: (k + 1) * bars * songZoom }} aria-hidden="true" />))}
-                      {/* §26.11 激活乐器计数:钉数字条左下(=落 repeat 1,与 zoom 无关);hover 出名单(portal,免被块 overflow 裁)。点击冒泡到块=选 session。 */}
-                      <SongInstrumentCount session={s} />
-
-                      {cur && (
-                        <span className="sblk-reps" onClick={(ev) => ev.stopPropagation()} onMouseDown={(ev) => ev.preventDefault()}>{/* onMouseDown preventDefault:点 +/− 不夺焦点 → 空格起停后不会在按钮上残留 focus 圈 */}
-                          {n > 1
-                            ? <><button onClick={(ev) => { ev.stopPropagation(); setSessionRepeats(s.id, n + 1); }} title="Add repeat">+</button><button onClick={(ev) => { ev.stopPropagation(); setSessionRepeats(s.id, n - 1); }} title="Remove repeat">−</button></>
-                            : <button onClick={(ev) => { ev.stopPropagation(); setSessionRepeats(s.id, n + 1); }} title="Add repeat">+</button>}
-                        </span>
-                      )}
+                      {!showAutomation && activePrograms.map((p) => (
+                        <AutomationLane key={'g' + p} auto={autoSet![p]!} program={p} axis="x" bars={bars} reps={effReps} px={songZoom} editable={false} onStart={() => {}} onChange={() => {}} />
+                      ))}
+                      {Array.from({ length: effReps }, (_, k) => (<span key={'rn' + k} className="sblk-rn" style={{ left: k * bars * songZoom + 4 }}>{k + 1}</span>))}
+                      {Array.from({ length: effReps - 1 }, (_, k) => (<span key={'t' + k} className="sblk-tick" style={{ left: (k + 1) * bars * songZoom }} aria-hidden="true" />))}
                     </div>
-                    {/* §26.v3 lane 显示顶栏 4 选 1 选中的效果(autoProgram)那条,永远可编辑(选中块):没触碰过=中性平直线,照样能画;画成非平即激活(changeXyAuto 入 map)。§26.10:automation UI 隐藏时整条 lane 收起,block 变矮(效果仍在播)。 */}
+                    {/* §37 automation 子行:嵌在 name+nums 下方、被块边框一起包住=一体观感(§旧 .sblock-auto)。
+                        指针手势靠自身 onPointerDown stopPropagation 与块拖拽分离 → 画/拖 automation 点不冒泡到 songBlockDown,不误起块拖。 */}
                     {showAutomation && (
-                      <div className="sblock-auto">
-                        <AutomationLane auto={auto} program={autoProgram} axis={autoAxis} bars={bars} reps={n} px={songZoom} editable={cur} onStart={pushHistory} onChange={(a) => changeXyAuto(s.id, autoProgram, a)} />
+                      <div className={'sblk-auto' + (cur ? ' sblk-auto-sel' : '')} style={{ height: SONG_AUTO_H - 3, '--c': sc } as React.CSSProperties}
+                        onPointerDown={(ev) => ev.stopPropagation()}>{/* ⚠ 类名别用裸 sel:撞全局 .sel{max-width:170px} */}
+                        {Array.from({ length: effReps - 1 }, (_, k) => (<span key={'t' + k} className="sblk-tick" style={{ left: (k + 1) * bars * songZoom }} aria-hidden="true" />))}
+                        <AutomationLane auto={auto} program={autoProgram} axis={autoAxis} bars={bars} reps={effReps} px={songZoom} editable={cur} onStart={pushHistory} onChange={(a) => changeXyAuto(s.id, autoProgram, a)} />
                       </div>
                     )}
-                    {/* §26.9 song 播放头改列级单条(SongTimeline 渲,穿标尺+块);此处不再画块内 head。 */}
+                    {/* §37 右缘 resize 改 repeat(仅主轨;sub 无手柄)。 */}
+                    {isMainLane(s) && <span className="sblk-rs" title="拖动改 repeat" onPointerDown={(ev) => songResizeDown(ev, s)} onPointerMove={songResizeMove} onPointerUp={songResizeUp} />}
                   </div>
                 );
               })}
-              <button className="sadd" onClick={addNewSession} title="New session">＋</button>
+              {/* §37 拖拽落点占位:被拖块的预览槽位画一个虚线同色块,标「松手会落这里」(其他块已绕它排开);被拖块本身半透明浮在光标处,不再盖没经过的块。子轨叠放=无效落点 → 占位块变红(松手弹回)。 */}
+              {playMode === 'song' && songDrag && songDragRef.current?.moved && (() => {
+                const pv = posById.get(songDrag.id); const ds = sessions.find((x) => x.id === songDrag.id);
+                if (!pv || !ds) return null;
+                const dc = sessionColor(ds);
+                const sb = Math.max(0, Math.round(songDrag.vbar)), db = sessionBars(ds);
+                const invalid = songDrag.vlane > 0 && sessions.some((o) => sessionSongLane(o) === songDrag.vlane && (songDrag.clone || o.id !== songDrag.id) && sb < sessionSongEndBar(o) && sb + db > sessionSongStartBar(o)); // 子轨叠放
+                return <div className={'song-drop-ghost' + (invalid ? ' invalid' : '')} aria-hidden="true" style={{ position: 'absolute', left: pv.start * songZoom, top: pv.lane * songLaneH, width: sessionBars(ds) * pv.reps * songZoom, height: songLaneH, '--c': dc } as React.CSSProperties} />;
+              })()}
+              {/* §37 Song 加场景按钮:满 lane 高 + 贴紧末块(去 +3 缝)+ 读 dragPreview.total → 拖/缩/删主块时随其他块实时跟随,不再松手才跳 */}
+              {playMode === 'song'
+                ? <button className="sadd song" onClick={addNewSession} title="New scene (主轨末尾追加)" style={{ position: 'absolute', left: mainLayout(dragPreview).total * songZoom, top: 0, height: songLaneH }}>＋</button>
+                : <button className="sadd" onClick={addNewSession} title="New session">＋</button>}
             </div>
           </RailScroll>
           </div>
-          <div className="clipgrid" style={{ gridAutoRows: 120, flexShrink: 0, gap: 0, borderRadius: 'var(--r)', overflow: 'hidden', borderTop: `1px solid ${FAINT}`, borderLeft: `1px solid ${FAINT}` }}>
+          </div>
+          {playMode === 'song' && <div className="song-splitter" onPointerDown={splitterDown} title="拖动调 track 区 / 乐器区高度" aria-label="Resize arranger" style={{ marginLeft: -16, marginRight: -16 }} />}
+          </div>
+          <div className={'clipgrid' + (playMode === 'song' ? ' song' : '')} style={{ gridAutoRows: 120, flexShrink: 0, gap: 0, borderRadius: 'var(--r)', overflow: 'hidden', borderTop: `1px solid ${FAINT}`, borderLeft: `1px solid ${FAINT}`, ...(playMode === 'song' ? { flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, overflow: 'auto' } : null) }}>
             {Array.from({ length: slotCount }, (_, slot) => {
               const inst = curSession.instruments.find((i) => i.slot === slot) ?? null;
               const dnd = {
@@ -2176,8 +2529,8 @@ function SongInstrumentCount({ session }: { session: Session }) {
   }, [open, place]);
   return (
     <>
-      <span ref={badgeRef} className={'sblk-icount' + (count === 0 ? ' zero' : '')} aria-label={count ? `Active instruments: ${active.map((i) => i.label).join(', ')}` : 'No active instruments'}
-        onMouseEnter={scheduleOpen} onMouseLeave={scheduleClose}>{count}</span>
+      <span ref={badgeRef} title="" className={'sblk-icount' + (count === 0 ? ' zero' : '')} aria-label={count ? `Active instruments: ${active.map((i) => i.label).join(', ')}` : 'No active instruments'}
+        onMouseEnter={scheduleOpen} onMouseLeave={scheduleClose}>{count}</span>{/* title="" 抑制继承自 .sblock 的原生 name tooltip(否则与自定义浮层重叠=hover 出现两个) */}
       {open && pos && createPortal(
         <div ref={popRef} onMouseEnter={cancelTimers} onMouseLeave={scheduleClose}
           style={{ position: 'fixed', left: pos.left, top: pos.top, transform: pos.below ? 'none' : 'translateY(-100%)', zIndex: 260, background: 'var(--bg-1)', border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 9px', width: 180, boxSizing: 'border-box', boxShadow: '0 10px 28px rgba(0,0,0,0.45)' }}>
@@ -2483,30 +2836,31 @@ function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, o
   );
 }
 
-type SongTimelineProps = { zoom: number; onZoom: (z: number) => void; sessions: Session[]; selectedIdx: number; engine: StudioEngine | null; playing: boolean; playingIdx: number; blockTransportStart: number; onSeekBar: (bar: number) => void; children: ReactNode };
+type SongTimelineProps = { zoom: number; onZoom: (z: number) => void; sessions: Session[]; selectedIdx: number; engine: StudioEngine | null; playing: boolean; onSeekBar: (bar: number) => void; onVScroll?: (top: number) => void; gridEvery?: number; children: ReactNode };
 
 /** §26.9 song 用滚动容器:在 HScroll 之上加 ① 滚轮平移 ② Alt 滚轮缩放(光标钉住) ③ 全局 bar 标尺(播放头穿标尺 + hover 引导线 + 喇叭点击跳播)。
  *  blocks 作 children 原样塞入(flex order 拖拽不变);标尺/播放头/引导线在同一 scroll 内容里按 cumBars 定位。 */
-function SongTimeline({ zoom, onZoom, sessions, selectedIdx, engine, playing, playingIdx, blockTransportStart, onSeekBar, children }: SongTimelineProps) {
+function SongTimeline({ zoom, onZoom, sessions, selectedIdx, engine, playing, onSeekBar, onVScroll, gridEvery = 1, children }: SongTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const guideRef = useRef<HTMLDivElement>(null);
   const zoomRef = useRef(zoom); zoomRef.current = zoom;
   const zoomApply = useRef<{ contentBar: number; cx: number } | null>(null); // Alt 缩放后回正 scrollLeft(光标钉住)
   const [thumb, setThumb] = useState({ left: 0, width: 100, show: false });
+  const [viewW, setViewW] = useState(0); // §37 滚动容器可视宽 → bar 号画满整条标尺(不止 session 长度)
 
-  // cumBars[i]=前 i 块累计小节(数组序=视觉序);total=全曲小节;W=标尺/内容宽
-  let acc = 0; const cum = sessions.map((s) => { const at = acc; acc += sessionBars(s) * sessionRepeats(s); return at; });
-  const total = acc; const W = Math.max(1, total * zoom);
+  const total = Math.max(1, songTotalBars(sessions)); const W = Math.max(1, total * zoom);
+  const divs = [...new Set([0, total, ...sessions.flatMap((s) => [sessionSongStartBar(s), sessionSongEndBar(s)])])].sort((a, b) => a - b);
   // 选中 session → 标尺上对应 bar 段铺同色淡底(left/width 用 cum,与块精确对齐)
   const selS = sessions[selectedIdx];
-  const selColor = selS ? (selS.color || SESSION_COLORS[selectedIdx % SESSION_COLORS.length]) : null;
-  const selLeft = selS ? cum[selectedIdx] * zoom : 0;
-  const selW = selS ? sessionBars(selS) * sessionRepeats(selS) * zoom : 0;
+  const selColor = selS ? sessionColor(selS) : null;
+  const selLeft = selS ? sessionSongStartBar(selS) * zoom : 0;
+  const selW = selS ? (sessionSongEndBar(selS) - sessionSongStartBar(selS)) * zoom : 0;
 
-  // 自定义滚动条 thumb 同步(同 HScroll)
+  const onVScrollRef = useRef(onVScroll); onVScrollRef.current = onVScroll; // §37 纵向 scrollTop → gutter 同步(ref 防 [] 闭包过期)
+  // 自定义横向滚动条 thumb 同步(同 HScroll)+ 上报纵向 scrollTop(冻结窗格:gutter 表头跟着平移)
   useEffect(() => {
     const el = scrollRef.current; if (!el) return;
-    const update = () => { const w = el.clientWidth, sw = el.scrollWidth; const width = sw > 0 ? Math.min(100, (w / sw) * 100) : 100; setThumb({ left: sw > w ? (el.scrollLeft / (sw - w)) * (100 - width) : 0, width, show: sw > w + 1 }); };
+    const update = () => { const w = el.clientWidth, sw = el.scrollWidth; setViewW(w); const width = sw > 0 ? Math.min(100, (w / sw) * 100) : 100; setThumb({ left: sw > w ? (el.scrollLeft / (sw - w)) * (100 - width) : 0, width, show: sw > w + 1 }); onVScrollRef.current?.(el.scrollTop); };
     update(); el.addEventListener('scroll', update, { passive: true });
     const ro = new ResizeObserver(update); ro.observe(el); if (el.firstElementChild) ro.observe(el.firstElementChild);
     return () => { el.removeEventListener('scroll', update); ro.disconnect(); };
@@ -2519,16 +2873,18 @@ function SongTimeline({ zoom, onZoom, sessions, selectedIdx, engine, playing, pl
         e.preventDefault();
         const cx = e.clientX - el.getBoundingClientRect().left;
         zoomApply.current = { contentBar: (el.scrollLeft + cx) / zoomRef.current, cx };
-        onZoom(Math.max(10, Math.min(72, zoomRef.current * Math.exp(-e.deltaY * 0.0015))));
-      } else { const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY; if (d === 0) return; e.preventDefault(); el.scrollLeft += d; }
+        onZoom(Math.max(16, Math.min(220, zoomRef.current * Math.exp(-e.deltaY * 0.0015)))); // §37 范围放大到 16..220(与 slider 一致),配合删 floor 后 zoom 是唯一缩放杠杆
+      } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) { // §37 横滚(bar):Shift+滚轮 或 横向 trackpad
+        const d = e.deltaX || e.deltaY; if (d === 0) return; e.preventDefault(); el.scrollLeft += d;
+      } // §37 else 平 wheel = 纵向滚 track:不 preventDefault,交给容器 overflow-y 原生处理
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, [onZoom]);
   useEffect(() => { const el = scrollRef.current, z = zoomApply.current; if (el && z) { el.scrollLeft = Math.max(0, z.contentBar * zoom - z.cx); zoomApply.current = null; } }, [zoom]);
 
-  const barAtX = (clientX: number) => { const el = scrollRef.current; if (!el) return 0; return Math.floor(Math.max(0, Math.min(total - 1e-6, (el.scrollLeft + clientX - el.getBoundingClientRect().left) / zoom))); };
-  const onRulerMove = (e: React.PointerEvent) => { const g = guideRef.current; if (g) { g.style.display = 'block'; g.style.left = barAtX(e.clientX) * zoom + 'px'; } };
+  const barAtX = (clientX: number, snap = false) => { const el = scrollRef.current; if (!el) return 0; const raw = (el.scrollLeft + clientX - el.getBoundingClientRect().left) / zoom; return Math.max(0, Math.min(total - 1e-6, snap ? Math.round(raw) : raw)); }; // §39 底层无极(songPlayFrom 吃小数 bar);snap=吸附到整 bar 的体验层(Alt 绕过=精细无极)
+  const onRulerMove = (e: React.PointerEvent) => { const g = guideRef.current; if (g) { g.style.display = 'block'; g.style.left = barAtX(e.clientX, !e.altKey) * zoom + 'px'; } }; // guide 吸到 bar 线:所见即起播点
   const onRulerLeave = () => { const g = guideRef.current; if (g) g.style.display = 'none'; };
   const thumbDown = (e: React.PointerEvent) => {
     e.preventDefault();
@@ -2541,25 +2897,24 @@ function SongTimeline({ zoom, onZoom, sessions, selectedIdx, engine, playing, pl
     window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
   };
 
-  const labelEvery = zoom >= 26 ? 1 : zoom >= 15 ? 2 : 4; // bar 号疏密随缩放
+  const labelEvery = Math.max(gridEvery || 1, zoom >= 26 ? 1 : zoom >= 15 ? 2 : 4); // §37 bar 号间隔跟 GRID(2→1 3 5、4→1 5 9),低 zoom 再按密度疏一档
   const nums: React.ReactNode[] = [];
-  for (let b = 0; b < total; b++) if (b % labelEvery === 0) nums.push(<span key={b} className="song-rn" style={{ left: b * zoom + 3 }}>{b + 1}</span>);
+  const lastBar = Math.max(total, Math.ceil(viewW / zoom)); // §37 画到 session 长度 与 可视宽度 的较大者 → 标尺数字铺满整条
+  for (let b = 0; b < lastBar; b++) if (b % labelEvery === 0) nums.push(<span key={b} className="song-rn" style={{ left: b * zoom + 3 }}>{b + 1}</span>);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
-      <div ref={scrollRef} className="lane-scroll" style={{ overflowX: 'auto', overflowY: 'hidden', minWidth: 0, scrollbarWidth: 'none', paddingBottom: 2 }}>
-        <div className="song-content" style={{ position: 'relative', width: 'max-content', minWidth: '100%' }}>
-          <div className="song-ruler" style={{ width: W, backgroundImage: `repeating-linear-gradient(90deg, rgba(236,233,227,.08) 0 1px, transparent 1px ${zoom}px)` }} onPointerMove={onRulerMove} onPointerLeave={onRulerLeave} onClick={(e) => onSeekBar(barAtX(e.clientX))}>
-            {selColor && <div className="song-rsel" style={{ left: selLeft, width: selW, background: `color-mix(in srgb, ${selColor} 30%, transparent)` }} aria-hidden="true" />}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, height: '100%' }}>
+      <div ref={scrollRef} className="lane-scroll" style={{ overflowX: 'auto', overflowY: 'auto', minWidth: 0, scrollbarWidth: 'none', flex: 1, minHeight: 0 }}>
+        <div className="song-content" style={{ position: 'relative', width: 'max-content', minWidth: '100%', backgroundImage: gridEvery > 0 ? `repeating-linear-gradient(90deg, rgba(236,233,227,.08) 0 1px, transparent 1px ${gridEvery * zoom}px, rgba(236,233,227,.025) ${gridEvery * zoom}px ${gridEvery * zoom + 1}px, transparent ${gridEvery * zoom + 1}px ${gridEvery * zoom * 2}px)` : undefined }}>{/* §37 全高 bar 网格:两边通、一深一浅交替(深.08@0 / 浅.025@1单位,周期2单位) */}
+          <div className="song-ruler" style={{ width: W, minWidth: '100%', backgroundImage: gridEvery > 0 ? `repeating-linear-gradient(90deg, rgba(236,233,227,.07) 0 1px, transparent 1px ${gridEvery * zoom}px, rgba(236,233,227,.022) ${gridEvery * zoom}px ${gridEvery * zoom + 1}px, transparent ${gridEvery * zoom + 1}px ${gridEvery * zoom * 2}px)` : undefined }} onPointerMove={onRulerMove} onPointerLeave={onRulerLeave} onClick={(e) => onSeekBar(barAtX(e.clientX, !e.altKey))}>
             {nums}
           </div>
           {children}
-          {[...cum, total].map((b, i) => <div key={'d' + i} className="song-div" style={{ left: b * zoom }} aria-hidden="true" />)}{/* 每个块边界(含首 0 / 末 total)画一条;落在精确 B 处与标尺对齐 */}
           <div ref={guideRef} className="song-guide" style={{ display: 'none' }} aria-hidden="true" />
-          <SongPlayhead engine={engine} playing={playing} px={zoom} blockStartBars={cum[playingIdx] ?? 0} blockTransportStart={blockTransportStart} />
+          <SongPlayhead engine={engine} playing={playing} px={zoom} blockStartBars={0} loopBars={total} />{/* §39 走带单调递增 → 按总长取模回绕(非循环时 pos≤total,取模恒等) */}
         </div>
       </div>
-      {thumb.show && <div className="we-scroll" onPointerDown={thumbDown}><div className="we-thumb" style={{ left: thumb.left + '%', width: thumb.width + '%' }} /></div>}
+      {thumb.show && <div className="we-scroll song-hscroll" onPointerDown={thumbDown}><div className="we-thumb" style={{ left: thumb.left + '%', width: thumb.width + '%' }} /></div>}
     </div>
   );
 }

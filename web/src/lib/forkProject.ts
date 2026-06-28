@@ -58,6 +58,8 @@ export async function forkExampleProject(exampleId: string, userId: string): Pro
           gridPrefs: json(example.gridPrefs),
           fx: json(example.fx),
           loopSong: example.loopSong,
+          songLayoutVersion: example.songLayoutVersion,
+          songLanes: json(example.songLanes), // §37 命名 track 随母版克隆
           isExample: false,
           forkedFromExampleId: exampleId,
         },
@@ -95,13 +97,17 @@ export async function forkExampleProject(exampleId: string, userId: string): Pro
       }
       const mapSound = (old: string | null): string | null => (old ? soundMap.get(old) ?? null : null);
 
-      // 3c) 克隆 Session 树(嵌套 create 自动生成新 id + 接好 FK)。
+      // 3c) 克隆 Session 树(嵌套 create 自动生成新 id + 接好 FK)。§37:存 老→新 id 映射,anchorId 二遍重映射(建时别的 session 可能还没生成)。
+      const sessIdMap = new Map<string, string>();
       for (const s of sessions) {
-        await tx.studioSession.create({
+        const created = await tx.studioSession.create({
           data: {
             projectId: newProjectId,
             name: s.name,
             index: s.index,
+            songLane: s.songLane,
+            songStartBar: s.songStartBar,
+            songOffsetBar: s.songOffsetBar,
             repeats: s.repeats,
             color: s.color,
             instruments: {
@@ -147,7 +153,15 @@ export async function forkExampleProject(exampleId: string, userId: string): Pro
               })),
             },
           },
+          select: { id: true },
         });
+        sessIdMap.set(s.id, created.id);
+      }
+      // §37 二遍:sub 的 songAnchorId 重映射到新 session id(锚失效则留 null → resnap 当孤儿,不崩)。
+      for (const s of sessions) {
+        if (!s.songAnchorId) continue;
+        const newId = sessIdMap.get(s.id), newAnchor = sessIdMap.get(s.songAnchorId);
+        if (newId && newAnchor) await tx.studioSession.update({ where: { id: newId }, data: { songAnchorId: newAnchor } });
       }
 
       // 3d) 克隆 PadClip(老 loop 机布局;sourceSoundId 走映射,assetId/warp 沿用)。
