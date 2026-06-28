@@ -139,6 +139,7 @@ async function main() {
         clips: i.clips.map((c) => ({
           soundId: c.soundId, assetId: c.assetId, startSample: c.startSample, endSample: c.endSample,
           bars: c.bars, timeMul: c.timeMul, semitones: c.semitones,
+          warpPts: c.warpPts ?? null,
           fadeOutBars: c.fadeOutBars, fadeSilenceBars: c.fadeSilenceBars,
           gainDb: c.gainDb, pan: c.pan, eqLowDb: c.eqLowDb, eqMidDb: c.eqMidDb, eqHighDb: c.eqHighDb,
           startStep: c.startStep, orderIndex: c.orderIndex,

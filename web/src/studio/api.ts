@@ -37,6 +37,22 @@ export const api = {
     // §25 示例项目:进入示例 → 写时复制出我的副本(返回副本 id);把示例从我的列表隐藏。
     fork: (id: string): Promise<{ id: string; resumed: boolean }> => post(`/api/projects/${id}/fork`, {}),
     dismiss: (id: string): Promise<{ ok: boolean }> => post(`/api/projects/${id}/dismiss`, {}),
+    // §38 导出:下载 zip 用此 URL 直接 <a download>(GET 带 cookie 即鉴权)。
+    exportUrl: (id: string): string => `/api/projects/${id}/export`,
+    // §38 导入(覆盖):分块上传 zip。Next 截断 >10MiB 的 raw body、formData 在大文件上触发 undici 解析 bug,
+    // 故切成 8MiB 块逐个 POST(uploadId 关联、final 标记收尾),服务端拼回临时文件再解包覆盖。
+    importReplace: async (id: string, file: File): Promise<{ id: string }> => {
+      const CHUNK = 8 * 1024 * 1024;
+      const uploadId = (crypto.randomUUID?.() || String(Date.now()) + Math.random().toString(36).slice(2)).replace(/[^A-Za-z0-9-]/g, '').slice(0, 64);
+      let res: { id: string } | undefined;
+      for (let off = 0; off < file.size || off === 0; off += CHUNK) {
+        const final = off + CHUNK >= file.size;
+        const body = file.slice(off, off + CHUNK);
+        res = await fetch(`/api/projects/${id}/import?uploadId=${uploadId}&final=${final ? 1 : 0}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body }).then(J);
+        if (final) break;
+      }
+      return res as { id: string };
+    },
   },
   gens: {
     list: (projectId: string): Promise<ApiGen[]> => fetch(`/api/gens?projectId=${projectId}`).then(J),

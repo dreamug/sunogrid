@@ -128,6 +128,7 @@ async function main() {
                   soundId: mapSound(c.soundId), assetId: mapAsset(c.assetId),
                   startSample: c.startSample, endSample: c.endSample, bars: c.bars,
                   timeMul: c.timeMul, semitones: c.semitones,
+                  warpPts: J(c.warpPts),
                   fadeOutBars: c.fadeOutBars, fadeSilenceBars: c.fadeSilenceBars,
                   gainDb: c.gainDb, pan: c.pan, eqLowDb: c.eqLowDb, eqMidDb: c.eqMidDb, eqHighDb: c.eqHighDb,
                   startStep: c.startStep, orderIndex: c.orderIndex,

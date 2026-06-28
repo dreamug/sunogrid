@@ -78,6 +78,36 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
     try { await api.projects.update(p.id, { isExample: next }); } catch { reload(); }
   };
 
+  // §38 导出:下载自包含 zip(GET 带 cookie 鉴权,直接 anchor download)。
+  const exportProject = (p: ApiProject) => {
+    const a = document.createElement('a');
+    a.href = api.projects.exportUrl(p.id);
+    a.download = '';
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+
+  // §38 导入(覆盖):点菜单 → 选 zip → 确认警告 → 整个替换该项目。importTarget 记住覆盖的是哪个项目。
+  const importTarget = useRef<ApiProject | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const startImport = (p: ApiProject) => { importTarget.current = p; fileRef.current?.click(); };
+  const onImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // 允许重选同名文件
+    const p = importTarget.current;
+    importTarget.current = null;
+    if (!file || !p) return;
+    const ok = await askConfirm({
+      title: `Replace "${p.name}" entirely?`,
+      message: 'Everything in this project — sessions, instruments, and its sounds — will be replaced by the imported file. This cannot be undone.',
+      confirmLabel: 'Replace', danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try { await api.projects.importReplace(p.id, file); await reload(); }
+    catch (err) { await askConfirm({ title: 'Import failed', message: String((err as Error)?.message || err), confirmLabel: 'OK' }); }
+    finally { setBusy(false); }
+  };
+
   const logout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     router.replace('/login');
@@ -111,7 +141,6 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
             const readOnlyExample = p.isExample && !p.owned;
             const publishedMaster = isSuperAdmin && p.owned && p.isExample;
             const isExampleCard = readOnlyExample || publishedMaster;
-            const adminOwned = isSuperAdmin && p.owned; // 站长在自己项目上有 ⋯ 菜单(发布/取消 + 删除)
             const menuOpen = menuFor === p.id;
             return (
               <div key={p.id} className={isExampleCard ? 'proj is-example' : 'proj'} onClick={() => open(p)}>
@@ -145,8 +174,8 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
                   </div>
                 )}
 
-                {/* 控制:站长拥有的项目 → ⋯ 菜单(发布/取消 + 删除);其余 → 单按钮(删除 / 从列表移除) */}
-                {adminOwned ? (
+                {/* 控制:自己拥有的项目 → ⋯ 菜单(导出/导入 + 站长发布 + 删除);只读示例 → 单按钮(从列表移除) */}
+                {p.owned ? (
                   <div className="proj-menu-wrap" onClick={(e) => e.stopPropagation()}>
                     <button
                       className={menuOpen ? 'proj-act open' : 'proj-act'}
@@ -162,12 +191,27 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
                     </button>
                     {menuOpen && (
                       <div className="proj-menu" role="menu">
-                        <button role="menuitem" className="mi feat" onClick={() => { setMenuFor(null); toggleExample(p); }}>
-                          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                            <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" />
+                        <button role="menuitem" className="mi" onClick={() => { setMenuFor(null); exportProject(p); }}>
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" />
                           </svg>
-                          {p.isExample ? 'Unpublish example' : 'Publish as example'}
+                          Export project
                         </button>
+                        <button role="menuitem" className="mi" onClick={() => { setMenuFor(null); startImport(p); }}>
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 9l5-5 5 5" /><path d="M12 4v12" />
+                          </svg>
+                          Import (replace)…
+                        </button>
+                        {isSuperAdmin && (<>
+                          <div className="mi-div" />
+                          <button role="menuitem" className="mi feat" onClick={() => { setMenuFor(null); toggleExample(p); }}>
+                            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                              <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" />
+                            </svg>
+                            {p.isExample ? 'Unpublish example' : 'Publish as example'}
+                          </button>
+                        </>)}
                         <div className="mi-div" />
                         <button role="menuitem" className="mi danger" onClick={() => { setMenuFor(null); remove(p); }}>
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -201,6 +245,8 @@ export function Workbench({ username, isSuperAdmin = false }: { username: string
         </div>
       )}
 
+      {/* §38 隐藏文件选择器:菜单点 Import 触发,选 zip 后走 onImportFile 确认+覆盖 */}
+      <input ref={fileRef} type="file" accept=".zip,application/zip" style={{ display: 'none' }} onChange={onImportFile} />
       {menuFor && <div className="proj-menu-backdrop" onClick={() => setMenuFor(null)} />}
       {confirmState && <ConfirmDialog {...confirmState} onConfirm={() => { confirmState.resolve(true); setConfirmState(null); }} onCancel={() => { confirmState.resolve(false); setConfirmState(null); }} />}
     </main>
