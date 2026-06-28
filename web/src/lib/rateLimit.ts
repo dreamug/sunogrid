@@ -28,9 +28,14 @@ export function rateLimitReset(key: string): void {
   buckets.delete(key);
 }
 
-/** 取客户端 IP:优先反代设的 X-Forwarded-For(见 deploy/nginx.conf.example)。 */
+/** 取客户端 IP。
+ * ⚠ 安全:绝不能取 X-Forwarded-For 的**第一段** —— 那段是客户端可伪造的,逐请求换值即可绕过所有限流。
+ * 反代(deploy/nginx.conf.example)用 `X-Real-IP $remote_addr` 设了可信真实 IP,优先用它;
+ * 退而用 XFF 时取**最后一段**(可信反代用 $proxy_add_x_forwarded_for 追加在末尾的 remote_addr)。 */
 export function clientIp(req: Request): string {
+  const real = req.headers.get('x-real-ip');
+  if (real) return real.trim();
   const xff = req.headers.get('x-forwarded-for');
-  if (xff) return xff.split(',')[0].trim();
-  return req.headers.get('x-real-ip') ?? 'unknown';
+  if (xff) { const parts = xff.split(',').map((s) => s.trim()).filter(Boolean); if (parts.length) return parts[parts.length - 1]; }
+  return 'unknown';
 }

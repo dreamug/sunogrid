@@ -2,8 +2,14 @@
 // 签名 = sha(assetId|start|end|bars|semitones|masterBpm),客户端算好传上来。
 import { db } from '@/lib/db';
 import { base64ToBuffer, putAudioAsset } from '@/lib/storage';
+import { getCurrentUser, unauthorized } from '@/lib/auth';
+
+// b64 长度上限(~1.37x 原字节,≈60MB 原始音频):挡无授权撑盘 DoS。
+const MAX_B64 = 80 * 1024 * 1024;
 
 export async function GET(req: Request) {
+  const user = await getCurrentUser();
+  if (!user) return unauthorized();
   const signature = new URL(req.url).searchParams.get('signature');
   if (!signature) return Response.json({ error: 'signature required' }, { status: 400 });
   const hit = await db.warpRender.findUnique({ where: { signature } });
@@ -11,8 +17,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const user = await getCurrentUser();
+  if (!user) return unauthorized();
   const b = await req.json();
   if (!b.signature || !b.audioB64) return Response.json({ error: 'signature + audioB64 required' }, { status: 400 });
+  if (typeof b.audioB64 !== 'string' || b.audioB64.length > MAX_B64) return Response.json({ error: 'audio too large' }, { status: 413 });
   const existing = await db.warpRender.findUnique({ where: { signature: b.signature } });
   if (existing) return Response.json({ assetId: existing.assetId, cdn: `/api/cdn/${existing.assetId}` });
   const asset = await putAudioAsset(base64ToBuffer(b.audioB64), { kind: 'warped', contentType: b.contentType || 'audio/wav' });

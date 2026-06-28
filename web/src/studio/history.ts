@@ -1,3 +1,7 @@
+// ⚠ 维护陷阱:本模块当前**未被 StudioApp 引用**(只有 history.test.ts 用)。线上撤销栈是 StudioApp 内联自实现的
+//   past/future/snapshot/applyEntry(口径/上限均在那边,实际上限 49 而非这里的 MAX_HISTORY=200)。改这里**不会**改变线上 undo 行为;
+//   要动撤销逻辑请改 StudioApp。保留此模块是因其纯逻辑 + 有测,作为未来把 undo 抽离的参考实现。
+//
 // 撤销/重做内核 —— 纯逻辑、无依赖、框架无关(可直接 `node history.ts` 跑测)。
 // 设计:ProjectDoc 是「真相」,DB/引擎是它的投影。所有编排变更走 applyDoc(label, recipe) →
 // 算出新 doc → reconcile(before, after) 让 DB/引擎追上。undo/redo 只是在 past/future 间

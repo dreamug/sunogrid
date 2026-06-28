@@ -676,8 +676,11 @@ export class StudioEngine {
     const tid = setTimeout(() => {
       this.disposeTimers.delete(tid);
       this.auditionFading.delete(old);
+      try { old.dispose(); } catch { /* */ } // 灭旧 player 永远安全(幂等)
+      // ⚠ 只有当 np 仍是当前预览时才改相位锚:期间若起了别的预览(np 已被换走/灭掉),
+      //   这条迟到的翻转定时器若仍写 auditionStart/Dur,会把新预览的相位拽乱(孤儿翻转串台)。
+      if (this.auditionPlayer !== np) return;
       this.auditionStart = boundary; this.auditionDur = buffer.duration; // 边界后:播放线相位参考切到新 loop
-      try { old.dispose(); } catch { /* */ }
     }, flipMs + XF * 1000 + 60);
     this.disposeTimers.add(tid);
   }

@@ -111,7 +111,7 @@ async function warpClipPiecewise(req: WarpRequest, ctxv: { bars: number; targetS
   const fr = (warpFracs ?? []).slice().sort((a, b) => a.beatFrac - b.beatFrac);
   const cps = [{ src: 0, out: 0 }, ...fr.map((f) => ({ src: Math.round(f.srcFrac * sliceLen), out: Math.round(f.beatFrac * targetSamples) })), { src: sliceLen, out: targetSamples }];
   const outLens = cps.slice(0, -1).map((a, i) => Math.max(1, cps[i + 1].out - a.out));
-  const X = Math.min(Math.round(0.006 * sampleRate), ...outLens.map((l) => Math.floor(l / 3))); // 交叉淡化长度
+  const X = Math.max(1, Math.min(Math.round(0.006 * sampleRate), ...outLens.map((l) => Math.floor(l / 3)))); // 交叉淡化长度;至少 1 样本,否则极短段(outLen<3)X=0 → 缝处无淡化爆音
 
   // 每段渲到 outLen+X(多出的 X 尾用于和下一段头叠混;末段的 X 尾 wrap 回叠首段头 = loop 缝)。
   const parts: Float32Array[][] = [];

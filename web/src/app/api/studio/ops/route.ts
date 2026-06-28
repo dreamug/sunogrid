@@ -21,7 +21,10 @@ function clipData(row: Partial<NClip>, ownedSounds: Set<string>): Record<string,
   const d = pick(row as NClip, CLIP_COLS);
   if ('soundId' in d) {
     const sid = d.soundId as string;
-    d.soundId = sid && ownedSounds.has(sid) ? sid : null;
+    const ok = sid && ownedSounds.has(sid);
+    // 非空但不属于本用户的 soundId 被归一成 null = warp 链丢失。空串归 null 是正常清空,不告警;非空被丢必须留痕(否则静默数据丢失)。
+    if (sid && !ok) console.warn(`[studio/ops] clip.upd soundId ${sid} 不在用户素材库,已归 null(可能是基准失配/竞态)`);
+    d.soundId = ok ? sid : null;
   }
   if ('warpPts' in d) d.warpPts = d.warpPts == null ? Prisma.DbNull : (d.warpPts as object); // §36 可空 Json:null→DbNull(同 xyAuto)
   return d;
@@ -89,9 +92,13 @@ export async function POST(req: Request) {
             await tx.studioInstrument.create({ data: { id: op.row.id, ...instData(op.row) } as never });
             liveInstruments.add(op.row.id);
             break;
-          case 'inst.upd':
-            await tx.studioInstrument.updateMany({ where: { id: op.id, session: { projectId } }, data: instData(op.fields) });
+          case 'inst.upd': {
+            const d = instData(op.fields);
+            // §安全:重挂(改 sessionId)的目标 session 必须在本项目内,否则拒绝 —— 否则可把自己的乐器塞进别人的项目(IDOR)。
+            if ('sessionId' in d && !liveSessions.has(d.sessionId as string)) { skipped.push(op); break; }
+            await tx.studioInstrument.updateMany({ where: { id: op.id, session: { projectId } }, data: d });
             break;
+          }
           case 'inst.del':
             await tx.studioInstrument.deleteMany({ where: { id: op.id, session: { projectId } } });
             liveInstruments.delete(op.id);
@@ -100,9 +107,13 @@ export async function POST(req: Request) {
             if (!liveInstruments.has(op.row.instrumentId)) { skipped.push(op); break; } // 父乐器不在本项目 → 拒绝
             await tx.clip.create({ data: { id: op.row.id, ...clipData(op.row, ownedSounds) } as never });
             break;
-          case 'clip.upd':
-            await tx.clip.updateMany({ where: { id: op.id, instrument: { session: { projectId } } }, data: clipData(op.fields, ownedSounds) });
+          case 'clip.upd': {
+            const d = clipData(op.fields, ownedSounds);
+            // §安全:重挂(改 instrumentId)的目标乐器必须在本项目内,否则拒绝(同 inst.upd 的 IDOR 防护)。
+            if ('instrumentId' in d && !liveInstruments.has(d.instrumentId as string)) { skipped.push(op); break; }
+            await tx.clip.updateMany({ where: { id: op.id, instrument: { session: { projectId } } }, data: d });
             break;
+          }
           case 'clip.del':
             await tx.clip.deleteMany({ where: { id: op.id, instrument: { session: { projectId } } } });
             break;
@@ -110,8 +121,8 @@ export async function POST(req: Request) {
       }
     });
   } catch (e) {
-    console.error('[studio/ops] apply failed:', e); // 全文落服务端日志(响应里截断不便排查)
-    return Response.json({ error: e instanceof Error ? e.message : 'apply failed' }, { status: 500 });
+    console.error('[studio/ops] apply failed:', e); // 全文落服务端日志(细节不回客户端,避免泄漏 schema/列名)
+    return Response.json({ error: 'apply failed' }, { status: 500 });
   }
   // 静默丢弃过 add(孤儿父)→ 这是 bug,不是正常路径。打日志 + 据实回报 skipped,让客户端别再当"已保存"。
   if (skipped.length) console.warn(`[studio/ops] 丢弃 ${skipped.length} 条孤儿 add(父 session/instrument 不在 DB):`, skipped.map((o) => o.t));

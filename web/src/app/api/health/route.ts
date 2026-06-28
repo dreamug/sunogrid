@@ -11,6 +11,7 @@ export async function GET() {
     ]);
     return Response.json({ ok: true, counts: { projects, sounds, assets, gens } });
   } catch (e) {
-    return Response.json({ ok: false, error: String((e as Error).message || e) }, { status: 500 });
+    console.error('[health]', e); // 错误细节落日志,不回客户端
+    return Response.json({ ok: false, error: 'db unavailable' }, { status: 500 });
   }
 }

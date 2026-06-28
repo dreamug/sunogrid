@@ -124,6 +124,7 @@ export function removePoint(pts: WarpPoint[] | undefined, startSample: number, e
 export function movePointBeat(pts: WarpPoint[] | undefined, startSample: number, endSample: number, totalBeats: number, index: number, newBeat: number): WarpPoint[] {
   const cur = normalizeWarpPts(pts, startSample, endSample, totalBeats);
   if (index < 0 || index >= cur.length) return cur;
+  if (!Number.isFinite(newBeat)) return cur; // ⚠ NaN/Infinity 会被 clamp 成 NaN → normalize 的 finite 过滤把该点丢弃 = 静默删 marker;原样返回当 no-op
   const lo = (index > 0 ? cur[index - 1].beat : 0) + MIN_BEAT_GAP;
   const hi = (index < cur.length - 1 ? cur[index + 1].beat : totalBeats) - MIN_BEAT_GAP;
   const beat = Math.min(hi, Math.max(lo, newBeat));

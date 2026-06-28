@@ -362,6 +362,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const pendingSave = useRef(false); // 保存期间又有改动 → 存完再存一次
   const synced = useRef<Snapshot>({ sessions: {}, instruments: {}, clips: {} }); // 上次已落库的规范化快照,diff 的基准
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null); // 失败退避重试
+  const retryCount = useRef(0); // 连续重试次数:可重试错误(网络/5xx/skipped)退避递增并设上限,挡无限 retry storm
   const dragOK = useRef(true);
   const gainDragged = useRef(false); // 拖 gain 线刚结束 → 吞掉随之而来的 click(否则冒泡到卡片 onClick 误触 previewInst)
   const soloRef = useRef<Set<string>>(new Set()); soloRef.current = soloIds; // §18 独奏集 authority(toggle/clear 读最新值,避免闭包旧值)
@@ -1345,15 +1346,22 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     api.projects.update(projectId, { masterBpm: next }).catch(() => {});  // §15:Project 列乐观持久化
     const sess = sessionsRef.current[sessionIdx];
     const insts = sess ? resolveInstruments(sess) : [];
+    // ⚠ Song 模式下别块 voice 也常驻引擎(预载):换速若只认 viewed 会话,别块仍是旧 warp 而 transport 已翻速 → 漂移到被切换才修。
+    //   故解析口径在 Song 模式扩到所有会话的乐器(播放时让 retempo 回调能渲到别块;停时重渲所有常驻 voice)。
+    const lookupInsts = playModeRef.current === 'song' ? sessionsRef.current.flatMap((s) => resolveInstruments(s)) : insts;
+    const instById = new Map(lookupInsts.map((i) => [i.id, i]));
     if (e.isPlaying()) {
       // 走带在跑:协调到下一小节边界无缝换速(§6 —— transport 翻速 + 各乐器同边界保相位换 buffer;未渲完者 playbackRate 顶速过渡,就绪即换)。
-      e.retempoPlaying(next, (id) => { const inst = insts.find((i) => i.id === id); return inst ? buildBuffer(inst, next, nc.soundsById) : Promise.resolve(null); });
+      e.retempoPlaying(next, (id) => { const inst = instById.get(id); return inst ? buildBuffer(inst, next, nc.soundsById) : Promise.resolve(null); });
       setStatus(`Switched to ${next} BPM`);
     } else {
-      // 停时:transport 直接跟随 + 逐乐器就地换 buffer(无声可断)。
+      // 停时:transport 直接跟随 + 逐乐器就地换 buffer(无声可断)。viewed 会话 + 所有常驻 voice 都重渲。
       e.setBpm(next);
       setStatus(`Master BPM → ${next} · re-rendering instruments…`);
-      Promise.all(insts.map((inst) => loadInstrumentToEngine(inst, true).catch(() => {}))).then(() => { setStatus(`Switched to ${next} BPM`); setTick((t) => t + 1); });
+      const toRender = playModeRef.current === 'song'
+        ? [...new Map([...insts, ...lookupInsts.filter((i) => e.hasVoice(i.id))].map((i) => [i.id, i])).values()]
+        : insts;
+      Promise.all(toRender.map((inst) => loadInstrumentToEngine(inst, true).catch(() => {}))).then(() => { setStatus(`Switched to ${next} BPM`); setTick((t) => t + 1); });
     }
     setTick((t) => t + 1);
   };
@@ -1758,8 +1766,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   // 自动保存(§15.C:没有 Save —— 改即存,字段级细粒度 op)。
   // 当前树 vs synced 快照做 diff → 最小 op 列表 → POST /api/studio/ops;成功后 synced=target。
   // 保存锁串行化;保存期间又有改动则存完再存一次;失败退避重试。
-  const flushOps = useCallback(async () => {
+  const flushOps = useCallback(async (fromRetry = false) => {
     if (saving.current) { pendingSave.current = true; return; }
+    if (!fromRetry) retryCount.current = 0; // 新的(非重试)flush = 用户又改了 → 重置退避计数,outage 恢复后能重新自动重试
     saving.current = true;
     do {
       pendingSave.current = false;
@@ -1769,22 +1778,42 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       setSync('saving');
       try {
         const r = await fetch('/api/studio/ops', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId, ops }) });
-        if (!r.ok) { const body = await r.text().catch(() => ''); throw new Error(`HTTP ${r.status}${body ? ` · ${body.slice(0, 300)}` : ''}`); }
+        if (!r.ok) {
+          const body = await r.text().catch(() => '');
+          // 错误是否值得重试:网络层(下面 catch 里没 status 的)、429、5xx = 瞬态可重试;其余 4xx(400 坏 op/403/404)= 永久,重试也是同样的毒 op,只会 storm。
+          const retryable = r.status === 429 || r.status >= 500;
+          const e = new Error(`HTTP ${r.status}${body ? ` · ${body.slice(0, 300)}` : ''}`) as Error & { retryable?: boolean };
+          e.retryable = retryable;
+          throw e;
+        }
         const res = await r.json().catch(() => null);
         // 后端据实回报丢弃数:若 skipped>0,说明有 op 的父 session/instrument 不在库(基准失配)——
-        // 绝不能当成功推进基准,否则又变回"显示 Saved 实则没存"。当失败处理,基准不动、下次带 sess.add 重发。
-        if (res && res.skipped) throw new Error(`后端丢弃了 ${res.skipped} 条改动(父 session/instrument 不在库)`);
+        // 绝不能当成功推进基准,否则又变回"显示 Saved 实则没存"。当失败处理,基准不动、下次带 sess.add 重发(可重试)。
+        if (res && res.skipped) { const e = new Error(`后端丢弃了 ${res.skipped} 条改动(父 session/instrument 不在库)`) as Error & { retryable?: boolean }; e.retryable = true; throw e; }
         synced.current = target; // 这批已落库,推进基准
+        retryCount.current = 0;
         if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null; }
         setSync('saved'); setSaveErr(null);
       } catch (err) {
-        // 关键:别再静默吞掉失败。后端 500 的真实原因(如 Unknown column)打到 console,并经 saveErr 弹横幅 ——
-        // 否则一条坏 op 会让整工程的保存永久卡死(基准不前进、每 3s 重试同一批),用户毫不知情、退出即丢全部 pad。
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error('[studio] 保存失败,改动仍只在内存里(每 3s 重试同一批 ops):', msg, ops);
+        // 关键:别再静默吞掉失败。真实原因打到 console,并经 saveErr 弹横幅。
+        // ⚠ 但绝不能无脑每 3s 重试同一批:永久错误(400 坏 op / Prisma Unknown arg 这类 schema 失配)重试一万次还是同样的毒 op ——
+        //   只会无限 storm。故区分可重试(网络/429/5xx/skipped,带退避 + 次数上限)与永久(其余 4xx,直接停手只留横幅)。
+        const e = err as Error & { retryable?: boolean };
+        const isNetwork = !(err instanceof Error) || e.retryable === undefined; // fetch reject(断网/CORS)= 无 status,按瞬态处理
+        const retryable = isNetwork || e.retryable === true;
+        const msg = e instanceof Error ? e.message : String(err);
         setSync('error'); setSaveErr(msg);
         saving.current = false;
-        if (!retryTimer.current) retryTimer.current = setTimeout(() => { retryTimer.current = null; flushOps(); }, 3000); // 退避重试(基准未推进 → 下次重算同 diff)
+        const MAX_RETRY = 8;
+        if (retryable && retryCount.current < MAX_RETRY) {
+          retryCount.current += 1;
+          const delay = Math.min(30_000, 3000 * retryCount.current); // 线性退避封顶 30s
+          console.error(`[studio] 保存失败(可重试 ${retryCount.current}/${MAX_RETRY},${delay}ms 后重试):`, msg, ops);
+          if (!retryTimer.current) retryTimer.current = setTimeout(() => { retryTimer.current = null; flushOps(true); }, delay);
+        } else {
+          // 永久错误,或重试次数耗尽:停手。基准不前进(改动仍在内存),横幅长亮提示用户——别再 storm。
+          console.error(`[studio] 保存失败,已停止重试(${retryable ? '次数耗尽' : '永久错误'}),改动仍只在内存里:`, msg, ops);
+        }
         return;
       }
     } while (pendingSave.current);

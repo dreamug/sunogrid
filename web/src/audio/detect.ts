@@ -16,6 +16,7 @@ function tempoPrior(bpm: number): number {
 
 /** 估速:novelty 包络宽域自相关找节拍周期 + 先验加权选峰 + 抛物线插值 + 八度归一到 [70,180]。 */
 export function estimateTempo(channels: Float32Array[], sampleRate: number): TempoEstimate {
+  if (!(sampleRate > 0)) return { bpm: 120, confidence: 0 }; // 损坏解码(sampleRate 0/NaN)→ 八度归一会死循环,提前兜底
   const mono = toMono(channels);
   const nov = novelty(mono, 0, Math.min(mono.length, Math.floor(sampleRate * ANALYZE_SECONDS))); // 只看头部一个段落,长素材省算力
   if (nov.length < 16) return { bpm: 120, confidence: 0 };
@@ -47,6 +48,7 @@ export function estimateTempo(channels: Float32Array[], sampleRate: number): Tem
   const denom = y0 - 2 * y1 + y2;
   const delta = denom !== 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (y0 - y2)) / denom)) : 0;
   let bpm = (60 * fps) / (L + delta);
+  if (!(bpm > 0) || !Number.isFinite(bpm)) return { bpm: 120, confidence: 0 }; // 防 0/NaN/Inf 让八度归一死循环
   while (bpm < 70) bpm *= 2;
   while (bpm > 180) bpm /= 2;
   return { bpm: Math.round(bpm * 10) / 10, confidence: Math.round(Math.max(0, Math.min(1, best.raw)) * 100) / 100 };

@@ -15,6 +15,7 @@ export async function POST(_req: Request, { params }: P) {
     const stems = await separateSound(id);
     return Response.json({ ok: true, stems });
   } catch (e) {
-    return Response.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 502 });
+    console.error('[sounds/separate]', e); // 细节落服务端日志,不回客户端(可能含 sidecar 路径/内部状态)
+    return Response.json({ ok: false, error: 'stem separation failed' }, { status: 502 });
   }
 }

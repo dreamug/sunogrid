@@ -2,7 +2,7 @@
 // 走阿里云百炼 DashScope 的 OpenAI 兼容接口,用最便宜的 qwen 档。
 // key 只在服务端读(DASHSCOPE_API_KEY),绝不下发前端;未配置则 503(前端据此提示)。
 import { getCurrentUser, unauthorized } from '@/lib/auth';
-import { rateLimit, clientIp } from '@/lib/rateLimit';
+import { rateLimit } from '@/lib/rateLimit';
 
 const BASE = process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const MODEL = process.env.QWEN_MODEL || 'qwen-flash';
@@ -37,8 +37,8 @@ export async function POST(req: Request) {
   const apiKey = process.env.DASHSCOPE_API_KEY;
   if (!apiKey) return Response.json({ error: 'AI prompt assist is not configured' }, { status: 503 });
 
-  // 防滥用:按用户 + IP,30 次 / 分钟。
-  const rl = rateLimit(`ai-prompt:${user.id}:${clientIp(req)}`, 30, 60_000);
+  // 防滥用:按用户,30 次 / 分钟。只用 user.id 做键 —— 不掺 IP,否则同一用户换 IP 即可把额度翻倍刷成本。
+  const rl = rateLimit(`ai-prompt:${user.id}`, 30, 60_000);
   if (!rl.ok) return Response.json({ error: 'Too many requests — slow down a moment' }, { status: 429 });
 
   const b = await req.json().catch(() => ({}));

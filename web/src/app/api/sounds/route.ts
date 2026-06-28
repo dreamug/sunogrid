@@ -23,6 +23,7 @@ export async function GET(req: Request) {
       },
     },
     orderBy: { createdAt: 'desc' },
+    take: 500, // 上限:挡超大库一次性拉全表(同 gens 的 take 口径);超过则需分页
   });
   return Response.json(sounds);
 }
