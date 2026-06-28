@@ -50,6 +50,7 @@ export class StudioEngine {
   private quantize: Quantize = '1bar';                              // 启停量化粒度(顶栏 Quantize 选择器);launch/stop/audition 用 nextBoundary 读它
   private soloIds = new Set<string>();                              // §18 独奏集(隔离式+多选,瞬态);仅经 setSolo 改 + clearAll 清;UI soloRef 是 authority
   private master?: Tone.Volume; private masterClip?: Tone.WaveShaper; // 主总线:汇总(FX链+节拍器)→ 主音量(master Volume)→ 软削波天花板(memoryless)→ destination
+  private sessionGains = new Map<string, { node: Tone.Gain; last: number }>(); // §41 per-session 输出 gain(音量自动化驱动);干声经此再进 master,send 在 panner 已分叉(方案 A:只缩干声)。惰性建、跨 voice 重建稳定;clearAll/dispose 才销
   private split?: Tone.Split; private analyserL?: Tone.Analyser; private analyserR?: Tone.Analyser; // 总输出 L/R 峰值表(抽 master = post-FX/post 主音量/pre-软削波;waveform analyser,masterLevel 自算 peak)
   private peakHold: [number, number] = [0, 0];                     // 峰值表弹道状态:快攻(瞬时跳上)慢落(每帧 ×PEAK_RELEASE),masterLevel 每帧推进一次
   private clickSynth?: Tone.Synth; private clickVol?: Tone.Volume;  // 节拍器:click synth → 音量节点 → master(随主音量+限制器,但不进 FX)
@@ -112,6 +113,30 @@ export class StudioEngine {
 
   // --- 主输出:主音量(master Volume,在限制器之前) + L/R 峰值电平 ---
   setMasterVolume(db: number): void { if (this.master) this.master.volume.value = db; }
+
+  // --- §41 per-session 输出 gain(音量自动化,coordinator 逐帧驱动)---
+  /** 取(惰性建)某 session 的输出 gain 节点:Gain(1) 接 master。master 未就绪 → 返回 undefined(loadInstrument 兜底直连 master)。 */
+  private sessionGainFor(sessionId: string): Tone.Gain | undefined {
+    let g = this.sessionGains.get(sessionId);
+    if (!g) {
+      if (!this.master) return undefined;
+      g = { node: new Tone.Gain(1), last: 1 };
+      g.node.connect(this.master);
+      this.sessionGains.set(sessionId, g);
+    }
+    return g.node;
+  }
+  /** 设某 session 输出增益(线性)。immediate=起播 prime 瞬时设值;否则 20ms 斜坡(防 zipper)。EPS 去重:稳态平线不刷 AudioParam 事件流(同 §26 pushXY)。 */
+  setSessionGain(sessionId: string, linear: number, immediate = false): void {
+    this.sessionGainFor(sessionId); // 确保节点存在
+    const g = this.sessionGains.get(sessionId); if (!g) return;
+    const v = linear < 0 ? 0 : linear;
+    if (!immediate && Math.abs(v - g.last) < 1e-3) return;
+    g.last = v;
+    if (immediate) g.node.gain.value = v; else g.node.gain.rampTo(v, 0.02);
+  }
+  /** 全部 session gain 复位满音量(停走带 / 退出 Song:无自动化态 = unity)。 */
+  private resetSessionGains(): void { for (const g of this.sessionGains.values()) { g.last = 1; g.node.gain.value = 1; } }
   // L/R 峰值电平 0..1(供顶栏电平表):从 waveform analyser 取窗口峰值 peak=max|x|,做快攻(瞬时跳上)慢落
   // (每帧 ×PEAK_RELEASE)弹道,再以 [METER_FLOOR_DB,0]dBFS 线性归一。⚠ 含状态推进,约定**每帧只调一次**
   // (顶栏唯一 MasterMeter 叶子,见 live.tsx)。改 RMS→peak:鼓点瞬态不再被窗口平均抹平,表跟得动节拍。
@@ -210,8 +235,8 @@ export class StudioEngine {
    *  shelf 只吃 gain(Web Audio 的 shelf 忽略 Q,斜率固定);只有 mid peaking 用 Q(0.7=约 2 个八度宽钟形,当 tone 控不当手术刀)。每颗 0dB 时透明 → 0/0/0 不染色。 */
   private makeEq(): ShelfEq { return makeShelfEq(); } // §32:构造移到 masterChain,与离线导出共用
 
-  /** 装载/替换一件乐器的可播放 buffer + mixer 链 + 3 条 aux send。 */
-  loadInstrument(id: string, buffer: AudioBuffer, bars: number, mixer: Mixer, sends?: InstrumentSends): void {
+  /** 装载/替换一件乐器的可播放 buffer + mixer 链 + 3 条 aux send。§41:sessionId 给定 → 干声经该 session 的输出 gain(音量自动化)再进 master。 */
+  loadInstrument(id: string, buffer: AudioBuffer, bars: number, mixer: Mixer, sends?: InstrumentSends, sessionId?: string): void {
     this.clearInstrument(id);
     const player = new Tone.Player(buffer);
     player.loop = true;
@@ -221,7 +246,8 @@ export class StudioEngine {
     const eq = this.makeEq();
     const muteGain = new Tone.Gain(1); // §18 solo 遮罩(audible?1:0);在 sends 分叉前 → 静音连干声带 FX send 一起灭
     const panner = new Tone.Panner(0);
-    player.chain(eq.low, eq.mid, eq.high, muteGain, panner, this.master ?? Tone.getDestination()); // low→mid→high→muteGain→panner→master(干声,随主音量+限制器)
+    const dryDest = (sessionId ? this.sessionGainFor(sessionId) : undefined) ?? this.master ?? Tone.getDestination(); // §41 干声目的地:per-session gain(有 sessionId)→ master
+    player.chain(eq.low, eq.mid, eq.high, muteGain, panner, dryDest); // low→mid→high→muteGain→panner→[sessionGain]→master(干声,随主音量+限制器)
     // aux send(§17):post-panner 旁路进 3 个共享 fx return,各自一个量;送量 0 = 不出。
     const sendDist = new Tone.Gain(0), sendDelay = new Tone.Gain(0), sendReverb = new Tone.Gain(0);
     if (this.fx) {
@@ -411,6 +437,8 @@ export class StudioEngine {
   clearAll(): void {
     [...this.voices.keys()].forEach((id) => this.clearInstrument(id));
     this.soloIds.clear(); // §18:无 voice = 无 solo(切 session / undo 重灌时自然清掉,UI 侧也 clearSolo 保持同步)
+    for (const g of this.sessionGains.values()) { try { g.node.dispose(); } catch { /* */ } } // §41 全量重灌 → 销毁 per-session gain(惰性重建)
+    this.sessionGains.clear();
   }
   /** 只保留 ids 对应的 voice、其余全部释放。§20 Live (重)起播前剔掉被打断的换场残留:
    *  快速连切会把"没提交的目标场"预载进引擎(armed,wantOn=true,只是没到边界没出声),stopTransport 不清它们;
@@ -529,6 +557,7 @@ export class StudioEngine {
       v.state = 'off'; // 停走带=都不出声(state 只管出声);播放态保留在 wantOn,UI 仍显示激活
       v.startTime = undefined;
     });
+    this.resetSessionGains(); // §41 停走带 → 音量自动化失效,所有 session gain 回满音量(下次起播 prime/coordinator 再驱动)
   }
 
   // --- §20 会话量化换场原语(Live 切换 / Song 线性共用)---

@@ -78,7 +78,7 @@ export async function GET(req: Request) {
     const songLane = s.songLane ?? 0;
     const songStartBar = migrateSongLayout && songLane === 0 && (s.songStartBar ?? 0) === 0 && s.index > 0 ? inferredStart : (s.songStartBar ?? 0);
     const row = {
-      id: s.id, name: s.name, index: s.index, songLane, songStartBar, songAnchorId: s.songAnchorId ?? null, songOffsetBar: s.songOffsetBar ?? 0, repeats: s.repeats ?? 1, color: s.color ?? null, xyAuto: (s.xyAuto ?? null) as Session['xyAuto'], // §26 Json 列,Prisma 已反序列化为对象
+      id: s.id, name: s.name, index: s.index, songLane, songStartBar, songAnchorId: s.songAnchorId ?? null, songOffsetBar: s.songOffsetBar ?? 0, repeats: s.repeats ?? 1, color: s.color ?? null, xyAuto: (s.xyAuto ?? null) as Session['xyAuto'], volAuto: (s.volAuto ?? null) as Session['volAuto'], // §26/§41 Json 列,Prisma 已反序列化为对象
       instruments: (s.instruments as unknown as DbInstrument[]).map(instrumentFromDb),
     } satisfies Session;
     // 老项目迁移兜底:版本 0 的旧线性 Song 按 index 推导一次,随后写回并升到版本 1。

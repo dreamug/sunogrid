@@ -6,8 +6,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import Link from 'next/link';
-import type { Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, InstrumentPayload, InstrumentSends, Mixer, Quantize, SampleWarp, Session, SongLane, XYAutomation, XYAutoSet, XYProgram } from '@/contracts';
-import { activeInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionColor, sessionRepeats, sessionSongEndBar, sessionSongLane, sessionSongStartBar, sessionSongAnchor, isMainLane, pickSessionColor, backfillSessionColors, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
+import type { AutoPoint, Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, InstrumentPayload, InstrumentSends, Mixer, Quantize, SampleWarp, Session, SongLane, XYAutomation, XYAutoSet, XYProgram } from '@/contracts';
+import { activeInstruments, resolveInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionColor, sessionRepeats, sessionSongEndBar, sessionSongLane, sessionSongStartBar, sessionSongAnchor, isMainLane, pickSessionColor, backfillSessionColors, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
 import { resnapSong, mainLayout, anchorPatchAt, mainInsertIndex, moveMainTo, subDropLanding, nextFreeSubStart } from '@/studio/songLayout';
 import { normalize, diff, type Snapshot } from '@/studio/sync';
 import { StudioEngine } from '@/audio/studioEngine';
@@ -28,7 +28,7 @@ import { OutputDevice } from '@/studio/ui/OutputDevice';
 import { ExportDialog } from '@/studio/ui/ExportDialog';
 import { applySavedOutput } from '@/studio/useAudioOutputs';
 import { AutomationLane } from '@/studio/ui/AutomationLane';
-import { defaultAutomation, rescaleAuto, sampleXY, isActiveAuto, NEUTRAL, normalizeXyAuto, PROG_COLOR, PROG_LABEL, PROG_ORDER } from '@/studio/xyAutomation';
+import { defaultAutomation, rescaleAuto, sampleXY, sampleAuto, sortPoints, isActiveAuto, NEUTRAL, normalizeXyAuto, normalizeVolAuto, isActiveVol, volGain, VOL_NEUTRAL, VOL_COLOR, VOL_LABEL, PROG_COLOR, PROG_LABEL, PROG_ORDER } from '@/studio/xyAutomation';
 import type { GenView, LoopView } from '@/contracts/studioViews';
 import { api, type ApiSound } from '@/studio/api';
 import { ClipEditor } from '@/studio/ui/WarpEditor';
@@ -203,7 +203,7 @@ function songNextBoundaryAfter(sessions: Session[], bar: number): number | null 
   return next;
 }
 
-const sessionInstIds = (sessions: Session[]): string[] => sessions.flatMap((s) => s.instruments.map((i) => i.id));
+const sessionInstIds = (sessions: Session[]): string[] => sessions.flatMap((s) => resolveInstruments(s).map((i) => i.id));
 // §37 只起「激活(enabled)」乐器的 voice:Song 播放起声路径用它(停声仍用全部 sessionInstIds),否则禁用乐器也会随块进 active 被点响。
 const enabledInstIds = (sessions: Session[]): string[] => sessions.flatMap((s) => activeInstruments(s).map((i) => i.id));
 
@@ -228,6 +228,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [stageH, setStageH] = useState(0);
   const [autoAxis, setAutoAxis] = useState<'x' | 'y'>('x'); // §26 自动化 lane 当前显示轴(全局切换)
   const [autoProgram, setAutoProgram] = useState<XYProgram>('filter'); // §26.v2 当前编辑哪条效果 lane(每效果一条;顶栏 chip 切)
+  const [autoVol, setAutoVol] = useState(false); // §41 自动化选择器是否选中「音量」(一维,与 4 个 XY 效果互斥;选中 → 隐 X/Y、lane 换音量曲线)
   const xyManual = useRef<{ down: boolean; program: XYProgram; x: number; y: number }>({ down: false, program: 'filter', x: 0.5, y: 0 }); // §26.4 手动板手势 → coordinator 读(手动板不再直调引擎)
   const xyClearRef = useRef(0); // §26.4 bump=请求 coordinator 复位所有效果(清 latch/glide):关 XY 浮层 / 卸载 / undo 时触发
   // §20/§26 播放模式 + 量化换场:playMode 现 Project 列乐观持久化(上次进 Live/Song 记住);pendingIdx = 已排队、等量化边界切到的场景(目标卡呼吸);loopSong = Project 列乐观持久化。
@@ -280,6 +281,16 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [selId, setSelId] = useState<string | null>(null);
   const [selClipId, setSelClipId] = useState<string | null>(null);
   const [libSel, setLibSel] = useState<string | null>(null);
+  // 切块/还原时调和选中态:选中乐器/片若仍在「目标块」里就**保留**高亮,不在才清。
+  //   选中态绑乐器 id,不随走带无脑丢 —— 修「选中乐器一播放选中态就没」的体验。
+  //   常见路径(在块0选中→从块0起播,视图不变)下乐器仍在该块 → 选中保留;走带跨到别块、被动跟随时旧块的选中才放手。
+  //   只管乐器域的 selId/selClipId(走 resolveInstruments 接缝,与回放/导出同口径);libSel(全局库检视器选择)非块作用域,留给调用方按需各自处理。
+  //   loadSessionPure(§16 还原)与走带跟随共用本函数;走带路径另行清 libSel(回放期不留悬空库检视),还原路径不动 libSel(沿用旧口径)。
+  const reconcileSelToSession = (s: Session | undefined) => {
+    const insts = s ? resolveInstruments(s) : [];
+    setSelId((cur) => (cur && insts.some((i) => i.id === cur) ? cur : null));
+    setSelClipId((cur) => (cur && insts.some((i) => i.payload.kind === 'collage' && i.payload.clips.some((k) => k.id === cur)) ? cur : null));
+  };
   // §23 乐器 copy/paste:markedIds = shift 多选集(仅服务 copy;空 = 单选,copy 退化到 selId)。
   // clipboard = 组件级 ref(瞬态,不进 undo/不落库)——存已 detach 的深拷贝;paste 时再 cloneInstrument 一次拿新 id,故多次 paste 各自独立。同项目内有效(同/跨场景),不跨项目。
   const [markedIds, setMarkedIds] = useState<Set<string>>(() => new Set());
@@ -352,6 +363,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const synced = useRef<Snapshot>({ sessions: {}, instruments: {}, clips: {} }); // 上次已落库的规范化快照,diff 的基准
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null); // 失败退避重试
   const dragOK = useRef(true);
+  const gainDragged = useRef(false); // 拖 gain 线刚结束 → 吞掉随之而来的 click(否则冒泡到卡片 onClick 误触 previewInst)
   const soloRef = useRef<Set<string>>(new Set()); soloRef.current = soloIds; // §18 独奏集 authority(toggle/clear 读最新值,避免闭包旧值)
   const lastCollageEdit = useRef<Session | null>(null); // collage 拖移/调参后,松手重 bake 取最新一笔(绕开 sessionsRef 渲染滞后)
   const collageRebakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null); // per-片 mixer 拖动:防抖重 bake(MixerStrip 无 onEnd)
@@ -388,11 +400,12 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         //   激活(setEnabled)因 `if(!v) return` 空操作、按 play 不出声,**要刷新才好**(见 'bug' 复盘)。改为一并建 voice。
         //   建 voice 本身不漏声:下面 soundingNow/arm 闸决定 setEnabled(量化起声)还是只 setWantOn(记意图);
         //   Song 查看非播放块时落到 setWantOn,voice 留 'off' 不点响(§20 常驻口径不破,真正播到时 loadSessionAdditive 会以 clearInstrument 重灌)。
-        e.loadInstrument(inst.id, buf, instrumentBars(inst), inst.mixer, inst.sends);
+        // §41 乐器归属 session(同时给下面 soundingNow + loadInstrument 的 per-session gain 路由用)。
+        const instSession = sessionsRef.current.find((s) => s.instruments.some((i) => i.id === inst.id));
+        e.loadInstrument(inst.id, buf, instrumentBars(inst), inst.mixer, inst.sends, instSession?.id);
         // arm 且该乐器属于「正在出声的块」→ 即时量化起声;否则只记意图(setWantOn),到换场边界由 swapVoicesAt 按 wantOn 起。
         // §20:Song 钉住查看非播放块时编辑/填充/加片一件 enabled 乐器,会走 arm=true 这条全量重载 —— 若直接 setEnabled 会把
         //   非出声块的乐器凭空点响(声音泄漏)。startPlayback 的 loadSession 即便落到 setWantOn 也无碍:随后 startTransport 按 wantOn 全量起声。
-        const instSession = sessionsRef.current.find((s) => s.instruments.some((i) => i.id === inst.id));
         const soundingNow = playModeRef.current !== 'song' || (instSession ? playingSongIdsRef.current.has(instSession.id) : sessionIdxRef.current === playingIdxRef.current);
         // 取 sessionsRef 里**最新**的 enabled,而非这次异步 build 捕获时的旧 inst.enabled:bake 期间用户点了激活 →
         //   捕获值已过期,旧值会把刚点的激活回写覆盖掉(同源的次生 desync)。乐器找不到(已删)则回落捕获值。
@@ -421,18 +434,18 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     eng.current?.clearAll();
     // 各乐器**并行**warp/装载(原为逐件 await:换场要等所有 buffer 串行渲完才排边界 → 冷场叠加后常错过下一小节边界,听感=换场延迟)。
     // 单个乐器解码失败(如源文件缺失)不拖垮整场 —— 自己 catch 跳过,其余照常。
-    await Promise.all(s.instruments.map((inst) =>
+    await Promise.all(resolveInstruments(s).map((inst) =>
       loadInstrumentToEngine(inst).catch((e) => console.warn('Failed to load instrument, skipping:', inst.id, e))));
   }, [loadInstrumentToEngine]);
   // §20 并存预载:把目标场景的 voice 装进引擎但**不清当前场**(arm=false → 只记意图,到换场边界再起);Live 量化换场 + Song 块 lookahead 共用。并行装载同上。
   const loadSessionAdditive = useCallback(async (s: Session, arm = false) => {
-    await Promise.all(s.instruments.map((inst) =>
+    await Promise.all(resolveInstruments(s).map((inst) =>
       loadInstrumentToEngine(inst, false, arm).catch((e) => console.warn('Preload skip:', inst.id, e))));
   }, [loadInstrumentToEngine]);
   // §20 查看(不播放)某场景时:确保其 pad 波形有数据 —— 只解码 + 算峰值填进 peaks/lanePeaksCache,**不碰引擎**(不建 voice、不出声)。
   const ensurePeaksForView = useCallback(async (s: Session | undefined) => {
     if (!s) return;
-    for (const inst of s.instruments) {
+    for (const inst of resolveInstruments(s)) {
       try {
         if (inst.payload.kind === 'sample') {
           const cl = inst.payload.clip;
@@ -475,7 +488,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         let restored = false;
         const saved = await fetch(`/api/studio?projectId=${projectId}`).then((r) => (r.ok ? r.json() : [])).catch(() => []);
         if (Array.isArray(saved) && saved.length) {
-          sessions = normalizeSongLayout((saved as Session[]).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto) }))); // §26.v2 归一 + §37 旧线性 Song → lane0 布局
+          sessions = normalizeSongLayout((saved as Session[]).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto), volAuto: normalizeVolAuto(s.volAuto) }))); // §26.v2 归一 + §41 音量曲线归一 + §37 旧线性 Song → lane0 布局
           restored = true;
         }
         if (!alive) return;
@@ -501,7 +514,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         { const colored = backfillSessionColors(sessions); if (colored !== sessions) setSessions(colored); }
         // 后台预热其余场景的 warp/decode 缓存(只暖数据缓存,不在引擎里建 voice → 不违反 §20 常驻口径)。
         // 首切某场景时 buildBuffer 直接命中缓存 → 边界不被冷渲(网络 warpRender + signalsmith)拖过头 = 换场不延迟。best-effort,失败静默。
-        (async () => { for (let i = 1; i < sessions.length && alive; i++) for (const inst of sessions[i].instruments) { if (!alive) return; try { await buildBuffer(inst, c.bpm, c.soundsById); } catch { /* 暖缓存失败不影响播放 */ } } })();
+        (async () => { for (let i = 1; i < sessions.length && alive; i++) for (const inst of resolveInstruments(sessions[i])) { if (!alive) return; try { await buildBuffer(inst, c.bpm, c.soundsById); } catch { /* 暖缓存失败不影响播放 */ } } })();
         setStatus(restored ? 'Loaded · drag a sample into an empty slot / hover a slot to add an instrument · ⌘Z · changes auto-save' : 'Empty stage · generate or pick a sample on the left, drag it into a slot = sample instrument · hover a slot to add a slice instrument · changes auto-save');
       } catch (err) { setStatus('Load failed: ' + conciseError(err)); }
     })();
@@ -592,9 +605,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     for (const id of curSounds) if (!entry.liveSounds.has(id) && trashableSounds.current.has(id)) libOps.push(api.sounds.patch(id, { trashed: true }).catch(() => {}));
     for (const id of entry.liveGens) if (!curGens.has(id)) libOps.push(api.gens.patch(id, { trashed: false }).catch(() => {}));
     for (const id of curGens) if (!entry.liveGens.has(id) && trashableGens.current.has(id)) libOps.push(api.gens.patch(id, { trashed: true }).catch(() => {}));
-    const insts = entry.sessions[idx]?.instruments ?? [];
-    setSelId((cur) => (cur && insts.some((i) => i.id === cur) ? cur : null));
-    setSelClipId((cur) => (cur && insts.some((i) => i.payload.kind === 'collage' && i.payload.clips.some((k) => k.id === cur)) ? cur : null));
+    reconcileSelToSession(entry.sessions[idx]); // 选中乐器/片存活校验(走接缝;libSel 还原路径不动 —— 沿用旧口径)
     reconcile(entry.sessions, idx);
     // 库有增删 → 等服务端 trashed 落定后重载库,再 reconcile 一次(此时恢复的声音才回到 soundsById,引用它的乐器才能重建出声)。
     if (libOps.length) Promise.all(libOps).then(() => reloadLibrary()).then(() => reconcile(sessionsRef.current, idx)).catch(() => {});
@@ -718,8 +729,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     setPendingIdx(idx); clearSolo();
     loadSessionAdditive(target, false).then(() => {
       if (!eng.current || swapGen.current !== gen) return; // 已被更晚一次换场取代(连点)→ 丢弃,别再排边界
-      const stopIds = cur.instruments.map((i) => i.id);
-      const startIds = target.instruments.map((i) => i.id);
+      const stopIds = resolveInstruments(cur).map((i) => i.id);
+      const startIds = resolveInstruments(target).map((i) => i.id);
       liveSwapSchedId.current = e.swapAtBoundary((time) => {
         liveSwapSchedId.current = null;
         e.swapAndRelease(stopIds, startIds, time); // 边界:停旧起新(保相位)+ 过了边界再释放旧场(§14/§20);同步释放会切早旧场尾音=换场静音
@@ -740,6 +751,12 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       const a = owner?.xyAuto?.[program];
       if (a && a.x.length && a.y.length) { const v = sampleXY(program, a, localBar); e.xySetValue(program, v.x, v.y); e.xySetActive(program, true); }
       else e.xySetActive(program, false);
+    }
+    // §41 音量自动化 prime:每个 active 块按各自起始 bar 瞬时设 gain,免第一圈从 unity 跳到自动值的台阶(immediate=true 不走斜坡)。
+    for (const s of active) {
+      const lb = Math.max(0, atBar - sessionSongStartBar(s));
+      const v = (s.volAuto && s.volAuto.length) ? sampleAuto(sortPoints(s.volAuto), lb) : VOL_NEUTRAL;
+      e.setSessionGain(s.id, volGain(v), true);
     }
     if (owner?.xyAuto) await new Promise((r) => setTimeout(r, 30));
   };
@@ -762,7 +779,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       const idx = list.findIndex((s) => s.id === foreground.id);
       if (idx >= 0) { playingIdxRef.current = idx; setPlayingIdx(idx); }
       songBlockStart.current = sessionSongStartBar(foreground);
-      if (viewFollows.current && idx >= 0) { setSessionIdx(idx); setSelId(null); setSelClipId(null); setLibSel(null); }
+      if (viewFollows.current && idx >= 0) { setSessionIdx(idx); reconcileSelToSession(list[idx]); setLibSel(null); }
     }
     setTick((t) => t + 1);
   };
@@ -784,7 +801,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (reachesEnd) {
         if (!loopSongRef.current) { eng.current.stopTransport(); playingRef.current = false; setPlaying(false); setSongActiveIds(new Set()); songSchedId.current = null; setTick((t) => t + 1); return; } // 曲尾停(playingRef 即时复位,免 coordinator 多跑一帧读已停走带)
         songLapBars.current += total; // loop:进下一圈,只挪偏移、不动走带 → 续排的绝对边界落在新圈、无缝重激活
-        for (const inst of sessionsRef.current.flatMap((s) => s.instruments)) eng.current.setWantOn(inst.id, false);
+        for (const inst of sessionsRef.current.flatMap((s) => resolveInstruments(s))) eng.current.setWantOn(inst.id, false);
         applySongActiveSet(0, time);
         scheduleNextSongBoundary(0);
         return;
@@ -815,20 +832,20 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (e.isPlaying()) { e.stopTransport(); setPendingIdx(null); }
       clearSolo(); // song 不吃 solo(与旧 ▶ song 一致;retainOnly 不清 engine solo,故显式清)
       // voice 复用 + 预载:保仍在的、丢已删的、补缺的(缺的命中 buffer 缓存,loadInstrument 廉价)
-      const allInstIds = list.flatMap((s) => s.instruments.map((i) => i.id));
+      const allInstIds = list.flatMap((s) => resolveInstruments(s).map((i) => i.id));
       e.retainOnly(allInstIds);
       // ⚡ 长歌起播延迟:**只 await 起播位 active 块**的缺失 voice → 立即起声;其余块后台并行补
       //   (boundary 换场前几乎必然渲完;命中 buffer 缓存=毫秒级)。swapVoicesAt 对尚未就绪的 voice 自然跳过,
       //   极端慢载下该块那一遍静音、下一遍补上,不卡首播。
-      const activeIdSet = new Set(active.flatMap((s) => s.instruments).map((i) => i.id));
-      const missing = list.flatMap((s) => s.instruments).filter((i) => !e.hasVoice(i.id));
+      const activeIdSet = new Set(active.flatMap((s) => resolveInstruments(s)).map((i) => i.id));
+      const missing = list.flatMap((s) => resolveInstruments(s)).filter((i) => !e.hasVoice(i.id));
       await Promise.all(missing.filter((i) => activeIdSet.has(i.id)).map((inst) =>
         loadInstrumentToEngine(inst, false, false).catch((err) => console.warn('Song load skip:', inst.id, err))));
       if (eng.current !== e) return;
       const rest = missing.filter((i) => !activeIdSet.has(i.id));
       if (rest.length) void Promise.all(rest.map((inst) => loadInstrumentToEngine(inst, false, false).catch((err) => console.warn('Song bg-load skip:', inst.id, err)))); // 后台补:不阻塞起播
       // wantOn:全关 → 只起 active 块的激活乐器(§37 禁用乐器不随块进活跃)
-      for (const inst of list.flatMap((s) => s.instruments)) e.setWantOn(inst.id, false);
+      for (const inst of list.flatMap((s) => resolveInstruments(s))) e.setWantOn(inst.id, false);
       for (const inst of active.flatMap((s) => activeInstruments(s))) e.setWantOn(inst.id, true);
       // per-voice 相位 offset(秒)
       const mb = (beatsPerBar * 60) / (ctxRef.current?.bpm ?? masterBpm); // 每 bar 秒数(master 速率)
@@ -845,7 +862,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       const fg = songForeground(active);
       viewFollows.current = true; playingRef.current = true; songLapBars.current = 0; songBlockStart.current = fg ? sessionSongStartBar(fg) : 0; // §39 起播=第 0 圈;走带置 pos(下方)即落在本圈
       setSongActiveIds(new Set(active.map((s) => s.id)));
-      if (fg) { const bi = list.findIndex((s) => s.id === fg.id); if (bi >= 0) { setSessionIdx(bi); setPlayingIdx(bi); playingIdxRef.current = bi; setSelId(null); setSelClipId(null); setLibSel(null); } }
+      if (fg) { const bi = list.findIndex((s) => s.id === fg.id); if (bi >= 0) { setSessionIdx(bi); setPlayingIdx(bi); playingIdxRef.current = bi; reconcileSelToSession(list[bi]); setLibSel(null); } }
       await primeSongAutomation(active, pos); if (eng.current !== e) return;
       // 走带置 pos(小数 bar → Bars:Beats[可小数]:0)+ 各 voice 按相位 offset 起声
       const bb = Math.floor(pos);
@@ -863,7 +880,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const e = eng.current; if (!e || starting.current) return;
     if (e.auditioningId() != null) { e.stopAudition(); setTick((t) => t + 1); } // 提前关掉松散预览窗口
     const s = sessionsRef.current[sessionIdx]; if (!s) return;
-    const ids = s.instruments.map((i) => i.id);
+    const ids = resolveInstruments(s).map((i) => i.id);
     starting.current = true;
     try {
       await e.resume().catch(() => {});
@@ -952,8 +969,10 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const s = sessionsRef.current.find((x) => x.id === id);
     const oldR = s ? sessionRepeats(s) : 1;
     if (oldR === next) return; // 没变:不压空 undo、不重排调度
-    const patch: Partial<Pick<Session, 'repeats' | 'xyAuto'>> = { repeats: next };
-    if (s?.xyAuto) { const r = next / oldR, set: XYAutoSet = {}; for (const p of PROG_ORDER) { const a = s.xyAuto[p]; if (a) set[p] = rescaleAuto(a, r); } patch.xyAuto = set; } // #2 改 repeat → 每条 automation 按比例缩放点重分布
+    const patch: Partial<Pick<Session, 'repeats' | 'xyAuto' | 'volAuto'>> = { repeats: next };
+    const r = next / oldR;
+    if (s?.xyAuto) { const set: XYAutoSet = {}; for (const p of PROG_ORDER) { const a = s.xyAuto[p]; if (a) set[p] = rescaleAuto(a, r); } patch.xyAuto = set; } // #2 改 repeat → 每条 automation 按比例缩放点重分布
+    if (s?.volAuto) patch.volAuto = s.volAuto.map((pt) => ({ ...pt, bar: pt.bar * r })); // §41 音量曲线同样按比例缩放(对齐 §26 rescaleAuto;一维直接 map bar)
     mutateSessionsKeepActive(patchSession(sessionsRef.current, id, patch)); // #4 调度/ref 已在 mutateSessionsKeepActive 内按 resnap 后的派生位置重排;此前这里又用未 resnap 的 updated 覆盖 ref + 重排 = 这一拍调度跑在陈旧位置上
   };
   const setSessionColor = (id: string, color: string) => { if (sessionsRef.current.find((x) => x.id === id)?.color === color) return; mutateSessionsKeepActive(patchSession(sessionsRef.current, id, { color })); }; // 选同色不压空 undo 步
@@ -1082,6 +1101,11 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     if (auto && isActiveAuto(program, auto)) set[program] = auto; else delete set[program]; // 拉平=回未激活=移除
     setSessions(patchSession(sessionsRef.current, id, { xyAuto: Object.keys(set).length ? set : null }));
   };
+  // §41 Song 音量自动化:改 session.volAuto(一维断点)。激活=自动判定(isActiveVol:非满音量平线才存,拉回 unity=删=null)。镜像 changeXyAuto:history=false 实时不压栈,活动场景不变。
+  const changeVolAuto = (id: string, points: AutoPoint[] | null, history = false) => {
+    if (history) pushHistory();
+    setSessions(patchSession(sessionsRef.current, id, { volAuto: isActiveVol(points) ? points : null }));
+  };
 
   // §26.4 单一仲裁 coordinator:唯一驱动引擎 XY 的地方(手动板退化成只写 xyManual ref)。常驻 rAF(Live 也跑,处理手动 + 接管)。
   // per-effect 优先级 手动 > 自动化 > 旁路;松手:spring 在 springMs 内交还滑回「地面」(自动线当前值 / 无则 NEUTRAL→旁路),latch 冻结在松手值。
@@ -1129,6 +1153,17 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
           }
           if (autoOn) { const { x, y } = sampleXY(program, auto!, localBar); pushXY(e, program, x, y); e.xySetActive(program, true); st.prev = 'auto'; } // ② 自动化(平滑斜坡;起播由 prime 盖好,块边界平滑过渡不 click)
           else { e.xySetActive(program, false); st.prev = 'bypass'; st.px = NaN; } // ③ 旁路
+        }
+        // §41 音量自动化:逐**出声块**各按自己的 volAuto 驱动自己的 sessionGain(多轨同时发声各缩各的;与 XY 只驱动前景块不同)。
+        //   localBar 用每块**自己**的 songStartBar 算(§39 扣圈);无 volAuto 的块 = unity(setSessionGain EPS 去重→no-op)。停播态由 stopTransport 复位,不在此碰。
+        if (songMode) {
+          const lap = songLapBars.current, posBar = e.songPosBars();
+          for (const s of sessionsRef.current) {
+            if (!playingSongIdsRef.current.has(s.id)) continue;
+            const lb = Math.max(0, posBar - lap - sessionSongStartBar(s));
+            const v = (s.volAuto && s.volAuto.length) ? sampleAuto(sortPoints(s.volAuto), lb) : VOL_NEUTRAL;
+            e.setSessionGain(s.id, volGain(v));
+          }
         }
       }
       raf = requestAnimationFrame(tick);
@@ -1308,7 +1343,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const nc: Ctx = { ...c, bpm: next };
     ctxRef.current = nc; setCtx(nc);                                      // ctx.bpm 即新值(re-warp 读它)
     api.projects.update(projectId, { masterBpm: next }).catch(() => {});  // §15:Project 列乐观持久化
-    const insts = sessionsRef.current[sessionIdx]?.instruments ?? [];
+    const sess = sessionsRef.current[sessionIdx];
+    const insts = sess ? resolveInstruments(sess) : [];
     if (e.isPlaying()) {
       // 走带在跑:协调到下一小节边界无缝换速(§6 —— transport 翻速 + 各乐器同边界保相位换 buffer;未渲完者 playbackRate 顶速过渡,就绪即换)。
       e.retempoPlaying(next, (id) => { const inst = insts.find((i) => i.id === id); return inst ? buildBuffer(inst, next, nc.soundsById) : Promise.resolve(null); });
@@ -1974,15 +2010,19 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                 {/* §26.v3 4 选 1:切「整个 song 当前显示/编辑哪条效果 lane」。选中=该效果色,其余=灰(未选)。不负责激活(在 lane 上画线即激活)。 */}
                 <div className="song-progs" role="group" aria-label="Automation effect lane">
                   {PROG_ORDER.map((p) => {
-                    const sel = autoProgram === p;
-                    return <button key={p} className={'fx-chip' + (sel ? ' on' : '')} style={sel ? { background: PROG_COLOR[p], borderColor: PROG_COLOR[p], color: '#1c1b19' } : undefined} title={`编辑 ${PROG_LABEL[p]} automation`} onMouseDown={(ev) => ev.preventDefault()} onClick={() => setAutoProgram(p)}>{PROG_LABEL[p]}</button>;
+                    const sel = autoProgram === p && !autoVol;
+                    return <button key={p} className={'fx-chip' + (sel ? ' on' : '')} style={sel ? { background: PROG_COLOR[p], borderColor: PROG_COLOR[p], color: '#1c1b19' } : undefined} title={`编辑 ${PROG_LABEL[p]} automation`} onMouseDown={(ev) => ev.preventDefault()} onClick={() => { setAutoVol(false); setAutoProgram(p); }}>{PROG_LABEL[p]}</button>;
                   })}
+                  {/* §41 音量:第 5 档,与 4 效果互斥;选中 → 隐 X/Y、lane 换音量曲线 */}
+                  <button className={'fx-chip' + (autoVol ? ' on' : '')} style={autoVol ? { background: VOL_COLOR, borderColor: VOL_COLOR, color: '#1c1b19' } : undefined} title="编辑音量 automation" onMouseDown={(ev) => ev.preventDefault()} onClick={() => setAutoVol(true)}>{VOL_LABEL}</button>
                 </div>
                 {/* onMouseDown preventDefault:点选后不夺焦点 → 不留浏览器 focus 圈(键盘 Tab 仍可聚焦,a11y 不丢) */}
+                {!autoVol && ( /* §41 音量是一维,选中音量时不出 X/Y 轴切换 */
                 <div className="seg sm" role="group" aria-label="Automation axis (编辑用)">
                   <button className={autoAxis === 'x' ? 'on' : ''} onMouseDown={(ev) => ev.preventDefault()} onClick={() => setAutoAxis('x')}>X</button>
                   <button className={autoAxis === 'y' ? 'on' : ''} onMouseDown={(ev) => ev.preventDefault()} onClick={() => setAutoAxis('y')}>Y</button>
                 </div>
+                )}
               </>)}
               {/* §26.10 automation UI 显隐 toggle(zoom 左侧,大小同 X/Y seg)。开=显示中(高亮)。纯 UI 层,不动效果。 */}
               <button className={'song-auto-tg' + (showAutomation ? ' on' : '')} onMouseDown={(ev) => ev.preventDefault()} onClick={toggleAutomationUi} aria-pressed={showAutomation} title={showAutomation ? '隐藏 automation 界面(效果照常播)' : '显示 automation 界面'}>
@@ -2034,8 +2074,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                 <div key={'lane' + lane} className={'song-lane-bg' + (lane === 0 ? ' main' : '')} style={{ top: lane * songLaneH, height: songLaneH }} aria-hidden="true" />
               ))}
               {sessions.map((s, i) => {
-                const chips = s.instruments.slice(0, 6);
-                const more = s.instruments.length - chips.length;
+                const insts = resolveInstruments(s);
+                const chips = insts.slice(0, 6);
+                const more = insts.length - chips.length;
                 const cur = i === sessionIdx; // 选中/查看中(白描边 + 下方 pad 区显示它)
                 const playHere = playing && (playMode === 'song' ? playingSongIds.has(s.id) : cur); // 正在出声的块:Song=active id 集、Live=当前场景 → 高亮 + 播放头跟它(与「查看」解耦)
                 const n = sessionRepeats(s);
@@ -2107,6 +2148,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                 const autoSet = s.xyAuto ?? null;             // §26.v3 该 session 的全部激活效果(map 只存非平;未触碰=不存=隐含中性平直线·非激活)
                 const auto = autoSet?.[autoProgram] ?? defaultAutomation(autoProgram, bars * effReps); // §26.v3 当前显示那条;没有 → 可编辑的中性平直线(画即激活)
                 const activePrograms = autoSet ? PROG_ORDER.filter((p) => autoSet[p]) : []; // 该 clip 已激活(非平)的效果
+                const hasVol = !!(s.volAuto && s.volAuto.length); // §41 该块是否有音量曲线
+                const volPts = hasVol ? s.volAuto! : [{ bar: 0, v: VOL_NEUTRAL }, { bar: bars * effReps, v: VOL_NEUTRAL }]; // 无 → 顶端 unity 平直线(画即激活)
+                const volWrap: XYAutomation = { x: volPts, y: [] }; // 复用 AutomationLane:塞进 x 轴,onChange 回来取 .x
                 return (
                   // §37 session 块:name + repeat 数字条 +(展开时)automation 子行,三段同一边框包住=一体(§旧包裹观感)。
                   //   automation 仍是独立子元素但嵌在块内:指针手势靠它自身 onPointerDown stopPropagation 与块拖拽分离。
@@ -2132,12 +2176,16 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                         <span key={p} className="sblk-achip" title={`${PROG_LABEL[p]} automation`}
                           style={{ background: PROG_COLOR[p], borderColor: PROG_COLOR[p], color: '#1c1b19' }}>{PROG_LABEL[p][0]}</span>
                       ))}
+                      {hasVol && <span className="sblk-achip" title="音量 automation" style={{ background: VOL_COLOR, borderColor: VOL_COLOR, color: '#1c1b19' }}>{VOL_LABEL[0]}</span>}{/* §41 音量状态标识 */}
                     </div>
                     {/* 数字条(原版观感:session 色 tint + 每遍 repeat 序号 + 左下乐器数胶囊);收起 automation 时叠一层只读 ghost 曲线(淡、pointer-events:none → 拖它=移动 clip,不冲突)。 */}
                     <div className="sblk-nums">
                       {!showAutomation && activePrograms.map((p) => (
                         <AutomationLane key={'g' + p} auto={autoSet![p]!} program={p} axis="x" bars={bars} reps={effReps} px={songZoom} editable={false} onStart={() => {}} onChange={() => {}} />
                       ))}
+                      {!showAutomation && hasVol && (/* §41 收起态音量 ghost 曲线 */
+                        <AutomationLane key="gvol" auto={volWrap} program={'filter'} axis="x" color={VOL_COLOR} refV={VOL_NEUTRAL} stepAxis={false} bars={bars} reps={effReps} px={songZoom} editable={false} onStart={() => {}} onChange={() => {}} />
+                      )}
                       {Array.from({ length: effReps }, (_, k) => (<span key={'rn' + k} className="sblk-rn" style={{ left: k * bars * songZoom + 4 }}>{k + 1}</span>))}
                       {Array.from({ length: effReps - 1 }, (_, k) => (<span key={'t' + k} className="sblk-tick" style={{ left: (k + 1) * bars * songZoom }} aria-hidden="true" />))}
                     </div>
@@ -2147,7 +2195,10 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                       <div className={'sblk-auto' + (cur ? ' sblk-auto-sel' : '')} style={{ height: SONG_AUTO_H - 3, '--c': sc } as React.CSSProperties}
                         onPointerDown={(ev) => ev.stopPropagation()}>{/* ⚠ 类名别用裸 sel:撞全局 .sel{max-width:170px} */}
                         {Array.from({ length: effReps - 1 }, (_, k) => (<span key={'t' + k} className="sblk-tick" style={{ left: (k + 1) * bars * songZoom }} aria-hidden="true" />))}
-                        <AutomationLane auto={auto} program={autoProgram} axis={autoAxis} bars={bars} reps={effReps} px={songZoom} editable={cur} onStart={pushHistory} onChange={(a) => changeXyAuto(s.id, autoProgram, a)} />
+                        {autoVol
+                          ? (/* §41 音量曲线:一维,塞 x 轴、onChange 取 .x;顶端 unity 参考线 + 吸附 */
+                            <AutomationLane auto={volWrap} program={'filter'} axis="x" color={VOL_COLOR} refV={VOL_NEUTRAL} stepAxis={false} bars={bars} reps={effReps} px={songZoom} editable={cur} onStart={pushHistory} onChange={(a) => changeVolAuto(s.id, a.x)} />)
+                          : (<AutomationLane auto={auto} program={autoProgram} axis={autoAxis} bars={bars} reps={effReps} px={songZoom} editable={cur} onStart={pushHistory} onChange={(a) => changeXyAuto(s.id, autoProgram, a)} />)}
                       </div>
                     )}
                     {/* §37 右缘 resize 改 repeat(仅主轨;sub 无手柄)。 */}
@@ -2217,7 +2268,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
               const soloDimmed = soloIds.size > 0 && !isSoloed;       // §18:有别的乐器独奏中 → 本 pad 被静音 → 压暗
               return (
                 <div key={slot} draggable onMouseDownCapture={() => { dragOK.current = true; }} onDragStart={(ev) => { if (!dragOK.current) { ev.preventDefault(); return; } ev.dataTransfer.setData('application/x-inst-slot', String(slot)); ev.dataTransfer.effectAllowed = 'move'; setDragInstSlot(slot); }} style={{ position: 'relative', minHeight: 0, borderRadius: 0, borderWidth: '0 1px 1px 0', borderStyle: 'solid', borderColor: FAINT, background: over === slot ? 'var(--acc-dim)' : undefined }} {...dnd}>
-                  <div className={`clip filled ${inst.enabled ? 'st-playing' : ''}${playing && (st === 'queued' || st === 'stopping') ? (st === 'queued' ? ' st-queued' : ' st-stopping') : ''}${isSoloed ? ' solo-on' : soloDimmed ? ' solo-off' : ''}`} style={{ ...cvar(color), position: 'absolute', inset: 6, minHeight: 0, borderRadius: 'var(--r)', borderColor: isSel ? `color-mix(in srgb, ${color} 75%, #fff)` : undefined, boxShadow: isMarked && !isSel ? `inset 0 0 0 2px color-mix(in srgb, ${color} 70%, #fff)` : undefined }} onClick={(ev) => clickInst(inst.id, ev.shiftKey)}>
+                  <div className={`clip filled ${inst.enabled ? 'st-playing' : ''}${playing && (st === 'queued' || st === 'stopping') ? (st === 'queued' ? ' st-queued' : ' st-stopping') : ''}${isSoloed ? ' solo-on' : soloDimmed ? ' solo-off' : ''}`} style={{ ...cvar(color), position: 'absolute', inset: 6, minHeight: 0, borderRadius: 'var(--r)', borderColor: isSel ? `color-mix(in srgb, ${color} 75%, #fff)` : undefined, boxShadow: isMarked && !isSel ? `inset 0 0 0 2px color-mix(in srgb, ${color} 70%, #fff)` : undefined }} onClick={(ev) => { if (gainDragged.current) { gainDragged.current = false; return; } clickInst(inst.id, ev.shiftKey); }}>
                     {inst.payload.kind === 'collage'
                       ? <>{/* 底块/波形/网格 memo 静态;播放头独立自驱动叶子 */}<CollagePadBody payload={inst.payload} peaksSig={padPeaksSig} /><CollageHead engine={e} id={inst.id} playing={playing} /></>
                       : (pk && pk.length > 0 && (
@@ -2255,7 +2306,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                               const y0 = ev.clientY; const g0 = inst.mixer.gainDb;
                               let pushed = false; // 只在真正改变 gain 的那一刻压一次撤销(纯点击不污染历史)
                               const mv = (e2: PointerEvent) => { const dg = ((y0 - e2.clientY) / h) * 30; const ng = Math.round(Math.max(-24, Math.min(6, g0 + dg))); if (ng === g0 && !pushed) return; if (!pushed) { changeMixer(inst.id, {}, true); pushed = true; } changeMixer(inst.id, { gainDb: ng }); };
-                              const up = (e2: PointerEvent) => { try { el.releasePointerCapture(e2.pointerId); } catch { /* */ } window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
+                              const up = (e2: PointerEvent) => { if (pushed) { gainDragged.current = true; setTimeout(() => { gainDragged.current = false; }, 0); } try { el.releasePointerCapture(e2.pointerId); } catch { /* */ } window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
                               window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
                             }}
                             onDoubleClick={(ev) => { ev.stopPropagation(); if (inst.mixer.gainDb !== 0) { changeMixer(inst.id, {}, true); changeMixer(inst.id, { gainDb: 0 }); } }}
@@ -2503,7 +2554,7 @@ function InstrumentChip({ color, icon, size = 26, onPick }: { color: string; ico
 function SongInstrumentCount({ session }: { session: Session }) {
   const active = activeInstruments(session);
   const count = active.length;
-  const total = session.instruments.length;
+  const total = resolveInstruments(session).length;
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number; below: boolean } | null>(null);
   const badgeRef = useRef<HTMLSpanElement>(null);

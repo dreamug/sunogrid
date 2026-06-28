@@ -96,6 +96,6 @@ export function addSession(sessions: Session[], newId: NewId, name: string, colo
   return { sessions: [...sessions, s], newIndex: sessions.length };
 }
 
-/** 按 id 改场景外壳字段(改名 / 次数 / 颜色 / §26 XY 自动化)。 */
-export const patchSession = (sessions: Session[], id: string, patch: Partial<Pick<Session, 'name' | 'repeats' | 'color' | 'xyAuto' | 'songLane' | 'songStartBar' | 'songAnchorId' | 'songOffsetBar'>>): Session[] =>
+/** 按 id 改场景外壳字段(改名 / 次数 / 颜色 / §26 XY 自动化 / §41 音量自动化)。 */
+export const patchSession = (sessions: Session[], id: string, patch: Partial<Pick<Session, 'name' | 'repeats' | 'color' | 'xyAuto' | 'volAuto' | 'songLane' | 'songStartBar' | 'songAnchorId' | 'songOffsetBar'>>): Session[] =>
   sessions.map((s) => (s.id === id ? { ...s, ...patch } : s));

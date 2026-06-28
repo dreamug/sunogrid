@@ -6,7 +6,7 @@ import { db } from '@/lib/db';
 import { getCurrentUser, unauthorized } from '@/lib/auth';
 import type { Op, NSession, NInstrument, NClip } from '@/studio/sync';
 
-const SESS_COLS = ['name', 'index', 'songLane', 'songStartBar', 'songAnchorId', 'songOffsetBar', 'repeats', 'color', 'xyAuto'] as const;
+const SESS_COLS = ['name', 'index', 'songLane', 'songStartBar', 'songAnchorId', 'songOffsetBar', 'repeats', 'color', 'xyAuto', 'volAuto'] as const;
 const INST_COLS = ['sessionId', 'slot', 'type', 'label', 'color', 'icon', 'enabled', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'collageBars', 'stepsPerBar', 'loopStartStep', 'bakedAssetId', 'sends'] as const;
 const CLIP_COLS = ['instrumentId', 'soundId', 'assetId', 'startSample', 'endSample', 'bars', 'timeMul', 'warpPts', 'semitones', 'fadeOutBars', 'fadeSilenceBars', 'gainDb', 'pan', 'eqLowDb', 'eqMidDb', 'eqHighDb', 'startStep', 'orderIndex'] as const;
 
@@ -31,10 +31,11 @@ function instData(row: Partial<NInstrument>): Record<string, unknown> {
   if ('sends' in d) d.sends = (d.sends ?? { dist: 0, delay: 0, reverb: 0 }) as object;
   return d;
 }
-// §26 xyAuto 是可空 Json 列:null 要写成 Prisma.DbNull(直接传字面 null 会被 Prisma 拒)。
+// §26 xyAuto / §41 volAuto 都是可空 Json 列:null 要写成 Prisma.DbNull(直接传字面 null 会被 Prisma 拒)。
 function sessData(row: Partial<NSession>): Record<string, unknown> {
   const d = pick(row as NSession, SESS_COLS);
   if ('xyAuto' in d) d.xyAuto = d.xyAuto == null ? Prisma.DbNull : (d.xyAuto as object);
+  if ('volAuto' in d) d.volAuto = d.volAuto == null ? Prisma.DbNull : (d.volAuto as object);
   return d;
 }
 

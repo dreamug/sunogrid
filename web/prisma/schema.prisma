@@ -235,6 +235,7 @@ model StudioSession {
   repeats     Int                @default(1) // §20 Song 线性模式:本场景连播次数(Live 模式忽略)
   color       String?            // §20 场景标识色(rail 彩色卡)
   xyAuto      Json?              // §26 Song 模式 XY 自动化(per-session 单效果,直线断点;null=无)
+  volAuto     Json?              // §41 Song 模式音量自动化(per-session 一维直线断点;null=无,恒定满音量)
   instruments StudioInstrument[]
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt

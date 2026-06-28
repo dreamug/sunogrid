@@ -1645,3 +1645,147 @@ Next 15 对 route handler 的 **raw body 在 10MiB 处硬截断**(`req.arrayBuff
 
 ### 38.8 落地顺序(每步 typecheck)
 ① 本节(doc-first)。② `npm i fflate`。③ `projectBundle.ts`:`collectBundle`(镜像 export-example)+ `overwriteProjectFromBundle`(覆盖语义)+ zip 读写。④ 两个 API 路由(owner 403 鉴权)。⑤ `api.ts` 加 `projects.export/import` 客户端方法。⑥ `Workbench.tsx`:所有 owned 项目上 ⋯ 菜单 + Export/Import 项 + 覆盖 `askConfirm` + file input。⑦ CSS(复用现有 `proj-menu`/`mi`)。⑧ 测:导出真实项目 → zip 引用完整 → 覆盖导入回**同一项目**(子图全换、音频不 404、collage 不重 bake、stem 锁相)→ 覆盖导入到**另一个**自己的项目(原项目不动)→ 别人的只读示例无导入/导出入口 → 非 owner 调 API 得 403 → 反复导入幂等(asset sha256 复用)。
+
+## 40. Session 内容链接(Figma 式 Component / instance,改一处全更新)—— 📐 设计 · 2026-06-29
+
+**一句话**:让一个 session 成为另一个 session 的**活副本(linked instance)**——它不存自己的乐器,而是**实时引用一个 master session 的乐器**;编辑任一处(master 或任一 instance)=改 master,**所有 instance 一起变**(verse/chorus/verse/chorus:副歌摆三处、改一次三处全更新)。一条 **"Make unique"** 把某个 instance **脱链**成独立副本(从此各漂各的)。语义对标 Figma 的 Component / Instance / Detach、FL Studio 的 pattern + "Make unique"。
+
+### 40.1 定位:复用模式的 2×2,本节补"项目内 · 链接"那一格
+
+「母版→衍生」在本产品里是同一个模式的四格组合。已实现三格,本节补第四格(已拍板 **项目内复用**,不碰跨用户):
+
+| | 项目内(同用户 · 共享 Sound 库) | 跨用户(必须连库克隆) |
+|---|---|---|
+| **复制**(独立快照,互不影响) | §23 copy/paste · §37 复制 A→A' —— `cloneInstrument` | §25 示例 fork-on-open —— `forkProject`(连库克隆) |
+| **链接 / 原型**(改一处全更新) | **§40(本节)** —— 复用 `cloneInstrument` + §40.3 接缝 | (留白:"活示例" = §25 v2 "重置到最新",跨用户传播,与本节两码事) |
+
+**为何不碰跨用户**:示例(§25)的命门是 `Sound` 用户级、fork 必须连库克隆;§40 的 master 与 instance **同项目同用户、共享同一 Sound 库**,故 detach 直接复用 §23 的 `cloneInstrument`(共享 `soundId`),**不需要** `forkProject` 那把刀。这是把复杂度锁在最小面的关键取舍。
+
+### 40.2 心智模型 — instance = 纯占位,内容寄生 master
+
+- 任何 session 都可能是 master(它只是恰好有别的 session 指着它的普通 session)。
+- **instance** = `contentLinkId` 指向同项目某 master 的 session。**instance 自己不存乐器**(`instruments` 恒空数组,DB 里零 `StudioInstrument` 子行)。它的内容 = 运行时经 §40.3 从 master 解析。
+- **共享的只有"乐器列表"这一项**。instance **自己拥有**的是**占位 / 身份 / 编排**:`name`、`color`、§37 的 `songLane/songStartBar/songAnchorId/songOffsetBar/repeats`、(开放:`xyAuto`,见 §40.10)。→ 同一段内容可在歌里多处出现、各有各的位置/名字/颜色,但乐器一改全改。这正是 Ableton「同 clip、不同 arrangement 位置」的味道。
+- **只一层**:master 必须是非 instance(`contentLinkId==null`)。禁止 instance 链 instance、禁止自链(§40.7 完整性)。
+
+### 40.3 解析接缝 —— 已铺好(`resolveInstruments`)
+
+消费侧读乐器的唯一口子 `resolveInstruments(s, ctx?)` 已落地(2026-06-29,纯接缝零行为变化,见 [`contracts/instrument.ts`](web/src/contracts/instrument.ts) + 当时的回放/导出/算长度/波形 ~24 处消费点改造)。本节只需把它**接活**:
+
+```ts
+export const resolveInstruments = (s, ctx?) =>
+  (s.contentLinkId && ctx?.bySessionId) ? resolveInstruments(ctx.bySessionId(s.contentLinkId)!, ctx) : s.instruments;
+```
+
+- `ctx = { bySessionId: (id) => sessionsById.get(id) }`,在消费边界由当前 sessions 数组建一个 `Map`(`useMemo`)传入。今天传 `undefined` 的那些点,届时补传 `ctx`。
+- **编辑 / 写乐器、§395/§399 跨 session 反查归属**仍直接操作真 session,**不经** `resolveInstruments`(接缝注释已写明)。
+- `sessionBars` / `activeInstruments` 内部已转调 `resolveInstruments`,故"instance 的长度 = master 的长度"、"instance 的激活乐器 = master 的激活乐器"自动成立。
+
+### 40.4 编辑路由 —— "编辑 instance = 编辑 master"
+
+instance 没有自己的乐器,所以 pad 网格对它的一切**内容编辑**(toggle enabled / 加删乐器 / 改 clip / mixer / sends / collage…)都必须落到 master:
+
+- **选中一个 instance 进编辑器时,把"被编辑的 session"重定向到它的 master**(`editTargetId = s.contentLinkId ?? s.id`)。所有现有的 `mutate`/`updateSession`/copy/paste/move/patch 路径(§40.3 列的 (B)/(C) 直读站点)照旧操作那个真 session(=master),**一行不改、无感**。
+- 网格显示的乐器走 `resolveInstruments`(= master 的),故"看到的"与"改到的"是同一份。
+- **per-instance 的量**(name/color/position/repeats)仍写 instance 自己 —— 它们不是内容,不路由。
+- 多个 instance + master 全部反映同一次编辑,**因为它们都解析到同一个 master**,无需广播/监听(同 §37「靠坐标系自动成立、不靠监听器」的哲学)。
+
+### 40.5 建 instance · 脱链(detach / "Make unique")
+
+- **建 instance**:在 session 复制入口(§37 复制 A→A' / §23 copy/paste)旁加一档选择 —— **"Duplicate"**(独立副本,现状)/ **"New instance / Duplicate as linked"**(新建一个 `contentLinkId = 源的 master(源本身是 instance 则取其 master,保证只一层)` 的空乐器 session,占位取不撞色/紧邻落位,同 §37)。
+- **detach = "Make unique"**(instance 右键 / ⋯ 菜单):把 master 的乐器**逐件 `cloneInstrument`(全新 id)克隆进自己**、清 `contentLinkId` → 从此是独立"复制"(2×2 左上格)。**直接复用 §23 的 `cloneInstrument`**(同库共享 soundId,成立);**不碰** `forkProject`。
+- 破坏性(detach 改内容归属 / 建链清空乐器)→ 改前一律 `pushHistory`。
+
+### 40.6 删 master → instance 自动脱链(镜像 §37 删主块脱锚)
+
+删一个被链接的 master:**先把它的每个 instance 就地 Make-unique**(克隆 master 乐器进各 instance、清 `contentLinkId`),**再**删 master。→ instance 全部存活成独立副本,内容冻在删除那刻。语义/手法与 §37「删主块 → 锚定 sub 脱锚变孤儿」一致。一次复合 mutation,`pushHistory` 一次可整体 undo。
+
+### 40.7 ⚠ 命门:voice id 碰撞(同一 inst.id 不能在两个并发块同时出声)
+
+§37 Song 多块并发(`playingSongIds`)成立的隐含前提是**乐器 id 跨块全局唯一**——每个 session 有自己的乐器,id 不撞,引擎按 `inst.id` 建 voice 即可。**content-link 打破这条**:master 与它的 instance(或两个 instance)引用**同一批 `inst.id`**;若它们在 Song 时间轴上**重叠出声**,引擎那张 `voices: Map<instId, …>` 无法让同一 id 在两个不同相位 offset 同时发声(导出端 `bufKey=sessionId|instId` 已天然分开,**只 live 引擎撞**)。
+
+两条路:
+1. **v1(推荐 · 小):禁止 master 与其 instance、及同 master 的 instance 之间在时间轴重叠**。理由:它们内容完全相同,重叠 = 相位叠加(梳状/加倍),音乐上本就几乎无意义。落点判定复用 §37 既有的「同 lane 禁叠放」机制,扩成「同内容族禁叠放」(跨 lane 也查)。主动拖重叠 → 弹回 + 提示;自动路径(改 reps/删块)→ 同 §37 顺次堆叠避让。**够用且简单**。
+2. **v2(深 · 大):引擎 voice 改按 `sessionId|instId` keying**(对齐导出端),让同内容在两处各起一个 voice。需动 `studioEngine` 的 voice map / `setWantOn` / `swapVoicesAt` / `retainOnly` 全链 —— 一截大改,留作真有"同内容叠层"需求时再做。
+
+**v1 接受重叠限制**,把它写进 arranger 放置校验。
+
+### 40.8 undo / 持久化
+
+- **持久化**:`StudioSession` 加 `contentLinkId String?`(additive 迁移,默认 null);进 `sync.ts` 的 `NSession`/`SESS_FIELDS`/`normalize` + `api/studio/ops` 的 `SESS_COLS`(同 §37 那三处加列的套路)。instance 落库 = `contentLinkId` 设值 + 零乐器子行。**改列后必重启 next**(见 [[prisma-stale-client-restart]])。
+- **undo(§16)**:`contentLinkId` 随 sessions 快照走(口径不扩);detach = 克隆乐器 + 清链 = 普通 session update,既有快照天然覆盖;删 master 自动脱链 = 一次复合 mutation 前 `pushHistory`。**结论同 §23/§25:不扩 7 项口径**。
+- **回放/导出(§40.3)**:消费边界补传 `ctx` 即正确,引擎/导出内部零改(除 §40.7 的 v1 放置校验)。
+
+### 40.9 UI
+
+- **instance 视觉**:Song 块 / Live 卡上给 instance 一个**链子标记**(⛓ / 实心角标)+ 一条**虚线连到 master 块起点**(复用 §37 锚定虚线那套渲染)。master 可加一个"有 N 个 instance"的弱提示。
+- **菜单**:instance 上 `Make unique`(脱链)/ `Select master`(跳到 master);可链 session 的复制处给 `Duplicate` vs `New instance` 两档。
+- **编辑器提示**:选中 instance 时编辑器顶部一行 "Editing shared content of «master name» — changes affect N instances",免用户误以为在改局部。
+
+### 40.10 开放问题(留待落地前定)
+
+- **`xyAuto` 归属**:算"内容"(跟 master 共享)还是"per-occurrence 表演"(留 instance 各自)?倾向**留 instance**(同一段乐器、副歌每次的 XY 扫法可不同 = 表演层),但需确认。**v1 先定:`contentLinkId` 只共享乐器列表,其余全 per-instance**。
+- **悬挂链**(master 被非常规路径删掉、`contentLinkId` 指空):`resolveInstruments` 找不到 master → 回落自己的空数组 → instance 静音。§40.6 的自动脱链是正路,悬挂只是防御;`resnap`/加载时可顺手把悬挂链清成独立空 session。
+- **跨内容族叠放**(§40.7 v1 禁的是"同 master 族";不同族正常并发,无碰撞)。
+
+### 40.11 落地顺序(doc-first)
+
+① 本节。② **接缝接活 + 纯逻辑 + 测**:`resolveInstruments` 加 `contentLinkId` 解析分支 + cycle/一层 guard;`Session` 加字段;detach/建链/删 master 自动脱链做成纯函数(`sessionDoc.ts`,复用 `cloneInstrument`)+ 单测(建链→instance 解析=master、改 master→instance 跟变、detach→断开各漂、删 master→全脱链存活、自链/二层链被拒)。**不接 UI、不接引擎**。③ **持久化**:prisma 加列/迁移 + sync/ops 两处 + 重启 next。④ **消费边界传 ctx**:§40.3 那些点建 `bySessionId` Map 传入;§40.7 v1 把"同族禁叠放"加进 arranger 放置校验。⑤ **编辑路由**:选中 instance → `editTargetId=master`,接通所有内容编辑落 master。⑥ **UI**:链子标记 + 虚线 + 菜单(Make unique / New instance / Select master)+ 编辑器提示 + undo 扩到 detach/删 master。⑦ **review**:真机点测——副歌摆三处改一次全变、detach 后独立、删 master 全脱链、同族拖叠被弹回、stems/导出回归。
+
+## §41 Session 音量自动化(per-session 音量曲线,§26 的姊妹)—— 🚧 实现中 · 2026-06-29
+
+**一句话**:给每个 session 加一条**独立的音量自动化曲线**(挂 `Session.volAuto`),Song 模式回放时按块内 bar 画断点直线、驱动**该块自己的输出增益**——做整块的渐入渐出 / 段落动态。**与 §26 XY 自动化平行、互不耦合**:XY 是音色效果(主总线 insert),volume 是增益(per-block gain),两套数据/引擎节点物理隔离。复用 §26 的**纯断点模块 + 内联 lane 编辑器**,只新写引擎落点。
+
+### §41.1 为什么不塞进 §26 的 `xyAuto`
+
+- **维度对不上**:`XYAutomation = {x,y}` 是两维(效果的两个参数);volume 是**一维**。塞进 `XYProgram`/`XYAutoSet` 会带一条永远中性的幻影轴。
+- **引擎层根本不是一类**:§21 XYPad 的 4 个 slot 是串在 master *之前*的**音色效果**;volume 是 master/乐器层的**增益**。它不进效果链。
+- **结论**:数据单开字段 `Session.volAuto: AutoPoint[] | null`(一维断点序列),**复用** §26 的 `sampleAuto`/`sortPoints`/`rescaleAuto`/`AutomationLane`,**不动** `xyAuto`。
+
+### §41.2 数据模型
+
+```ts
+// contracts/instrument.ts
+volAuto?: AutoPoint[] | null;   // §41 Song 音量自动化:一维断点(bar 偏移 0..bars×reps,v 0..1);null=无(隐含恒定满音量)
+```
+- **复用 §26 的 `AutoPoint{bar,v}`**(同度量:bar=session 内偏移,跨全部 reps;改 reps 按比例缩放点)。
+- **中性 = 满音量(unity)**:与 §26 中性压中线 0.5 不同——音量的"无效果"在**顶端 v=1**(0 dB)。lane 默认平直线 + bypass 参考虚线都画在顶端;`v=1→0dB`,`v=0→静音`。
+- **只存激活(非平)**:同 §26.v3「`volAuto` 存在 ⟺ 非平」。`isActiveVol(pts)` = 点数>2 或 任一点 `|v-1|≥1e-4`;拉平回 unity = 删字段(`= null`)。
+- **v→增益 taper**:`volGain(v) = clamp01(v)²`(平方律,纯前端无 dB 常数:v=1→×1、v=0→×0、中线 v=0.5→×0.25≈-12dB)。够用、可预测、易改;放纯模块 `xyAutomation.ts`(框架无关,不 import Tone)。
+
+### §41.3 引擎落点:新建 per-session 输出 gain(命门)
+
+现状(调查确认):引擎里**没有 session 这一层**——每个 voice 各自 `Player→eq→muteGain→panner→master`,voice 只按 `inst.id` 管、不带 sessionId,同块乐器无共同汇总点。所以"音量自动化驱动哪个节点"两头都不合适(master 全局、乐器 gainDb 太细),**中间 per-session 这层是空的,必须新建**:
+
+```
+各 voice → panner ──┬─→ [sessionGain[sessionId]] → master → XY → softclip
+                    └─→ sendDist/Delay/Reverb → FX 全局 return   (送量分叉点不变)
+```
+- `StudioEngine` 新增 `sessionGains: Map<sessionId, {node:Tone.Gain, last:number}>`,**惰性建**(首个该 session 的 voice load 时)、`Gain(1)` 接 master。
+- `loadInstrument(id, buf, bars, mixer, sends, sessionId?)` 多收一个 `sessionId`,把**干声目的地**从 `master` 换成 `sessionGainFor(sessionId) ?? master`。**send 仍在 panner 分叉**(在 sessionGain *之前*)→ sessionGain **只缩干声**,FX 尾巴不随块音量(= 已拍板的**方案 A**;FX return 本就全局共享,某块的混响在 return 处也分不出来,妥协可接受;post-fader 正确的方案 B 留待真有需求)。
+- `setSessionGain(sessionId, linear, immediate?)`:`immediate`→`gain.value=`(起播 prime),否则 `gain.rampTo(linear, 0.02)`(防 zipper);**EPS 去重**(同 §26 pushXY:稳态平线不刷 AudioParam 事件流)。
+- **生命周期**:`clearInstrument` 只销 voice 节点、**留 sessionGain**(跨 warp/swap 稳定);`clearAll`/`dispose` 才销并清 map。`stopTransport` 把所有 sessionGain 复位 1.0(停 / Live 态 = unity,无自动化)。
+
+### §41.4 回放(coordinator)— 逐出声块各驱动自己的 gain
+
+- **与 §26 的关键区别**:§26 XYPad 是**单个** master insert,故 coordinator 只驱动**前景块**(`songForeground`)一条;volume 是 **per-block gain**,故必须**逐个出声块**(`playingSongIds` 全部)各按自己的 `volAuto` 驱动自己的 `sessionGain`——多轨同时发声各缩各的,这正是音量必须 per-block 的原因。
+- 落在现有 XY rAF tick 里(同一帧、不另起 rAF):Song 播放中,遍历 `sessionsRef` 中在 `playingSongIds` 的块,各算自己的 `localBar = songPosBars − songLapBars − sessionSongStartBar(块)`(§39 扣圈;每块用**自己**的 start),`v = volAuto?.length ? sampleAuto(sortPoints(volAuto), localBar) : 1`,`setSessionGain(块id, volGain(v))`。无 `volAuto` 的块 = unity,no-op(去重命中)。
+- **起播 prime**(`primeSongAutomation`):对每个 active 块 `setSessionGain(immediate=true)` 到起始值,免第一圈从 1.0 跳到自动值的台阶。
+- **无手动接管 / latch / spring**:volume 没有 §21 那种实时演奏板,故 coordinator 这段是纯"采样→推值",比 §26 简单一截。
+
+### §41.5 UI — 复用 §26 lane,Y 关掉
+
+- 顶栏自动化选择器(§26 的 4 选 1 + X/Y)旁加一档 **"Vol"**;选中 Vol → 隐藏 X/Y seg(音量单轴),编辑/ghost lane 换成音量曲线。状态用独立 `autoVol: boolean`(**不污染** `autoProgram: XYProgram` 类型)。
+- `AutomationLane` 加可选覆写 `color?` / `refV?` / `stepAxis?`(不传则照旧从 `program` 派生),音量传 `color=VOL_COLOR、refV=1、stepAxis=false`,数据塞 `{x: volAuto, y: []}` 走 `axis="x"`,`onChange` 回来取 `.x`。中线吸附 `snap` 改吸到 `refV`(音量→吸顶端 unity)。
+- 块头 active 标识(§26 的字母方块)+ 收起态 ghost 曲线:`volAuto` 存在时加一个 "V" 方块 / 一条 ghost。
+- `changeVolAuto(id, pts|null, history)`:镜像 `changeXyAuto`——`isActiveVol` 真→存、平→删(`=null`);`history=false` 实时不压栈(画线拖每帧),起拖 `onStart=pushHistory` 压一次。改 reps 时连同 `xyAuto` 一起 `rescaleAuto`(那条 handler 加一行)。
+
+### §41.6 持久化 / undo / 导出
+
+- **持久化**:`StudioSession` 加 `volAuto Json?`(additive,默认 null;可空 Json → `null` 写 `Prisma.DbNull`,同 `xyAuto`)。改 6 处加列套路(同 §37/§40):`schema.prisma`、`sync.ts`(`NSession`/snapshot/`SESS_FIELDS`)、`sessionDoc.ts`(`patchSession` Pick)、`api/studio/ops`(`SESS_COLS`+DbNull)、`api/studio/route`(load 映射)、`projectBundle.ts`(导出/导入两处)。**加列后必重启 next**([[prisma-stale-client-restart]])。
+- **undo(§16)**:`volAuto` 在 `Session` 内,随 `sessions` 快照走、`histDataKey` 的 `JSON.stringify(h.sessions)` 自动覆盖 → **7 项口径不扩**;改前 `pushHistory`(changeVolAuto history / 起拖 onStart)。
+- **导出(§32)**:`exportSong` 每块离线渲染时本就 `panner→master`,插一个 per-块 `Tone.Gain` 在 panner 与 master 间、按 `volAuto` 栅格 schedule 增益(send 仍在 panner 分叉=方案 A,与 live 一致)→ 导出所听=Song 所听。
+
+### §41.7 落地顺序(doc-first / 每步 typecheck)
+
+① 本节。② 纯模块 `xyAutomation.ts` 加 `VOL_NEUTRAL/VOL_COLOR/volGain/isActiveVol/normalizeVolAuto` + 测。③ `Session` 加 `volAuto` 字段;`AutomationLane` 加 `color/refV/stepAxis` 覆写。④ 引擎:`sessionGains` + `loadInstrument` 加 sessionId + `setSessionGain` + stop 复位 + clearAll/dispose 销毁。⑤ StudioApp:`loadInstrumentToEngine` 传 sessionId、coordinator 逐块驱动、`primeSongAutomation` prime、`changeVolAuto` + reps 缩放 + load `normalizeVolAuto`。⑥ UI:`autoVol` 态 + Vol chip + 隐 X/Y + 音量 lane(编辑/ghost/块头 V)。⑦ 持久化 6 处加列 + prisma db push + **重启 next**。⑧ 导出 per-块 gain。⑨ review:真机——画音量曲线整块渐入渐出、多轨各块各缩、改 reps 曲线跟着缩、停播回 unity、undo/redo、刷新后还在、导出听感一致。

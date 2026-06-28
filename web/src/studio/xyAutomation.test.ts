@@ -1,5 +1,5 @@
 // §26 纯逻辑单测(bar 域):`npx tsx src/studio/xyAutomation.test.ts`。无 DOM/引擎依赖。
-import { sampleAuto, sampleXY, defaultAutomation, isActiveAuto, isStepAxis, sortPoints, NEUTRAL, normalizeXyAuto } from './xyAutomation';
+import { sampleAuto, sampleXY, defaultAutomation, isActiveAuto, isStepAxis, sortPoints, NEUTRAL, normalizeXyAuto, volGain, isActiveVol, normalizeVolAuto, VOL_NEUTRAL } from './xyAutomation';
 
 let fails = 0;
 const eq = (name: string, got: number, exp: number, tol = 1e-9) => {
@@ -64,6 +64,20 @@ truthy('keep old data drawn up from y=0', !!normalizeXyAuto({ delay: { on: true,
 truthy('dirty → null', normalizeXyAuto(null) === null && normalizeXyAuto({ foo: 1 }) === null);
 const dp = normalizeXyAuto({ filter: { on: true, x: [{ bar: 0, v: 0.5 }, null, { bar: 'x', v: 1 }, { bar: 4, v: 0.9 }], y: [{}] } });
 truthy('dirty points filtered', !!dp && !!dp.filter && dp.filter.x.length === 2 && dp.filter.y.length === 0 && sampleAuto(dp.filter.x, 2) === 0.7); // 坏点剔除,采样不崩
+
+// §41 音量自动化:volGain 平方律 taper(中性=顶端 unity)+ isActiveVol/normalizeVolAuto(只留非平,平=null)
+eq('volGain unity (v1)', volGain(1), 1);
+eq('volGain silence (v0)', volGain(0), 0);
+eq('volGain mid (v.5=-12dB)', volGain(0.5), 0.25);
+eq('volGain clamp hi', volGain(2), 1);
+eq('vol neutral const', VOL_NEUTRAL, 1);
+truthy('vol flat-at-unity inactive', !isActiveVol([{ bar: 0, v: 1 }, { bar: 8, v: 1 }]));
+truthy('vol off-unity active', isActiveVol([{ bar: 0, v: 1 }, { bar: 8, v: 0.3 }]));
+truthy('vol extra-point active', isActiveVol([{ bar: 0, v: 1 }, { bar: 4, v: 1 }, { bar: 8, v: 1 }]));
+truthy('vol empty inactive', !isActiveVol([]) && !isActiveVol(null));
+truthy('normalizeVol keep active', normalizeVolAuto([{ bar: 0, v: 1 }, { bar: 8, v: 0.2 }])?.length === 2);
+truthy('normalizeVol flat → null', normalizeVolAuto([{ bar: 0, v: 1 }, { bar: 8, v: 1 }]) === null);
+truthy('normalizeVol dirty filtered', (() => { const r = normalizeVolAuto([{ bar: 0, v: 0.4 }, null, { bar: 'x', v: 1 }, { bar: 8, v: 1 }]); return !!r && r.length === 2 && sampleAuto(sortPoints(r), 4) === 0.4 + (1 - 0.4) * 0.5; })());
 
 console.log(fails ? `\n${fails} TEST(S) FAILED` : '\nALL PASS');
 process.exit(fails ? 1 : 0);

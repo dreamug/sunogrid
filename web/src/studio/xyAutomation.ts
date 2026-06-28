@@ -129,3 +129,23 @@ export function sampleXY(program: XYProgram, auto: XYAutomation, bar: number): {
     y: sampleAuto(sortPoints(auto.y), bar, isStepAxis(program, 'y')),
   };
 }
+
+// ===== §41 Session 音量自动化 —— §26 的姊妹:一维断点(挂 Session.volAuto),复用上面的 sampleAuto/sortPoints/rescale =====
+// 与 XY 的区别:① 一维(无 x/y);② 中性=满音量(顶端 v=1=0dB),而非 XY 的中线 0.5;③ 驱动 per-session 输出 gain,不进效果链。
+export const VOL_NEUTRAL = 1;            // 音量"无效果"=满音量(0dB);lane 默认平直线 + bypass 参考线都在顶端
+export const VOL_COLOR = '#c9b072';      // 音量 lane 色(暖金,与 4 效果色区分)
+export const VOL_LABEL = 'Vol';
+
+/** v(0..1)→ 线性增益:平方律 taper(v=1→×1 满音量,v=0→×0 静音,中线 v=0.5→×0.25≈-12dB)。纯前端、无 dB 常数。 */
+export const volGain = (v: number): number => { const c = clamp01(v); return c * c; };
+
+/** §41 激活判定(同 §26.v3 口径):点数>2 或 任一点离开顶端 unity → 激活;只有首尾两点且都压 v=1 = 未激活。 */
+export function isActiveVol(points: AutoPoint[] | null | undefined): boolean {
+  return Array.isArray(points) && (points.length > 2 || points.some((p) => Math.abs(p.v - VOL_NEUTRAL) >= 1e-4));
+}
+
+/** §41 持久化归一:脏 JSON → 干净断点数组;**只留激活(非平)**,平直线/空 → null(= 隐含恒定满音量,不入库)。 */
+export function normalizeVolAuto(raw: unknown): AutoPoint[] | null {
+  const pts = cleanPts(raw);
+  return isActiveVol(pts) ? pts : null;
+}

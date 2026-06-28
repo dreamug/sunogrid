@@ -9,19 +9,22 @@ import type { AutoPoint, XYAutomation, XYProgram } from '@/contracts';
 import { PROG_COLOR, NEUTRAL, isStepAxis, sortPoints } from '@/studio/xyAutomation';
 
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
-const snapV = (v: number) => (Math.abs(v - 0.5) < 0.045 ? 0.5 : v); // 中线吸附
 const H = 50;
 
-export function AutomationLane({ auto, program, axis, bars, reps, px, editable, ghost, onStart, onChange }: {
+// §41:可选覆写 color/refV/stepAxis —— 不传则照旧从 program 派生(§26 XY);音量 lane 传 color=VOL_COLOR、refV=1(吸顶端 unity)、stepAxis=false。
+export function AutomationLane({ auto, program, axis, bars, reps, px, editable, ghost, color, refV, stepAxis, onStart, onChange }: {
   auto: XYAutomation; program: XYProgram; axis: 'x' | 'y'; bars: number; reps: number; px: number; editable: boolean; ghost?: boolean;
+  color?: string; refV?: number; stepAxis?: boolean;
   onStart: () => void; onChange: (next: XYAutomation) => void;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<{ bi: number; started: boolean } | null>(null);
   const T = Math.max(1, bars * reps);
   const W = Math.max(1, T * px);
-  const col = ghost ? '#5f5e5a' : PROG_COLOR[program]; // ghost=没 automation 的扁平占位线(灰、不可编辑)
-  const step = isStepAxis(program, axis);
+  const col = ghost ? '#5f5e5a' : (color ?? PROG_COLOR[program]); // ghost=没 automation 的扁平占位线(灰、不可编辑)
+  const step = stepAxis ?? isStepAxis(program, axis);
+  const ref = refV ?? NEUTRAL[program]?.[axis] ?? 0.5; // bypass/中性参考值(+吸附目标):XY=该轴 NEUTRAL,音量=顶端 unity(1)
+  const snapV = (v: number) => (Math.abs(v - ref) < 0.045 ? ref : v); // 近参考值吸附
   const all = sortPoints(auto[axis]);
   const vis = all.filter((p) => p.bar <= T + 1e-6);
   const hidden = all.length - vis.length;
@@ -37,7 +40,7 @@ export function AutomationLane({ auto, program, axis, bars, reps, px, editable, 
 
   const grid: React.ReactNode[] = [];
   for (let b = 1; b < T; b++) { const loop = b % bars === 0; grid.push(<line key={'g' + b} x1={b * px} y1={0} x2={b * px} y2={H} stroke={`rgba(236,233,227,${loop ? 0.07 : 0.03})`} />); } // repeat/loop 分割线更浅
-  const refY = Y(NEUTRAL[program]?.[axis] ?? 0.5); // bypass/中性参考线:画在该效果该轴的 NEUTRAL 处(X→中线、Y→底),默认平直线正好压在它上面
+  const refY = Y(ref); // bypass/中性参考线:画在该轴 NEUTRAL 处(音量=顶端 unity),默认平直线正好压在它上面
   grid.push(<line key="c" x1={0} y1={refY} x2={W} y2={refY} stroke="rgba(236,233,227,.1)" strokeDasharray="3 3" />);
 
   const rel = (e: React.PointerEvent | React.MouseEvent) => { const r = svgRef.current!.getBoundingClientRect(); return { bar: clamp((e.clientX - r.left) / r.width * T, 0, T), v: snapV(clamp(1 - (e.clientY - r.top) / r.height, 0, 1)) }; };

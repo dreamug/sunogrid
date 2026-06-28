@@ -80,7 +80,7 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .ic:hover:not(:disabled) { color:var(--tx); }
 .ic:disabled { opacity:0.35; cursor:default; }
 .thist { display:flex; align-items:center; gap:6px; padding-left:13px; border-left:1px solid var(--line); height:100%; }
-.svc-dot { font-size:11px; color:var(--tx-3); display:flex; align-items:center; gap:5px; white-space:nowrap; }
+.svc-dot { font-size:11px; color:var(--tx-3); display:flex; align-items:center; justify-content:flex-end; gap:5px; white-space:nowrap; min-width:46px; }
 .svc-dot.off, .svc-dot.error { color:var(--danger); }
 .svc-dot.saving { color:var(--queue); }
 

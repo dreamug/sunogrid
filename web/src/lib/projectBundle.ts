@@ -121,7 +121,7 @@ export async function collectBundle(projectId: string): Promise<{ bundle: Projec
       name: s.name, index: s.index, songLane: s.songLane ?? 0, songStartBar: s.songStartBar ?? 0,
       // §37 sub 锚定:存锚 session 的 index(稳定),导入按 index→新 id 重映射(不能存旧 id)
       songAnchorIndex: s.songAnchorId ? (sessions.find((x) => x.id === s.songAnchorId)?.index ?? null) : null,
-      songOffsetBar: s.songOffsetBar ?? 0, repeats: s.repeats, color: s.color, xyAuto: s.xyAuto ?? null,
+      songOffsetBar: s.songOffsetBar ?? 0, repeats: s.repeats, color: s.color, xyAuto: s.xyAuto ?? null, volAuto: s.volAuto ?? null,
       instruments: s.instruments.map((i) => ({
         slot: i.slot, type: i.type, label: i.label, color: i.color, icon: i.icon, enabled: i.enabled,
         gainDb: i.gainDb, pan: i.pan, eqLowDb: i.eqLowDb, eqMidDb: i.eqMidDb, eqHighDb: i.eqHighDb,
@@ -252,6 +252,7 @@ export async function overwriteProjectFromBundle(
           songLane: (s.songLane as number) ?? 0, songStartBar: (s.songStartBar as number) ?? 0,
           songOffsetBar: (s.songOffsetBar as number) ?? 0, repeats: s.repeats as number, color: s.color as string,
           xyAuto: J(s.xyAuto) ?? Prisma.DbNull,
+          volAuto: J(s.volAuto) ?? Prisma.DbNull,
           instruments: {
             create: instruments.map((iRaw) => {
               const i = iRaw as Record<string, unknown>;

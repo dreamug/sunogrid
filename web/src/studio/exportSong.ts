@@ -7,12 +7,12 @@
 import * as Tone from 'tone';
 import type { ApiSound } from '@/studio/api';
 import type { FxConfig, Session, XYProgram } from '@/contracts';
-import { sessionBars, sessionRepeats, sessionSongEndBar, sessionSongStartBar } from '@/contracts';
+import { activeInstruments, resolveInstruments, sessionBars, sessionRepeats, sessionSongEndBar, sessionSongStartBar } from '@/contracts';
 import { buildBuffer } from './realLibrary';
 import { FxBus } from '@/audio/fxBus';
 import { XYPad } from '@/audio/xyPad';
 import { softClipCurve, makeShelfEq } from '@/audio/masterChain';
-import { sampleXY } from './xyAutomation';
+import { sampleXY, sampleAuto, sortPoints, volGain } from './xyAutomation';
 
 const SR = 48000; // 同 collage bake 的 buildCollageBuffer 采样率
 const PROGS: XYProgram[] = ['filter', 'slicer', 'delay', 'brake'];
@@ -39,7 +39,7 @@ export function planSong(input: Pick<ExportInput, 'sessions' | 'bpm' | 'beatsPer
     const startBar = sessionSongStartBar(s);
     const endBar = sessionSongEndBar(s);
     blocks.push({ session: s, startBar, endBar, lenBars });
-    enabledCount += s.instruments.filter((i) => i.enabled).length;
+    enabledCount += activeInstruments(s).length;
     totalBars = Math.max(totalBars, endBar);
   }
   blocks.sort((a, b) => a.startBar - b.startBar);
@@ -59,7 +59,7 @@ export async function renderSong(input: ExportInput, onProgress?: (p: RenderProg
   const bufById = new Map<string, AudioBuffer>();
   let prepared = 0;
   for (const blk of plan.blocks) {
-    for (const inst of blk.session.instruments) {
+    for (const inst of resolveInstruments(blk.session)) {
       if (!inst.enabled) continue;
       try { const buf = await buildBuffer(inst, input.bpm, input.soundsById); if (buf) bufById.set(bufKey(blk.session.id, inst.id), buf); }
       catch { /* 单件失败不阻断整首;该乐器静默 */ }
@@ -88,8 +88,10 @@ export async function renderSong(input: ExportInput, onProgress?: (p: RenderProg
 
     for (const blk of plan.blocks) {
       const t0 = blk.startBar * barSec, t1 = blk.endBar * barSec;
-      // 该块的乐器:同 loadInstrument 的链 Player → EQ → panner → master(+ 3 条 aux send),sync 到 transport,块内连续循环、块末停。
-      for (const inst of blk.session.instruments) {
+      // §41 per-block 输出 gain(音量自动化落点,镜像 live 引擎 sessionGain):干声经此再进 master;send 仍在 panner 分叉(方案 A:只缩干声)。
+      const blkGain = new Tone.Gain(1); blkGain.connect(master);
+      // 该块的乐器:同 loadInstrument 的链 Player → EQ → panner → [blkGain] → master(+ 3 条 aux send),sync 到 transport,块内连续循环、块末停。
+      for (const inst of resolveInstruments(blk.session)) {
         if (!inst.enabled) continue;
         const buf = bufById.get(bufKey(blk.session.id, inst.id));
         if (!buf) continue;
@@ -99,10 +101,19 @@ export async function renderSong(input: ExportInput, onProgress?: (p: RenderProg
         const eq = makeShelfEq();
         eq.low.gain.value = inst.mixer.eq.lowDb; eq.mid.gain.value = inst.mixer.eq.midDb; eq.high.gain.value = inst.mixer.eq.highDb;
         const panner = new Tone.Panner(Math.max(-1, Math.min(1, inst.mixer.pan)));
-        player.chain(eq.low, eq.mid, eq.high, panner, master);
+        player.chain(eq.low, eq.mid, eq.high, panner, blkGain);
         const send = (amt: number, dest: Tone.ToneAudioNode) => { const g = new Tone.Gain(Math.max(0, Math.min(1, amt))); panner.connect(g); g.connect(dest); };
         send(inst.sends.dist, fxBus.distInput); send(inst.sends.delay, fxBus.delayInput); send(inst.sends.reverb, fxBus.reverbInput);
         player.sync().start(t0).stop(t1);
+      }
+      // §41 音量自动化:该块按 1/8 bar 栅格预排 blkGain 增益(纯自动化,无 live 手动接管);无 volAuto → 恒 1。
+      const vol = blk.session.volAuto;
+      if (vol && vol.length) {
+        const pts = sortPoints(vol), stepSec = barSec / 8;
+        for (let t = t0; t <= t1 + 1e-6; t += stepSec) {
+          const at = Math.min(t, t1), localBar = (at - t0) / barSec, g = volGain(sampleAuto(pts, localBar));
+          transport.scheduleOnce((time) => blkGain.gain.setValueAtTime(g, time), at);
+        }
       }
       // XY 自动化(§26):该块每个激活 program 在块内按栅格预排采样点(纯自动化,无 live 的手动接管/latch/spring)。
       const set = blk.session.xyAuto;

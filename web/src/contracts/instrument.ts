@@ -133,6 +133,8 @@ export interface Session {
   color: string | null;
   /** §26.v2 Song 模式 XY 自动化:每效果一条(filter/slicer/delay/brake),同时发声;null=无。仅 Song 模式回放。 */
   xyAuto?: import('./models').XYAutoSet | null;
+  /** §41 Song 模式音量自动化:一维断点曲线(bar 偏移 0..bars×reps,v 0..1,顶端 1=满音量),驱动本块输出增益;null=无(恒定满音量)。仅 Song 模式回放。 */
+  volAuto?: import('./models').AutoPoint[] | null;
   instruments: Instrument[];
 }
 
@@ -183,9 +185,20 @@ export function instrumentBars(inst: Instrument): number {
   return p.kind === 'sample' ? Math.max(1, Math.round(p.clip.bars * clipTimeMul(p.clip))) : Math.max(1, p.bars);
 }
 
+/** 读「某 session 当前实际生效的乐器列表」的唯一接缝(消费侧:回放/导出/算长度/波形都走它)。
+ *  今天恒等于 `s.instruments`,纯接缝、零行为变化。
+ *  ⚠ 这是 content-link(Figma 式 instance)的预埋口子,设计尚未落 PRODUCT.md、`Session.contentLinkId`/`ctx` 均为待加(规划中):
+ *  将来一个 linked instance 自己不存乐器,此函数据 `s.contentLinkId` 经 `ctx.bySessionId` 解析出 master 的乐器。
+ *  所以**消费乐器前请走本函数,勿直读 `session.instruments`**(直读 = instance 将取到空列表)。
+ *  `ctx` 现无人传,留给 content-link 阶段补;编辑/写乐器、跨 session 反查归属仍直接操作真 session,不经此。 */
+export interface InstrumentResolver {
+  bySessionId?: (id: string) => Session | undefined;
+}
+export const resolveInstruments = (s: Session, _ctx?: InstrumentResolver): Instrument[] => s.instruments;
+
 /** Session 长度 = 最长乐器(空 session 记 1)。 */
-export function sessionBars(s: Session): number {
-  return s.instruments.reduce((m, i) => Math.max(m, instrumentBars(i)), 1);
+export function sessionBars(s: Session, ctx?: InstrumentResolver): number {
+  return resolveInstruments(s, ctx).reduce((m, i) => Math.max(m, instrumentBars(i)), 1);
 }
 
 export const sessionSongLane = (s: Pick<Session, 'songLane'>): number => {
@@ -211,7 +224,7 @@ export const sessionSongOffset = (s: Pick<Session, 'songOffsetBar'>): number => 
 };
 
 /** §26.11 该 session 当前激活(`enabled`=随主走带量化播放)的乐器;徽章计数 + hover 名单共用。solo 是瞬态隔离、不计在内。 */
-export const activeInstruments = (s: Session): Instrument[] => s.instruments.filter((i) => i.enabled);
+export const activeInstruments = (s: Session, ctx?: InstrumentResolver): Instrument[] => resolveInstruments(s, ctx).filter((i) => i.enabled);
 
 export const defaultMixer = (): Mixer => ({ gainDb: 0, pan: 0, eq: { lowDb: 0, midDb: 0, highDb: 0 } });
 
