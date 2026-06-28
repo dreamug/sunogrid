@@ -18,7 +18,7 @@
 - **Auto-conditioning + offline warp** — automatic BPM / loop-region detection, snap to whole bars, then time-stretch + pitch-shift offline (WASM) to the project's BPM and key. Playback runs a plain looping source, so it **never glitches**.
 - **Bar-quantized playback** — start/stop align to bar boundaries; seamless looping with no real-time stretching.
 - **Clip editor** — per-clip warp / trim / slice, a snap-to-grid start-offset marker, and tail fade-out.
-- **Arrangement** — a free grid with snap / drag / drop and sub-bar placement; **Live** scene switching plus a **Song** linear mode (with looping) and an XY automation lane.
+- **Arrangement** — a free grid with snap / drag / drop and sub-bar placement; **Live** scene switching plus a **Song** multitrack arranger (a snap-to-grid main lane + freely-placed sub lanes anchored to it, like a video editor's linked clips), with looping and an XY automation lane.
 - **Collage tool** — chop several samples into pieces, warp each piece independently, rearrange them into one bar-loop, and bake it onto a pad.
 - **Pad-bank loop machine** — classic pad-grid triggering of ready loops.
 - **Stem separation** — a self-hosted Demucs sidecar splits a loop into stems (drums / bass / vocals / …); drums can be split further into kick / snare / toms / cymbals. Stems inherit the parent warp and stay phase-locked.
@@ -114,7 +114,7 @@ Reverse-engineering Suno's private endpoints for generation may violate its ToS;
 - **自动 conditioning + 离线 warp** — 自动测 BPM / 找循环区、snap 到整小节,再离线(WASM)变速 + 变调到工程的 BPM 与调。播放只跑普通循环 source,**绝不爆音**。
 - **小节级量化播放** — 启停对齐小节边界;无缝循环,播放时不做实时变速。
 - **Clip 编辑器** — 逐 clip warp / trim / slice、吸网格的起播刻度、尾部淡出。
-- **编排** — 自由网格(吸附 / 拖移 / 拖放、允许 sub-bar);**Live** 场景切换 + **Song** 线性模式(可循环)+ XY 自动化 lane。
+- **编排** — 自由网格(吸附 / 拖移 / 拖放、允许 sub-bar);**Live** 场景切换 + **Song** 多轨 arranger(吸附主轨 + 锚定到主轨的自由 sub 轨,语义对标剪映 / Final Cut 的 linked clip),可循环 + XY 自动化 lane。
 - **拼贴器** — 把多个样本切成碎片,逐片 warp,重排成一条整小节 loop,烘焙落到 pad。
 - **Pad bank loop 机** — 经典 pad 网格触发就绪 loop。
 - **乐器分离** — 自托管 Demucs sidecar 把 loop 拆成 stem(drums / bass / vocals / …);drums 还能再拆 kick / snare / toms / cymbals。子轨继承父 warp、天然锁相。
