@@ -6,6 +6,7 @@ import { api, cdnUrl } from '@/studio/api';
 import type { Clip, CollageClip, Instrument, SampleWarp, Session, WarpPoint } from '@/contracts';
 import { clipTimeMul, defaultMixer, defaultSends, EQ_BANDS, fadeGain } from '@/contracts';
 import { warpPtsSig, toFracs } from '@/audio/warpMap';
+import { CANONICAL_SR } from '@/audio/sr';
 
 /** §36 从 JSON(Sound.warp)读 warpPts:只收形状对的 {src,beat} 数组;空/坏 → undefined。清洗留给渲染层 normalize。 */
 const parseWarpPts = (v: unknown): WarpPoint[] | undefined => {
@@ -15,7 +16,9 @@ const parseWarpPts = (v: unknown): WarpPoint[] | undefined => {
 };
 
 let _ctx: AudioContext | null = null;
-const getCtx = () => (_ctx ??= new AudioContext());
+// §43 钉死解码域 = CANONICAL_SR(永不跟随输出设备):decodeAudioData 会把任意原生 SR 资产重采样到此,
+// 偏移量(同 48k 域)切片才永远对齐。{sampleRate} 已实测被 Chrome/FF/Safari 完整尊重。
+const getCtx = () => (_ctx ??= new AudioContext({ sampleRate: CANONICAL_SR }));
 const decodeCache = new Map<string, { channels: Float32Array[]; sampleRate: number; durationSec: number }>();
 
 export async function decodeAsset(assetId: string) {
@@ -81,10 +84,10 @@ const warpCache = new Map<string, AudioBuffer>();
 const lruBump = (k: string, v: AudioBuffer) => { warpCache.delete(k); warpCache.set(k, v); }; // 命中刷到最近端(真 LRU)
 const lruTrim = () => { if (warpCache.size > 40) warpCache.delete(warpCache.keys().next().value as string); };
 // 纯 warp 的缓存键(不含 fade):落盘渲染只存纯 warp,fade 在内存里后挂(见 applyFade)。
-// `x1` = warp 算法版本标记(x1=输出烘入 loop 缝交叉淡化,见 signalsmithWarp)。改 warp 产物口径时 ++,令旧落盘渲染失效、强制重渲。
+// `x2` = warp 算法/域版本标记(x1=输出烘入 loop 缝交叉淡化;x2=§43 解码域钉死 48k,作废钉死前可能在非 48k 设备落盘、解码域≠48k 的旧渲染)。改 warp 产物口径时 ++。
 // §36:warpPts 非空时追加 `|w:<sig>`;空时不追加 → 单段 clip 签名与今天逐字一致,旧落盘渲染不失效。
 const pureSig = (s: ApiSound, masterBpm: number, region: Region) => {
-  const base = `${s.assetId}|${region.startSample}|${region.endSample}|${region.bars.toFixed(4)}|${region.semitones || 0}|${s.sourceBpm}|${masterBpm}|x1`;
+  const base = `${s.assetId}|${region.startSample}|${region.endSample}|${region.bars.toFixed(4)}|${region.semitones || 0}|${s.sourceBpm}|${masterBpm}|x2`;
   const w = warpPtsSig(region.warpPts);
   return w ? `${base}|w:${w}` : base;
 };
@@ -167,7 +170,7 @@ export async function buildCollageBuffer(
     placed.push({ buf, offsetSec, c });
   }
   if (!placed.length) return null;
-  const SR = 48000;
+  const SR = CANONICAL_SR; // §43 collage bake 域 = 全仓 canonical
   const ctx = new OfflineAudioContext(2, Math.max(1, Math.round(loopLenSec * SR)), SR);
   for (const { buf, offsetSec, c } of placed) {
     const node = ctx.createBufferSource(); node.buffer = buf; // SR 不一致时 bufferSource 自动重采样到 ctx

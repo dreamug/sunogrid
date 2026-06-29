@@ -11,6 +11,7 @@ import { EQ_BANDS } from '@/contracts';
 import { FxBus } from './fxBus';
 import { XYPad } from './xyPad';
 import { softClipCurve, makeShelfEq, type ShelfEq } from './masterChain'; // §32:与离线导出共用软削波曲线 + 三段 EQ 构造(防音色漂移)
+import { CANONICAL_SR } from './sr';
 
 type VoiceState = 'off' | 'queued' | 'on' | 'stopping';
 
@@ -66,8 +67,12 @@ export class StudioEngine {
 
   init(bpm: number, beatsPerBar = 4): void {
     this.beatsPerBar = beatsPerBar;
-    Tone.getTransport().bpm.value = bpm;
     if (!this.inited) {
+      // §43 钉死播放域 = CANONICAL_SR(永不跟随输出设备)。必须在任何 Tone 节点 / transport 绑定 context 之前做。
+      // 设备本就 48k → 默认 context 已合规,跳过(免无谓换 context);仅当设备非 48k 时换上强制 48k 的 context。
+      if (Tone.getContext().rawContext.sampleRate !== CANONICAL_SR) {
+        Tone.setContext(new Tone.Context(new AudioContext({ sampleRate: CANONICAL_SR, latencyHint: 'interactive' })));
+      }
       // 主总线:所有声源(乐器 FX 链 + 节拍器)汇入 master(主音量)→ 软削波天花板 → destination。
       // 天花板是兜底:Suno loop 多是成品母带级、单条已贴近 0dBFS,数条 unity 叠加会越过 0dBFS,无它则终点硬削顶(方波失真)。
       // ⚠ 不用压缩器型限制器(Tone.Limiter/Compressor):它有 attack/release 时间常数,会对鼓点/loop 接缝的瞬态
@@ -101,6 +106,7 @@ export class StudioEngine {
       if (this.fxCfg?.xy) this.xy.setXy(this.fxCfg.xy); // §21:初始 XY 配置(program/wet/on)
       this.inited = true;
     }
+    Tone.getTransport().bpm.value = bpm; // §43:context 钉死后再绑 transport(setContext 必须先于任何 transport 访问)
   }
 
   /** 应用主总线效果器配置(§17)+ XY 表演板配置(§21:program/wet/on)。 */

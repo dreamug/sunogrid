@@ -8,3 +8,6 @@ next-env.d.ts
 .env*.local
 /storage/
 .DS_Store
+
+# §43 一次性 SR 迁移的本地备份(不入库)
+scripts/.sr-migration-backup.json

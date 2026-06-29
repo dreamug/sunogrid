@@ -7,9 +7,11 @@ import { detectLoop, type LoopAnalysis } from '@/audio/conditioning';
 import { estimateTempo, estimateKey, parseNameMeta } from '@/audio/detect';
 import { chopSong, shouldChop } from '@/audio/chop';
 import type { GenStatus, GenView, LoopView } from '@/contracts/studioViews';
+import { CANONICAL_SR } from '@/audio/sr';
 
 let _gctx: AudioContext | null = null;
-const gctx = () => (_gctx ??= new AudioContext());
+// §43 入库分析域 = CANONICAL_SR(与 getCtx 消费域一致)→ 分析算出的偏移量天生落在 48k 域。
+const gctx = () => (_gctx ??= new AudioContext({ sampleRate: CANONICAL_SR }));
 
 /** 把任意报错压成一句话短提示(去栈/去 HTML/映射常见原因/截断),给卡片和状态栏用。 */
 export function conciseError(e: unknown): string {

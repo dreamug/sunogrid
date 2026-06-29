@@ -103,6 +103,7 @@ model Asset {
   bytes       Int      @default(0)
   sha256      String?  @unique // 源音频去重
   sourceUrl   String?  @db.Text // cdn1 原始 url(诊断)
+  sampleRate  Int? // §43 原生采样率(WAV 头读出;诊断/可见性,非约束。源资产允许任意 SR,解码实时 SRC 到 CANONICAL_SR)
   createdAt   DateTime @default(now())
 
   soundSources Sound[]      @relation("SoundSource")

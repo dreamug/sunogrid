@@ -13,8 +13,9 @@ import { FxBus } from '@/audio/fxBus';
 import { XYPad } from '@/audio/xyPad';
 import { softClipCurve, makeShelfEq } from '@/audio/masterChain';
 import { sampleXY, sampleAuto, sortPoints, volGain } from './xyAutomation';
+import { CANONICAL_SR } from '@/audio/sr';
 
-const SR = 48000; // 同 collage bake 的 buildCollageBuffer 采样率
+const SR = CANONICAL_SR; // §43 离线渲染域 = 全仓 canonical(同 collage bake / 引擎)
 const PROGS: XYProgram[] = ['filter', 'slicer', 'delay', 'brake'];
 
 export interface ExportInput {
