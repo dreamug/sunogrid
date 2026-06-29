@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Scratch Lab · 真实搓盘试验台</title>
+<style>
+  :root { --bg:#15110e; --panel:#211a15; --line:#3a2e25; --txt:#e8ddd2; --dim:#9a8b7c;
+          --acc:#c2724f; --solo:#d8a24a; --good:#6f9e8b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; padding:16px; }
+  h1 { font-size:15px; margin:0 0 2px; letter-spacing:.5px; }
+  .sub { color:var(--dim); font-size:11px; margin-bottom:14px; }
+  .row { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  label { color:var(--dim); font-size:11px; display:block; margin-bottom:3px; }
+  select,input[type=text],input[type=number] { background:#0e0b09; color:var(--txt);
+        border:1px solid var(--line); border-radius:5px; padding:5px 7px; font:inherit; }
+  button { background:#0e0b09; color:var(--txt); border:1px solid var(--line);
+        border-radius:5px; padding:6px 10px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { background:var(--acc); border-color:var(--acc); color:#160f0b; }
+  button.tech.on { background:var(--solo); border-color:var(--solo); }
+  canvas { display:block; }
+  #platterWrap { position:relative; cursor:grab; touch-action:none; }
+  #platterWrap.drag { cursor:grabbing; }
+  .techgrid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; max-width:430px; }
+  .techgrid button { text-align:left; padding:7px 8px; }
+  .techgrid .lh { font-size:11px; color:var(--dim); display:block; }
+  .meterbar { height:6px; background:#0e0b09; border-radius:3px; overflow:hidden; }
+  .meterbar > i { display:block; height:100%; width:0; background:var(--good); }
+  .xfade { width:260px; }
+  #log { color:var(--dim); font-size:11px; white-space:pre-wrap; max-width:430px;
+         max-height:120px; overflow:auto; margin-top:8px; }
+  .k { color:var(--acc); }
+  .pill { display:inline-block; font-size:10px; color:var(--dim); border:1px solid var(--line);
+          border-radius:99px; padding:1px 7px; margin-left:6px; }
+</style>
+</head>
+<body>
+  <h1>Scratch Lab <span class="pill">独立试验 · 不入主项目</span></h1>
+  <div class="sub">有符号读头 scrub worklet + 推子门双轨 · 拖唱盘实时搓 / 选技巧自动贴拍演奏</div>
+
+  <div class="row">
+    <!-- 唱盘 -->
+    <div class="panel">
+      <label>唱盘 · 绕圆心转动来搓(顺时针=正放 逆=倒放),松手滑垫回拉</label>
+      <div id="platterWrap"><canvas id="platter" width="260" height="260"></canvas></div>
+      <div style="margin-top:10px">
+        <label>推子(crossfader) · 按住空格=瞬时切断</label>
+        <input id="xfade" class="xfade" type="range" min="0" max="1" step="0.01" value="1" />
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <button id="motor">马达 OFF</button>
+        <label style="margin:0">音量</label>
+        <input id="vol" type="range" min="0" max="1" step="0.01" value="0.9" style="width:90px" />
+        <div class="meterbar" style="flex:1;min-width:60px"><i id="meter"></i></div>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:11px">
+        <label style="margin:0">滤波α</label><input id="alpha" type="range" min="0.05" max="0.6" step="0.01" value="0.2" style="width:74px" />
+        <label style="margin:0">回拉</label><input id="friction" type="range" min="0.01" max="0.4" step="0.01" value="0.06" style="width:74px" />
+        <label style="margin:0">齿比</label><input id="gearing" type="range" min="0.4" max="3" step="0.1" value="1.6" style="width:74px" />
+      </div>
+    </div>
+
+    <!-- 素材 -->
+    <div class="panel">
+      <label>素材(库里 loop / 网上搓盘素材 / 自己拖)</label>
+      <select id="sampleSel" style="width:240px"></select>
+      <button id="loadBtn" style="margin-left:4px">装载</button>
+      <div style="margin-top:8px">
+        <label>或本地文件</label>
+        <input id="fileIn" type="file" accept="audio/*" />
+      </div>
+      <label style="margin-top:10px">波形 · 拖左右竖线=整体范围 · 拖中间=撮点 · 橙带=行程</label>
+      <canvas id="wave" width="260" height="96" style="border:1px solid var(--line);border-radius:5px;background:#0e0b09;cursor:crosshair"></canvas>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;font-size:11px">
+        <label style="margin:0">撮点行程</label>
+        <input id="travel" type="range" min="0.03" max="1.2" step="0.01" value="0.25" style="width:130px" />
+        <button id="fullRange" title="整体范围复位整条">整段</button>
+      </div>
+      <div id="rangeInfo" style="color:var(--dim);font-size:11px;margin-top:4px">—</div>
+      <div id="nowSample" style="color:var(--dim);font-size:11px;margin-top:2px">—</div>
+    </div>
+  </div>
+
+  <!-- 技巧自动机 -->
+  <div class="panel" style="margin-top:14px;max-width:880px">
+    <div style="display:flex;gap:14px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <strong>技巧自动机</strong>
+      <span style="color:var(--dim);font-size:11px">点一招=把它当乐句演(多拍重复+留白);乐句长度/留白用下方自动撮盘的「小节/留白」</span>
+      <label style="margin:0">BPM</label><input id="bpm" type="number" value="92" min="40" max="200" style="width:64px" />
+      <label style="margin:0">深度</label><input id="pSpeed" type="range" min="0.5" max="3.5" step="0.1" value="2" style="width:90px" />
+      <label style="margin:0">clicks</label><input id="pClicks" type="number" value="3" min="1" max="12" style="width:54px" />
+    </div>
+    <div id="techgrid" class="techgrid"></div>
+  </div>
+
+  <!-- 自动撮盘 -->
+  <div class="panel" style="margin-top:14px;max-width:880px">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button id="autoBtn" style="font-weight:bold">▶ 自动撮盘</button>
+      <span style="color:var(--dim);font-size:11px">生成一条 routine,贴拍自动串招(在 cue 之间跳)</span>
+      <label style="margin:0">风格</label><select id="style"></select>
+      <label style="margin:0">强度</label><input id="intensity" type="range" min="0" max="1" step="0.05" value="0.5" style="width:90px" />
+      <label style="margin:0">留白</label><input id="rest" type="range" min="0" max="1" step="0.05" value="0.3" style="width:90px" />
+      <label style="margin:0">小节</label><input id="bars" type="number" value="4" min="1" max="16" style="width:50px" />
+      <label style="margin:0">seed</label><input id="seed" type="number" value="12345" style="width:92px" />
+      <button id="reseed" title="换一卷">🎲</button>
+    </div>
+    <div id="routineView" style="margin-top:10px;display:flex;gap:3px;flex-wrap:wrap;font-size:10px"></div>
+  </div>
+
+  <div id="log"></div>
+
+<script type="module">
+import { TECHNIQUES, TECH_KEYS, CYCLE } from './techniques.js';
+import { genRoutine, detectCues, STYLES, STYLE_KEYS } from './routine.js';
+
+const $ = (id) => document.getElementById(id);
+const log = (m) => { const el=$('log'); el.textContent = `${m}\n${el.textContent}`.slice(0,2000); };
+
+// ---- 素材清单(库里复用 + 网上免费搓盘素材) ----
+const SAMPLES = [
+  ['good_source_of_scratch_part1.mp3', '搓盘素材1 · soundsozai(免费)'],
+  ['good_source_of_scratch_part2.mp3', '搓盘素材2 · soundsozai(免费)'],
+  ['good_source_of_scratch_part3.mp3', '搓盘素材3 · soundsozai(免费)'],
+  ['good_source_of_scratch_part4.mp3', '搓盘素材4 · soundsozai(免费)'],
+  ['scratch01.mp3', 'scratch SFX 01'],
+  ['scratch05.mp3', 'scratch SFX 05'],
+  ['Drum_loop_92bpm.mp3', '鼓 loop 92bpm'],
+  ['lib_loop_A.wav', '库 loop A(复用)'],
+  ['lib_loop_B.wav', '库 loop B(复用)'],
+];
+const sel = $('sampleSel');
+for (const [f, lbl] of SAMPLES) { const o=document.createElement('option'); o.value=f; o.textContent=lbl; sel.appendChild(o); }
+
+// ---- 音频图 ----
+let ctx, scrub, gateParam, master, meterNode;
+let phase = 0, plen = 1;          // 读头(画唱针)
+let srcRate = 48000;              // 当前样本采样率(角度→位置齿比用)
+let motor = false;                // 松手回原速?
+// 圆形波形盘 + cue
+let ringCanvas=null, ringReady=false, currentCues=[0];
+// ---- 两个范围(用户需求):整体范围 + 撮点行程 ----
+let region={s:0,e:1};   // 整体范围 = 整条样本里框出的工作区(比例)
+let cueFrac=0;          // 撮点 = 搓动的锚点(比例)
+let travelSec=0.25;     // 撮点行程 = 每次搓从撮点扫多远(秒)
+let waveMono=null;      // 线性波形可视化数据
+function travelFrac(){ return Math.min(region.e-region.s, travelSec*srcRate/Math.max(1,plen)); }
+function posToPhase(pos, cue, mul=1){ let f=cue+pos*travelFrac()*mul; if(f<region.s)f=region.s; else if(f>region.e)f=region.e; return f*plen; }
+function sendScratch(pos, cue, mul=1){ if(scrub) scrub.port.postMessage({type:'scratch', phase: posToPhase(pos, cue, mul)}); }
+
+async function ensureAudio() {
+  if (ctx) return;
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await ctx.audioWorklet.addModule('./scrub-worklet.js');
+  scrub = new AudioWorkletNode(ctx, 'scrub-processor', { numberOfOutputs:1, outputChannelCount:[2] });
+  gateParam = scrub.parameters.get('gate');
+  master = ctx.createGain(); master.gain.value = +$('vol').value;
+  meterNode = ctx.createAnalyser(); meterNode.fftSize = 256;
+  scrub.connect(master); master.connect(meterNode); master.connect(ctx.destination);
+  scrub.port.onmessage = (e) => { if (e.data.type==='pos'){ phase=e.data.phase; plen=e.data.len; window.__pos=e.data; } };
+  sendTune();
+  log('音频引擎就绪 ✅ (worklet 已加载)');
+  meterLoop();
+}
+
+async function loadSample(file) {
+  await ensureAudio();
+  let buf;
+  if (file instanceof File) {
+    buf = await ctx.decodeAudioData(await file.arrayBuffer());
+  } else {
+    const res = await fetch('./samples/' + file);
+    if (!res.ok) throw new Error('fetch 失败 ' + res.status);
+    buf = await ctx.decodeAudioData(await res.arrayBuffer());
+  }
+  const channels = [];
+  for (let c=0;c<buf.numberOfChannels;c++) channels.push(buf.getChannelData(c).slice());
+  srcRate = buf.sampleRate;
+  scrub.port.postMessage({ type:'load', channels, sampleRate: buf.sampleRate }, channels.map(c=>c.buffer));
+  plen = channels[0].length; phase = 0;
+  $('nowSample').textContent = `${typeof file==='string'?file:file.name} · ${buf.duration.toFixed(2)}s · ${buf.numberOfChannels}ch`;
+  // 用未被 transfer 的原 buffer 做可视化(channels 的 buffer 已 detach)
+  const mono = buf.getChannelData(0);
+  waveMono = mono;
+  const env = buildEnvelope(mono);     // 包络 → 圆形波形环 + cue 切点
+  prerenderRing(env);
+  currentCues = detectCues(env, 2);
+  cueFrac = currentCues[0] || 0; region = { s:0, e:1 };  // 撮点落第一切点、整体范围复位整条
+  drawWave(); updateRangeReadout();
+  log('装载 ' + (typeof file==='string'?file:file.name) + ` · cue@${currentCues.map(c=>c.toFixed(2)).join(',')}`);
+  if (playOn) regenRoutine();          // 换素材即按新 cue 重生 routine
+}
+
+// ---- 推子门(声明斜坡 declick) ----
+let userGate = 1, spaceCut = false, seqGate = 1, seqOn = false;
+function applyGate() {
+  if (!gateParam) return;
+  const g = (seqOn ? seqGate : userGate) * (spaceCut ? 0 : 1);
+  gateParam.setTargetAtTime(g, ctx.currentTime, 0.0006); // ~0.6ms,锐但不咔哒
+}
+$('xfade').oninput = (e) => { userGate = +e.target.value; applyGate(); };
+$('vol').oninput = (e) => { if (master) master.gain.value = +e.target.value; };
+$('motor').onclick = (e) => { motor=!motor; e.target.textContent = '马达 '+(motor?'ON':'OFF'); e.target.classList.toggle('on',motor); if(!dragging && !seqOn) setFree(); };
+
+window.addEventListener('keydown', (e)=>{ if(e.code==='Space'){ e.preventDefault(); if(!spaceCut){spaceCut=true; applyGate();} }});
+window.addEventListener('keyup',   (e)=>{ if(e.code==='Space'){ spaceCut=false; applyGate(); }});
+
+// ---- 实时搓唱盘:旋转角度 → 绝对位置(走 worklet 的 alpha-beta 滤波)----
+const pw = $('platterWrap');
+let dragging=false, lastAng=0, targetPhaseAccum=0;
+let secPerRev = 1.6;   // 齿比:唱盘转一圈覆盖多少秒音频(真黑胶 33⅓≈1.8)
+function platterCenter(){ const r=$('platter').getBoundingClientRect(); return {cx:r.left+r.width/2, cy:r.top+r.height/2}; }
+function angleOf(e){ const {cx,cy}=platterCenter(); return Math.atan2(e.clientY-cy, e.clientX-cx); }
+function setVel(v){ if(scrub) scrub.port.postMessage({type:'vel', value:v}); }            // 序列器用(direct)
+function setFree(){ if(scrub) scrub.port.postMessage({type:'free', rate: motor?1:0}); }    // 松手回拉目标
+function sendTune(){ if(scrub) scrub.port.postMessage({type:'tune', alpha:+$('alpha').value, friction:+$('friction').value}); }
+pw.addEventListener('pointerdown', async (e)=>{
+  await ensureAudio(); if (ctx.state==='suspended') ctx.resume();
+  dragging=true; pw.classList.add('drag'); pw.setPointerCapture(e.pointerId);
+  lastAng=angleOf(e); targetPhaseAccum = phase;                    // 从当前读头起
+  scrub.port.postMessage({type:'target', phase: targetPhaseAccum});
+});
+pw.addEventListener('pointermove', (e)=>{
+  if(!dragging) return;
+  const a=angleOf(e); let d=a-lastAng;
+  if(d> Math.PI) d-=2*Math.PI; if(d<-Math.PI) d+=2*Math.PI;        // 最短弧,处理跨 ±π
+  targetPhaseAccum += (d/(2*Math.PI)) * (srcRate*secPerRev);       // 角度→源采样位置
+  const lo=region.s*plen, hi=region.e*plen;                       // 夹在整体范围内
+  if(targetPhaseAccum<lo)targetPhaseAccum=lo; else if(targetPhaseAccum>hi)targetPhaseAccum=hi;
+  lastAng=a;
+  scrub.port.postMessage({type:'target', phase: targetPhaseAccum});
+});
+function endDrag(){ if(!dragging)return; dragging=false; pw.classList.remove('drag');
+  scrub.port.postMessage({type:'release'}); setFree(); }           // 松手:滑垫把转速带回 0/马达
+pw.addEventListener('pointerup', endDrag);
+pw.addEventListener('pointercancel', endDrag);
+$('alpha').oninput=sendTune; $('friction').oninput=sendTune;
+$('gearing').oninput=(e)=>{ secPerRev=+e.target.value; };
+
+// ---- 统一调度器:把一条 routine 贴拍演奏 ----
+// 撮盘是长过程:一个 move 跨多拍,招式按自然周期 CYCLE 在其内重复 → 乐句感;move 之间夹留白 = 呼吸。
+// 技巧自动机 = 锁定单技巧的 routine;自动撮盘 = 多技巧混编。两者同一调度器。
+let routine=null, playOn=false, playTimer=0, playStart=0, lastMoveIdx=-1, lockedTech=null;
+function indexMoves(r){ let b=0; r._starts=r.moves.map(m=>{const s=b;b+=m.beats;return s;}); r._end=b||1; return r; }
+function buildRoutine(){
+  const opts={ cues: currentCues, restBias:+$('rest').value };
+  if(lockedTech) opts.lockTech=lockedTech;
+  const style = lockedTech ? 'battle' : $('style').value;
+  const intensity = lockedTech ? 0.5 : +$('intensity').value;
+  routine=indexMoves(genRoutine((+$('seed').value)>>>0, style, intensity, +$('bars').value, opts));
+  renderRoutine(routine); return routine;
+}
+function regenRoutine(){ if(playOn) buildRoutine(); }     // 参数变更即重生(播放中)
+function startPlay(lock){
+  stopPlay();
+  lockedTech = lock || null; buildRoutine();
+  playOn=true; seqOn=true; lastMoveIdx=-1; playStart=performance.now()/1000;
+  const tick=()=>{
+    if(!playOn) return;
+    const beatSec=60/(+$('bpm').value);
+    const eb=((performance.now()/1000 - playStart)/beatSec) % routine._end;
+    let idx=0; for(let i=0;i<routine.moves.length;i++){ if(eb>=routine._starts[i]) idx=i; else break; }
+    const m=routine.moves[idx];
+    if(idx!==lastMoveIdx){ lastMoveIdx=idx; markMove(idx); }
+    if(m.tech==='rest'){ seqGate=0; }                       // 留白:关门即静,读头不动
+    else {
+      const cb=CYCLE[m.tech]||1;
+      const within=eb - routine._starts[idx];               // move 内已过几拍
+      const cyclePhase=((within/cb)%1+1)%1;                  // 按自然周期重复 → 乐句里多次手势
+      // 单技巧模式:depth/clicks 跟面板滑块走(让滑块有意义);混编模式:用 routine 生成的参数
+      const params = lockedTech ? { ...m.params, depth: Math.max(0.3, Math.min(1.2, +$('pSpeed').value/2.2)), clicks:+$('pClicks').value } : m.params;
+      const {pos,g}=TECHNIQUES[m.tech].lane(cyclePhase, params);
+      const cue=Math.max(region.s,Math.min(region.e,m.cue));
+      sendScratch(pos, cue, m.params.travelMul||1); seqGate=g;
+    }
+    applyGate();
+    playTimer=setTimeout(tick,4);
+  };
+  tick();
+}
+function stopPlay(){
+  clearTimeout(playTimer); playOn=false; seqOn=false; seqGate=1; lastMoveIdx=-1; lockedTech=null;
+  if(scrub){ scrub.port.postMessage({type:'release'}); setFree(); } applyGate();
+  $('autoBtn').classList.remove('on'); $('autoBtn').textContent='▶ 自动撮盘';
+  [...$('techgrid').children].forEach(b=>b.classList.remove('on'));
+}
+// 技巧按钮:点一下=把这一招当乐句演(多拍重复+留白),再点关
+const grid=$('techgrid');
+for (const key of TECH_KEYS) {
+  const t=TECHNIQUES[key];
+  const b=document.createElement('button'); b.className='tech';
+  b.innerHTML=`${t.label}<span class="lh">${t.hint}</span>`;
+  b.onclick=async()=>{ await ensureAudio(); if(ctx.state==='suspended')ctx.resume();
+    if(playOn && lockedTech===key){ stopPlay(); }
+    else { startPlay(key); [...grid.children].forEach(x=>x.classList.remove('on')); b.classList.add('on'); log('▶ 乐句 '+t.label); } };
+  grid.appendChild(b);
+}
+const TCOL={baby:'#c2724f',forward:'#cf8a5c',chirp:'#d8a24a',transformer:'#6f9e8b',crab:'#7e8a9e',flare:'#b07f86',orbit:'#a77fb0',scribble:'#9a8b7c',tear:'#c98f3f',hydroplane:'#5e9ec2',rest:'#2a221c'};
+function renderRoutine(r){
+  const v=$('routineView'); v.innerHTML='';
+  r.moves.forEach((m,i)=>{ const el=document.createElement('span');
+    el.style.cssText=`padding:2px 6px;border-radius:3px;background:${TCOL[m.tech]||'#333'};color:#160f0b;opacity:.9`;
+    el.textContent = m.tech==='rest' ? `· ${m.beats}` : `${m.tech} ${m.beats}`;
+    v.appendChild(el); });
+}
+function markMove(idx){ [...$('routineView').children].forEach((el,i)=>{ el.style.outline=i===idx?'2px solid #fff':'none'; }); }
+for(const k of STYLE_KEYS){ const o=document.createElement('option'); o.value=k; o.textContent=STYLES[k].label; $('style').appendChild(o); }
+$('autoBtn').onclick=async()=>{ await ensureAudio(); if(ctx.state==='suspended')ctx.resume();
+  if(playOn && !lockedTech){ stopPlay(); }
+  else { startPlay(null); $('autoBtn').classList.add('on'); $('autoBtn').textContent='■ 停止'; log('▶ 自动撮盘 · '+$('style').value+' · seed '+(+$('seed').value)); } };
+$('reseed').onclick=()=>{ $('seed').value=Math.floor(Math.random()*1e9); regenRoutine(); };
+for(const id of ['style','intensity','bars','seed','rest']) $(id).addEventListener('input', regenRoutine);
+
+// ---- 圆形波形盘:整段样本沿圆周成环,盘转、唱针固定在 12 点 ----
+const pcv=$('platter').getContext('2d');
+const RING_BASE=78, RING_AMP=34;
+function buildEnvelope(data, N=720){
+  const env=new Float32Array(N); const step=Math.max(1,Math.floor(data.length/N));
+  for(let i=0;i<N;i++){ let pk=0; const base=i*step; for(let k=0;k<step;k++){ const s=Math.abs(data[base+k]||0); if(s>pk)pk=s; } env[i]=pk; }
+  let mx=1e-6; for(const v of env) if(v>mx)mx=v; for(let i=0;i<N;i++) env[i]/=mx;     // 归一
+  return env;
+}
+function prerenderRing(env){
+  // 离线把波形环画一次,之后每帧只 rotate+drawImage(省 CPU)
+  const SZ=260, off=document.createElement('canvas'); off.width=off.height=SZ;
+  const x=off.getContext('2d'); x.translate(SZ/2,SZ/2);
+  const N=env.length;
+  for(let i=0;i<N;i++){ const ang=i/N*Math.PI*2 - Math.PI/2, a=env[i]*RING_AMP, c=Math.cos(ang), s=Math.sin(ang);
+    x.strokeStyle='#c2724f'; x.globalAlpha=0.30+0.6*env[i]; x.lineWidth=1.3;
+    x.beginPath(); x.moveTo(c*(RING_BASE-a),s*(RING_BASE-a)); x.lineTo(c*(RING_BASE+a),s*(RING_BASE+a)); x.stroke(); }
+  ringCanvas=off; ringReady=true;
+}
+function drawPlatter(){
+  const w=260,h=260,cx=w/2,cy=h/2,R=120;
+  pcv.clearRect(0,0,w,h);
+  pcv.fillStyle='#0e0b09'; pcv.beginPath(); pcv.arc(cx,cy,R,0,7); pcv.fill();
+  pcv.strokeStyle='#3a2e25'; pcv.lineWidth=1; pcv.stroke();
+  const frac=phase/Math.max(1,plen), ang=frac*Math.PI*2;
+  if(ringReady){
+    pcv.save(); pcv.translate(cx,cy); pcv.rotate(-ang);                 // 盘转:把当前相位 bin 转到唱针下
+    pcv.drawImage(ringCanvas,-130,-130);
+    for(const ct of currentCues){                                      // cue 刻度随盘转
+      const a=ct*Math.PI*2 - Math.PI/2, c=Math.cos(a), s=Math.sin(a);
+      const glow=Math.min(Math.abs(ct-frac), 1-Math.abs(ct-frac))<0.012;
+      pcv.strokeStyle=glow?'#d8a24a':'#6f9e8b'; pcv.lineWidth=glow?3:1.5; pcv.globalAlpha=glow?1:0.7;
+      pcv.beginPath(); pcv.moveTo(c*40,s*40); pcv.lineTo(c*116,s*116); pcv.stroke();
+    }
+    pcv.globalAlpha=1; pcv.restore();
+  }
+  // 针后变暗(屏幕固定的下半遮罩 = 已过区域)
+  pcv.fillStyle='rgba(14,11,9,0.45)'; pcv.beginPath(); pcv.arc(cx,cy,R-1,0.15,Math.PI-0.15); pcv.lineTo(cx,cy); pcv.fill();
+  // 固定唱针(12 点)+ 中心
+  pcv.strokeStyle='#e8ddd2'; pcv.lineWidth=2; pcv.beginPath(); pcv.moveTo(cx,cy-R+2); pcv.lineTo(cx,cy-44); pcv.stroke();
+  pcv.fillStyle='#e8ddd2'; pcv.beginPath(); pcv.arc(cx,cy-44,3.5,0,7); pcv.fill();
+  pcv.fillStyle='#d8a24a'; pcv.beginPath(); pcv.arc(cx,cy,8,0,7); pcv.fill();
+  requestAnimationFrame(drawPlatter);
+}
+drawPlatter();
+const waveCv=$('wave');
+function drawWave(){
+  const c=waveCv.getContext('2d'), W=waveCv.width, H=waveCv.height; c.clearRect(0,0,W,H);
+  if(waveMono){
+    c.strokeStyle='#4a5d54'; c.beginPath();
+    const step=Math.max(1,Math.floor(waveMono.length/W));
+    for(let x=0;x<W;x++){ let mn=1,mx=-1; for(let k=0;k<step;k++){const s=waveMono[x*step+k]||0; if(s<mn)mn=s; if(s>mx)mx=s;} c.moveTo(x,(1-mn)*H/2); c.lineTo(x,(1-mx)*H/2);} c.stroke();
+  }
+  // 整体范围外阴影
+  c.fillStyle='rgba(8,6,5,0.66)'; c.fillRect(0,0,region.s*W,H); c.fillRect(region.e*W,0,W-region.e*W,H);
+  // 撮点行程带 [cue, cue+travel]
+  const tEnd=Math.min(region.e, cueFrac+travelFrac());
+  c.fillStyle='rgba(194,114,79,0.30)'; c.fillRect(cueFrac*W,0,(tEnd-cueFrac)*W,H);
+  // 检测切点(暗青)
+  for(const ct of currentCues){ c.strokeStyle='rgba(111,158,139,0.45)'; c.lineWidth=1; c.beginPath(); c.moveTo(ct*W,0); c.lineTo(ct*W,H); c.stroke(); }
+  // 整体范围竖线(灰)
+  c.strokeStyle='#9a8b7c'; c.lineWidth=2; c.beginPath();
+  c.moveTo(region.s*W,0); c.lineTo(region.s*W,H); c.moveTo(region.e*W,0); c.lineTo(region.e*W,H); c.stroke();
+  // 当前撮点(亮金)
+  c.strokeStyle='#d8a24a'; c.lineWidth=2; c.beginPath(); c.moveTo(cueFrac*W,0); c.lineTo(cueFrac*W,H); c.stroke();
+  c.fillStyle='#d8a24a'; c.beginPath(); c.arc(cueFrac*W,6,4,0,7); c.fill();
+}
+function updateRangeReadout(){
+  const dur=plen/Math.max(1,srcRate);
+  $('rangeInfo').textContent = `整体 ${(region.s*dur).toFixed(2)}–${(region.e*dur).toFixed(2)}s · 撮点 ${(cueFrac*dur).toFixed(2)}s · 行程 ${Math.round(travelFrac()*dur*1000)}ms`;
+}
+// 波形交互:拖左右边=整体范围,拖中间=撮点(靠近检测切点会吸附)
+function waveX(e){ const r=waveCv.getBoundingClientRect(); return Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)); }
+let waveDrag=null;
+waveCv.addEventListener('pointerdown',(e)=>{ waveCv.setPointerCapture(e.pointerId);
+  const f=waveX(e), dS=Math.abs(f-region.s), dE=Math.abs(f-region.e);
+  waveDrag = (dS<0.035 && dS<=dE) ? 's' : (dE<0.035 ? 'e' : 'cue');
+  applyWaveDrag(f);
+});
+waveCv.addEventListener('pointermove',(e)=>{ if(waveDrag) applyWaveDrag(waveX(e)); });
+waveCv.addEventListener('pointerup',()=>{ waveDrag=null; });
+waveCv.addEventListener('pointercancel',()=>{ waveDrag=null; });
+function applyWaveDrag(f){
+  if(waveDrag==='s'){ region.s=Math.min(f, region.e-0.02); cueFrac=Math.max(cueFrac,region.s); }
+  else if(waveDrag==='e'){ region.e=Math.max(f, region.s+0.02); cueFrac=Math.min(cueFrac,region.e); }
+  else { // cue:靠近检测切点吸附
+    let cf=Math.max(region.s,Math.min(region.e,f));
+    for(const ct of currentCues){ if(Math.abs(ct-cf)<0.02 && ct>=region.s && ct<=region.e){ cf=ct; break; } }
+    cueFrac=cf;
+  }
+  drawWave(); updateRangeReadout();
+}
+$('travel').oninput=(e)=>{ travelSec=+e.target.value; drawWave(); updateRangeReadout(); };
+$('fullRange').onclick=()=>{ region={s:0,e:1}; drawWave(); updateRangeReadout(); };
+function meterLoop(){
+  if(meterNode){ const a=new Uint8Array(meterNode.fftSize); meterNode.getByteTimeDomainData(a);
+    let pk=0; for(const v of a){ const d=Math.abs(v-128)/128; if(d>pk)pk=d; }
+    $('meter').style.width=Math.min(100,pk*140)+'%'; }
+  requestAnimationFrame(meterLoop);
+}
+
+// ---- 装载按钮 / 文件 ----
+$('loadBtn').onclick=()=>loadSample(sel.value).catch(e=>log('错误: '+e.message));
+$('fileIn').onchange=(e)=>{ const f=e.target.files[0]; if(f) loadSample(f).catch(er=>log('错误: '+er.message)); };
+log('点唱盘或任一技巧即开声(浏览器要手势才允许音频)。先「装载」一个素材。');
+</script>
+</body>
+</html>
