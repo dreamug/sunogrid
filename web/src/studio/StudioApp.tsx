@@ -2000,7 +2000,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
 
       {sync === 'error' && (
         <div role="alert" style={{ position: 'sticky', top: 0, zIndex: 60, background: '#7f1d1d', color: '#fff', padding: '6px 12px', fontSize: 12, lineHeight: 1.45, borderBottom: '1px solid #b91c1c' }}>
-          ⚠ 改动没能保存到库,正在每 3 秒重试 —— <b>现在刷新或离开会丢失未保存的 pad</b>。{saveErr ? ` 原因:${saveErr}` : ''}
+          ⚠ 改动没能保存到库,正在自动重试(瞬态错误退避重试,多次失败后会暂停;再做一次改动可重新触发)—— <b>现在刷新或离开会丢失未保存的 pad</b>。{saveErr ? ` 原因:${saveErr}` : ''}
         </div>
       )}
 
