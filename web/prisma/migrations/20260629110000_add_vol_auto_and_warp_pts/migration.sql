@@ -1,0 +1,5 @@
+ALTER TABLE `StudioSession`
+  ADD COLUMN `volAuto` JSON NULL;
+
+ALTER TABLE `Clip`
+  ADD COLUMN `warpPts` JSON NULL;
