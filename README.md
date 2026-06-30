@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://youtu.be/nbHNv4ZrUk0">
-    <img src="docs/screenshot.png" alt="SunoGrid — browser-based AI loop machine / groovebox" width="100%">
+    <img src="docs/demo-poster.png" alt="SunoGrid demo — click to watch on YouTube" width="100%">
   </a>
   <br>
   <a href="https://youtu.be/nbHNv4ZrUk0"><b>▶ Watch the demo</b></a>
