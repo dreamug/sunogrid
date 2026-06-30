@@ -5,11 +5,15 @@
 > 浏览器里的 **AI loop 机 / groovebox(风格无关)**:用 Suno 生成任意风格的 loop,自动对齐到工程 BPM,拖进网格,**小节级量化**启停,做 beat 与编曲。
 
 <p align="center">
+  <a href="https://sunogrid.com/"><img src="https://img.shields.io/badge/%E2%96%B6%20Try%20it%20live-sunogrid.com-FF5500?style=for-the-badge&labelColor=222222" alt="Try SunoGrid live at sunogrid.com" height="38"></a>
+  &nbsp;&nbsp;
+  <a href="https://youtu.be/nbHNv4ZrUk0"><img src="https://img.shields.io/badge/Watch%20the%20demo-YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white&labelColor=222222" alt="Watch the demo on YouTube" height="38"></a>
+</p>
+
+<p align="center">
   <a href="https://youtu.be/nbHNv4ZrUk0">
     <img src="docs/demo-poster.png" alt="SunoGrid demo — click to watch on YouTube" width="100%">
   </a>
-  <br>
-  <a href="https://youtu.be/nbHNv4ZrUk0"><b>▶ Watch the demo</b></a>
 </p>
 
 **[English](#english) · [中文](#中文)**
