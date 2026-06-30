@@ -20,6 +20,7 @@ asar: true
 
 mac:
   category: public.app-category.music
+  icon: build/icon.icns # 由 build/make-icon.mjs 生成(源:web/src/app/icon.svg 的 pad-bank 标)
   target:
     - target: dmg
       arch:

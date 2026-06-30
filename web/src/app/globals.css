@@ -799,6 +799,40 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .fx-kl { font-size:9px; letter-spacing:.04em; color:var(--tx-3); }
 .fx-kv { font-size:9.5px; color:var(--tx); font-family:var(--mono); }
 
+/* —— §42 Master Strip(总线母带链 / 缩混):双 VU 指针表 + GR 表 + 读数 + memoryless 三件套。复用 .fx-pop/.fx-mod/.fx-knobs/.fx-chip/.fx-pw —— */
+.ms-pop.ms-byp .ms-rows, .ms-pop.ms-byp .ms-dyn { opacity:.45; }              /* strip bypass:处理区降透明(表/天花板照常) */
+.ms-presets { display:flex; align-items:center; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
+.ms-pre-l { font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--tx-3); margin-right:2px; }
+.ms-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; gap:12px; }
+.ms-htitle { display:flex; align-items:center; gap:8px; }
+.ms-name { font-size:12px; letter-spacing:.12em; color:var(--tx); font-weight:500; }
+.ms-hero { display:flex; gap:10px; align-items:stretch; margin-bottom:10px; }
+.ms-vus { display:flex; gap:8px; flex:1 1 auto; }
+.ms-vu { position:relative; flex:1 1 0; background:var(--bg-0); border:1px solid var(--line-2); border-radius:var(--r); padding:7px 5px 4px; display:flex; flex-direction:column; align-items:center; }
+.ms-vu svg { width:100%; height:auto; display:block; }
+.ms-vu-cap { font-size:8.5px; letter-spacing:.2em; color:var(--tx-3); margin-top:1px; }
+.ms-led { position:absolute; top:7px; right:8px; width:6px; height:6px; border-radius:50%; background:#3a352f; border:1px solid #4d473e; }
+.ms-led.on { background:#e0a32e; border-color:#7a5a1c; box-shadow:0 0 6px rgba(224,163,46,.7); }
+.ms-right { flex:0 0 152px; display:flex; flex-direction:column; gap:7px; }
+.ms-gr { background:var(--bg-0); border:1px solid var(--line-2); border-radius:var(--r); padding:5px 8px 3px; }
+.ms-gr svg { width:100%; height:auto; display:block; }
+.ms-gr-foot { display:flex; align-items:center; justify-content:space-between; margin-top:1px; }
+.ms-gr-foot span { font-size:8px; letter-spacing:.1em; color:var(--tx-3); }
+.ms-gr-foot b { font-size:10px; font-family:var(--mono); color:var(--tx-2); font-weight:400; }
+.ms-ro { background:var(--bg-2); border:1px solid var(--line-2); border-radius:var(--r); padding:6px 9px; display:flex; flex-direction:column; gap:4px; }
+.ms-ro .ro { display:flex; align-items:baseline; justify-content:space-between; }
+.ms-ro .ro span { font-size:9px; letter-spacing:.08em; color:var(--tx-3); }
+.ms-ro .ro b { font-size:12px; font-family:var(--mono); color:var(--tx); font-weight:400; }
+.ms-rows { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin-bottom:9px; }
+.ms-dyn { background:var(--bg-0); border:1px solid var(--line); border-radius:var(--r); padding:8px; margin-bottom:9px; }
+.ms-dyn-flag { display:flex; align-items:center; gap:6px; font-size:9.5px; line-height:1.4; color:var(--tx-2); margin-bottom:7px; }
+.ms-dyn-flag svg { color:var(--queue); flex:0 0 auto; }
+.ms-dyn-mods { display:flex; gap:9px; }
+.ms-dyn-mods .fx-mod { flex:1 1 0; }
+.ms-foot { font-family:var(--mono); font-size:9.5px; letter-spacing:.06em; color:var(--tx-3); border-top:1px solid var(--line); padding-top:8px; text-align:center; }
+.ms-foot b { font-weight:400; }
+.ms-ceil { color:var(--play); }
+
 /* —— §21 XY 表演板(Kaoss 式主总线 insert):顶栏 XY 按钮 + 浮层。左=XY 方块,右栏=效果选择 + X/Y 读数(并排)+ 触发/wet 一行。复用 .fx-pop/.fx-chip/.seg/.we-box —— */
 .xy-pop { width:560px; }                                                  /* 无标题/无状态:大方块 + 紧凑右栏 */
 .xy-body { display:grid; grid-template-columns:1fr 200px; gap:12px; }

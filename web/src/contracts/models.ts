@@ -137,11 +137,54 @@ export interface XYAutomation { x: AutoPoint[]; y: AutoPoint[]; }
 /** §26.v3 一个 session 的 XY 自动化:每效果一条,最多 4(filter/slicer/delay/brake),互相独立、可同时发声。**只存非平(激活)的效果**——`program in xyAuto` ⟺ 激活。挂 Session.xyAuto(JSON,§15)。 */
 export type XYAutoSet = Partial<Record<XYProgram, XYAutomation>>;
 
+/** §42 Master Strip(总线母带链 / 缩混)配置。挂 FxConfig.master,走 Project.fx JSON(零 schema 改动)。
+ *  顺序 = 业界母带链 EQ → Comp(glue) → Sat → Width(M/S) →〔Limiter〕;v1 只实现 memoryless 三件(eq/sat/width)+ strip bypass,
+ *  comp/limiter 字段保留给 v2(默认 on:false,引擎暂不建节点)。softClip 天花板(§17)永远在 strip 之后兜底。 */
+export interface MasterEq { on: boolean; low: number; mid: number; high: number; } // dB;复用 makeShelfEq 的 lowshelf/peaking/highshelf 频点
+export interface MasterComp { // §42.3 抗抽吸慢胶水压缩(v2)
+  on: boolean; threshold: number; ratio: number; attack: number; release: number;
+  autoRelease: boolean; knee: number; makeup: number; scHpf: number; mix: number; lookahead: number;
+}
+export interface MasterSat { on: boolean; drive: number; character: 'tape' | 'tube' | 'soft'; mix: number; } // WaveShaper 谐波胶水(memoryless)
+export interface MasterWidth { on: boolean; width: number; monoBelowHz: number; air: number; } // M/S:width 0=mono/1=原/2=宽;monoBelowHz 以下转单声道;air=side 高频
+export interface MasterLimiter { on: boolean; gainDb: number; ceilingDb: number; targetLufs: number | null; release: number; } // maximizer:gainDb=输入 drive(往天花板灌增益=推响度)+ 真峰天花板 + 响度目标(v2)
+export interface MasterConfig {
+  on: boolean;                          // §42.1a strip 总电源(header ⏻ MASTER);false=全旁路,盖过各段 on
+  eq: MasterEq;
+  comp: MasterComp;
+  sat: MasterSat;
+  width: MasterWidth;
+  limiter: MasterLimiter;
+}
+/** 默认:strip 在路径里(on:true)但每段 on:false / 中性 → 进信号链零音色改变(对齐 DEFAULT_FX 哲学)。 */
+export const DEFAULT_MASTER: MasterConfig = {
+  on: true,
+  eq: { on: false, low: 0, mid: 0, high: 0 },
+  comp: { on: false, threshold: -18, ratio: 2, attack: 30, release: 200, autoRelease: true, knee: 6, makeup: 0, scHpf: 80, mix: 1, lookahead: 3 },
+  sat: { on: false, drive: 0.3, character: 'tape', mix: 1 },
+  width: { on: false, width: 1, monoBelowHz: 0, air: 0 },
+  limiter: { on: false, gainDb: 0, ceilingDb: -1, targetLufs: null, release: 200 },
+};
+/** 归一化老工程的 master:**逐子对象深合并** DEFAULT_MASTER → 任何后加字段(如 limiter.gainDb)缺失也补全,
+ *  防 UI 读 undefined 崩 / 引擎收到 NaN。浅 spread 会整块替换子对象 → 必须深合并。 */
+export function normalizeMaster(m?: Partial<MasterConfig> | null): MasterConfig {
+  const d = DEFAULT_MASTER;
+  return {
+    on: m?.on ?? d.on,
+    eq: { ...d.eq, ...(m?.eq ?? {}) },
+    comp: { ...d.comp, ...(m?.comp ?? {}) },
+    sat: { ...d.sat, ...(m?.sat ?? {}) },
+    width: { ...d.width, ...(m?.width ?? {}) },
+    limiter: { ...d.limiter, ...(m?.limiter ?? {}) },
+  };
+}
+
 export interface FxConfig {
   distortion: FxDistortion;
   delay: FxDelay;
   reverb: FxReverb;
   xy: XYConfig;                         // §21 XY 表演板(主总线 insert)
+  master: MasterConfig;                 // §42 Master Strip(总线母带链 / 缩混)
 }
 /** 默认全部 bypass —— 不改默认音色,加进信号链零副作用。 */
 export const DEFAULT_FX: FxConfig = {
@@ -149,6 +192,7 @@ export const DEFAULT_FX: FxConfig = {
   delay: { on: false, sync: '1/8', timeMs: 250, feedback: 0.35, tone: 0.5, pingpong: false, mix: 0.3 },
   reverb: { on: false, decay: 2.5, preDelay: 0.02, damp: 0.5, mix: 0.3 },
   xy: DEFAULT_XY,
+  master: DEFAULT_MASTER,
 };
 
 /** §37 Song 多轨的一条命名 arrangement track。有序数组,下标 0 = 主轨(吸附,始终存在)。 */

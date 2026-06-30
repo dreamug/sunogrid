@@ -15,6 +15,11 @@ const APP_URL = isDev
   : process.env.SUNOGRID_URL || 'https://sunogrid.com';
 const SUNO_URL = process.env.SUNO_URL || 'https://suno.com/create';
 const WEB_DIR = path.join(__dirname, '..', 'web'); // 仅 dev 拉子进程用
+const ICON_PNG = path.join(__dirname, 'build', 'icon.png'); // dock(mac dev)/ 窗口(win+linux)用;打包走 build/icon.icns
+
+// dev 下 dock / 菜单默认显示 "Electron";显式定名 → 处处显示 SunoGrid(打包则走 electron-builder 的 productName)。
+// 注意:改 app.name 也改了 userData 路径,故首次启动后内嵌 Suno 需重新登录一次。
+app.setName('SunoGrid');
 
 let win = null;
 let sunoWin = null;
@@ -78,6 +83,7 @@ function createWindow() {
     minHeight: 640,
     backgroundColor: '#0b0b0d',
     title: 'SunoGrid',
+    icon: ICON_PNG, // win/linux 窗口与任务栏图标;mac 忽略此项,走下面的 dock.setIcon
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true, // §19:开
@@ -280,6 +286,10 @@ async function boot() {
     console.log('[desktop] 检测到', APP_URL, '已在跑,直接附着。');
   } else {
     console.log('[desktop] 连接云端:', APP_URL);
+  }
+  // mac dev:dock 默认是 Electron 原子图标 → 换成 SunoGrid 图标。打包后由 .icns 接管,此步只为 dev。
+  if (process.platform === 'darwin' && app.dock) {
+    try { app.dock.setIcon(ICON_PNG); } catch (_) {}
   }
   buildMenu();
   registerIpc();

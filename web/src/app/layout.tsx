@@ -3,8 +3,8 @@ import type { ReactNode } from 'react';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Loop Machine',
-  description: 'hiphop loop machine — Suno generation + 16-pad bank',
+  title: 'SunoGrid',
+  description: 'SunoGrid — browser AI loop machine, any style (Suno generation + 16-pad bank)',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

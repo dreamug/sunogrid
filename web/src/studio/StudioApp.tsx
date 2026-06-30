@@ -6,7 +6,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import Link from 'next/link';
 import type { AutoPoint, Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, InstrumentPayload, InstrumentSends, Mixer, Quantize, SampleWarp, Session, SongLane, XYAutomation, XYAutoSet, XYProgram } from '@/contracts';
-import { activeInstruments, resolveInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionColor, sessionRepeats, sessionSongEndBar, sessionSongLane, sessionSongStartBar, sessionSongAnchor, isMainLane, pickSessionColor, backfillSessionColors, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
+import { activeInstruments, resolveInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, DEFAULT_MASTER, normalizeMaster, instrumentBars, mixerToClipPatch, sessionBars, sessionColor, sessionRepeats, sessionSongEndBar, sessionSongLane, sessionSongStartBar, sessionSongAnchor, isMainLane, pickSessionColor, backfillSessionColors, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
 import { resnapSong, mainLayout, anchorPatchAt, mainInsertIndex, moveMainTo, subDropLanding, nextFreeSubStart } from '@/studio/songLayout';
 import { normalize, type Snapshot } from '@/studio/sync';
 import { StudioEngine } from '@/audio/studioEngine';
@@ -22,6 +22,7 @@ import { TransportIcon } from '@/studio/ui/glyphs';
 import { ConfirmDialog, type ConfirmOpts } from '@/ui/ConfirmDialog';
 import { LoopManager } from '@/studio/ui/LoopManager';
 import { FxRack } from '@/studio/ui/FxRack';
+import { MasterStrip } from '@/studio/ui/MasterStrip';
 import { XYPad } from '@/studio/ui/XYPad';
 import { OutputDevice } from '@/studio/ui/OutputDevice';
 import { ExportDialog } from '@/studio/ui/ExportDialog';
@@ -220,8 +221,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [metroIv, setMetroIv] = useState<'beat' | 'bar' | '2bar' | '4bar'>('beat');
   const [masterVol, setMasterVol] = useState(0);
   // 主总线效果器(§17):per-project,改即时 setFx 到引擎 + 防抖乐观持久化;v1 不进 undo(同 masterVol/quantize,见 §16 沿革)。
-  // 归一化:老工程的 Project.fx 没有 xy 字段(§21 后加)→ 补 DEFAULT_XY,免 XYPad 读到 undefined。
-  const [fx, setFx] = useState<FxConfig>(() => (fxProp ? { ...DEFAULT_FX, ...fxProp, xy: { ...DEFAULT_XY, ...(fxProp.xy ?? {}) } } : DEFAULT_FX));
+  // 归一化:老工程的 Project.fx 没有 xy(§21 后加)/ master(§42 后加)字段 → 补 DEFAULT,免引擎读到 undefined。
+  const [fx, setFx] = useState<FxConfig>(() => (fxProp ? { ...DEFAULT_FX, ...fxProp, xy: { ...DEFAULT_XY, ...(fxProp.xy ?? {}) }, master: normalizeMaster(fxProp.master) } : DEFAULT_FX));
   const fxRef = useRef<FxConfig>(fx); fxRef.current = fx;
   // 撤销快照口径(§16):① sessions 整树 ② 各库声音 warp ③ 主 bpm ④ 主总线效果器(§17)⑤ 活动 session(undo 跳回改动现场)⑥ 量化粒度 ⑦ 库存活集(声音/生成组软删可撤)
   // ⚠ 改这个口径(加/减可还原字段)→ 必须同步更新 `histDataKey`(空步判定的数据序列化,除 sessionId 外每个 data 字段都要进),否则空步跳过会漏判/误判。
@@ -1848,6 +1849,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         {/* 主总线效果器(§17):失真 / 延迟 / 混响 */}
         <span className="tb-sep" />
         <FxRack fx={fx} bpm={ctx.bpm} onFx={commitFx} onStart={pushHistory} />
+
+        {/* §42 Master Strip:总线母带链 / 缩混(EQ / 饱和 / 宽度 + 双 VU 表 + bypass);配置走 commitFx 便车 */}
+        <MasterStrip fx={fx} engine={e} playing={playing} onFx={commitFx} onStart={pushHistory} />
 
         {/* §21 XY 表演板:Kaoss 式主总线 insert(配置走 commitFx 便车;实时手势直连引擎) */}
         <XYPad

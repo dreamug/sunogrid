@@ -7,10 +7,10 @@
 // 假设:每件乐器的 buffer 已是整小节、可无缝循环(sample=warp 产物 / collage=bake 产物)。
 import * as Tone from 'tone';
 import type { FxConfig, InstrumentSends, Mixer, Quantize } from '@/contracts';
-import { EQ_BANDS } from '@/contracts';
+import { EQ_BANDS, DEFAULT_MASTER } from '@/contracts';
 import { FxBus } from './fxBus';
 import { XYPad } from './xyPad';
-import { softClipCurve, makeShelfEq, type ShelfEq } from './masterChain'; // §32:与离线导出共用软削波曲线 + 三段 EQ 构造(防音色漂移)
+import { softClipCurve, makeShelfEq, makeMasterStrip, type ShelfEq, type MasterStrip, type MasterMeters } from './masterChain'; // §32/§42:与离线导出共用软削波曲线 + 三段 EQ + master strip 工厂(防音色漂移)
 import { CANONICAL_SR } from './sr';
 
 type VoiceState = 'off' | 'queued' | 'on' | 'stopping';
@@ -58,6 +58,7 @@ export class StudioEngine {
   private clickLastTime = -Infinity; // 单音 click synth 上次出声的绝对上下文时刻(走带 scheduleRepeat 与试听 Clock 共用此 synth,强制时间严格递增)
   private fx?: FxBus; private fxCfg?: FxConfig;                     // 主总线效果器(§17):各乐器 panner → fx.input → 失真→延迟→混响 → master;节拍器不进
   private xy?: XYPad;                                              // §21 XY 表演板:主总线 insert,串在 master 与软削波天花板之间(吃完整最终 mix)
+  private strip?: MasterStrip;                                     // §42 Master Strip(总线母带链 / 缩混):串在 master → XY 之间(母带处理静态 mix,XY 叠在成品上,softClip 仍是最终天花板)
   /** 离散态(voice off/queued/on/stopping、audition 起停)在**异步边界**跃迁时回调上层重渲;连续视觉(电平/播放头/走带位置)由 UI 叶子自驱动 rAF,不走这里。 */
   onChange?: () => void;
   private metroOn = false;
@@ -84,7 +85,10 @@ export class StudioEngine {
       this.masterClip.oversample = '4x';
       // §21 XY 表演板:主总线 insert 串在 master → 天花板 之间(吃干声 + 所有 FX return 湿声的最终和;电平表抽在 master=XY 前)。
       this.xy = new XYPad(bpm);
-      this.master.connect(this.xy.input);
+      // §42 Master Strip:master(主音量)→ strip(EQ/comp/sat/width)→ XY → softClip。母带处理静态 mix,XY 叠在成品上。
+      this.strip = makeMasterStrip(bpm);
+      this.master.connect(this.strip.input);
+      this.strip.output.connect(this.xy.input);
       this.xy.output.connect(this.masterClip);
       this.masterClip.toDestination();
       // 总输出 L/R 电平表:抽在 master(post-FX、post 主音量、pre-软削波)= 真实总线电平,
@@ -104,13 +108,18 @@ export class StudioEngine {
       this.fx = new FxBus(bpm, this.master);
       if (this.fxCfg) this.fx.setAll(this.fxCfg);
       if (this.fxCfg?.xy) this.xy.setXy(this.fxCfg.xy); // §21:初始 XY 配置(program/wet/on)
+      this.strip.setConfig(this.fxCfg?.master ?? DEFAULT_MASTER); // §42:初始 master strip 配置(老工程缺 master → 默认中性)
+      this.strip.ready().catch(() => {}); // §42.3:后台预载 glue 压缩器 worklet(默认 off,加载完用户开了即生效)
       this.inited = true;
     }
     Tone.getTransport().bpm.value = bpm; // §43:context 钉死后再绑 transport(setContext 必须先于任何 transport 访问)
   }
 
-  /** 应用主总线效果器配置(§17)+ XY 表演板配置(§21:program/wet/on)。 */
-  setFx(cfg: FxConfig): void { this.fxCfg = cfg; this.fx?.setAll(cfg); if (cfg.xy) this.xy?.setXy(cfg.xy); }
+  /** 应用主总线效果器配置(§17)+ XY 表演板配置(§21)+ §42 Master Strip 配置。 */
+  setFx(cfg: FxConfig): void { this.fxCfg = cfg; this.fx?.setAll(cfg); if (cfg.xy) this.xy?.setXy(cfg.xy); this.strip?.setConfig(cfg.master ?? DEFAULT_MASTER); }
+
+  /** §42 master strip 的只读表(gr / lufs / 真峰);strip 未就绪 → null。每帧调一次(同 masterLevel,会推进 integrated 积分)。 */
+  masterMeters(): MasterMeters | null { return this.strip?.getMeters() ?? null; }
 
   // --- §21.v2 / §26.4 XY 多效果链:per-effect 瞬态驱动(coordinator 独占,不进 undo/不落库;对标 §18 Solo)---
   xySetValue(program: import('@/contracts').XYProgram, nx: number, ny: number, immediate = false): void { this.xy?.setValue(program, nx, ny, immediate); }
@@ -155,6 +164,18 @@ export class StudioEngine {
       return isFinite(db) ? Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / -METER_FLOOR_DB)) : 0;
     };
     return [ch(this.analyserL, 0), ch(this.analyserR, 1)];
+  }
+
+  /** §42 VU 表用:瞬时 L/R 峰值(归一 [METER_FLOOR_DB,0],同 masterLevel 的窗口)。**无状态推进** → 可任意次/帧调用
+   *  (VU 表自带 ~300ms 弹道平滑,不复用 masterLevel 的 peakHold,故与顶栏峰值表互不干扰)。 */
+  masterPeakRaw(): [number, number] {
+    const ch = (a: Tone.Analyser | undefined): number => {
+      let peak = 0;
+      if (a) { const buf = a.getValue() as Float32Array; for (let k = 0; k < buf.length; k++) { const x = Math.abs(buf[k]); if (x > peak) peak = x; } }
+      const db = peak > 1e-5 ? 20 * Math.log10(peak) : -Infinity;
+      return isFinite(db) ? Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / -METER_FLOOR_DB)) : 0;
+    };
+    return [ch(this.analyserL), ch(this.analyserR)];
   }
 
   // --- 节拍器 ---
@@ -791,6 +812,7 @@ export class StudioEngine {
     this.audSendDist = this.audSendDelay = this.audSendReverb = undefined;
     this.fx?.dispose(); this.fx = undefined;
     this.xy?.dispose(); this.xy = undefined;
+    this.strip?.dispose(); this.strip = undefined; // §42
     // 主总线 + 节拍器 + 电平表节点(常驻、随实例销毁;旧实现漏清这些)
     [this.clickSynth, this.clickVol, this.split, this.analyserL, this.analyserR, this.master, this.masterClip].forEach((n) => { try { n?.dispose(); } catch { /* */ } });
     this.clickSynth = this.clickVol = undefined; this.split = this.analyserL = this.analyserR = undefined; this.master = undefined; this.masterClip = undefined;

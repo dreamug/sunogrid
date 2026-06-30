@@ -7,11 +7,11 @@
 import * as Tone from 'tone';
 import type { ApiSound } from '@/studio/api';
 import type { FxConfig, Session, XYProgram } from '@/contracts';
-import { activeInstruments, resolveInstruments, sessionBars, sessionRepeats, sessionSongEndBar, sessionSongStartBar } from '@/contracts';
+import { activeInstruments, resolveInstruments, sessionBars, sessionRepeats, sessionSongEndBar, sessionSongStartBar, DEFAULT_MASTER } from '@/contracts';
 import { buildBuffer } from './realLibrary';
 import { FxBus } from '@/audio/fxBus';
 import { XYPad } from '@/audio/xyPad';
-import { softClipCurve, makeShelfEq } from '@/audio/masterChain';
+import { softClipCurve, makeShelfEq, makeMasterStrip } from '@/audio/masterChain';
 import { sampleXY, sampleAuto, sortPoints, volGain } from './xyAutomation';
 import { CANONICAL_SR } from '@/audio/sr';
 
@@ -75,11 +75,14 @@ export async function renderSong(input: ExportInput, onProgress?: (p: RenderProg
     const transport = Tone.getTransport();
     transport.bpm.value = input.bpm;
 
-    // master 段:乐器汇入 master(主音量)→ XY insert → 软削波天花板 → destination(同 studioEngine.init)。
+    // master 段:乐器汇入 master(主音量)→ §42 Master Strip → XY insert → 软削波天花板 → destination(同 studioEngine.init)。
     const master = new Tone.Volume(input.masterVolDb);
     const xy = new XYPad(input.bpm);
+    const strip = makeMasterStrip(input.bpm); // §42:与 live 引擎共用工厂 → 导出所听 = 走带所听
     const clip = new Tone.WaveShaper(softClipCurve()); clip.oversample = '4x';
-    master.connect(xy.input); xy.output.connect(clip); clip.toDestination();
+    master.connect(strip.input); strip.output.connect(xy.input); xy.output.connect(clip); clip.toDestination();
+    strip.setConfig(input.fx.master ?? DEFAULT_MASTER);
+    await strip.ready(); // §42:等内核就绪(v1 立即 resolve;v2 worklet/wasm)
     xy.setXy(input.fx.xy); // master arm(on/off)
 
     // FX 总线(§17 失真/延迟/混响 return);混响 IR 必须 await(命门 32.1)。
