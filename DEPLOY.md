@@ -214,6 +214,7 @@ curl -f http://127.0.0.1:3037/api/health
 
 - 前置 nginx/Caddy 做 TLS,反代到 web 端口。**完整样例见 [`deploy/nginx.conf.example`](deploy/nginx.conf.example)**(把里面的 `your-domain.example` 换成你的域名)。
 - **⚠️ 提高上传体积上限**:生成的 mp3 以 **base64** POST 到 `/api/sounds`(base64 比原文件大 ~33%),还有用户上传 wav/mp3(§27)。nginx 默认 `client_max_body_size 1m` 会**直接拦掉生成落库** —— 样例里已设 `50m`。
+- **⚠️ 放宽项目导入(§38)的反代超时**:导入走 zip 分块上传,`final` 块要整体解包 + 覆盖落库(大项目可能阻塞数十秒)。nginx 默认 `proxy_read/send_timeout 60s` 会在收尾时打掉连接,浏览器表现为 `net::ERR_HTTP2_PING_FAILED` / `ERR_TIMED_OUT` 导入失败。样例已给 `/api/projects/*/import` 单独放宽到 `300s`。客户端已做超时 + 幂等重试兜底(块缩到 4MiB、按 off 幂等追加),反代不放宽时大项目仍可能反复触发重试。
 
 ---
 

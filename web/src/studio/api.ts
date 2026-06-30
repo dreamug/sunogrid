@@ -40,15 +40,38 @@ export const api = {
     // §38 导出:下载 zip 用此 URL 直接 <a download>(GET 带 cookie 即鉴权)。
     exportUrl: (id: string): string => `/api/projects/${id}/export`,
     // §38 导入(覆盖):分块上传 zip。Next 截断 >10MiB 的 raw body、formData 在大文件上触发 undici 解析 bug,
-    // 故切成 8MiB 块逐个 POST(uploadId 关联、final 标记收尾),服务端拼回临时文件再解包覆盖。
+    // 故切成块逐个 POST(uploadId 关联、off 幂等追加、final 标记收尾),服务端拼回临时文件再解包覆盖。
+    // ⚠线上踩坑:8MiB 单请求太长,真机/反代下易撞 HTTP2-PING / idle 超时(net::ERR_HTTP2_PING_FAILED /
+    // ERR_TIMED_OUT)而整单中断且无补救。修法=① 块缩到 4MiB(单请求快收尾)② 每块带 off,服务端按 off
+    // 幂等追加(响应丢失重发不重复)③ 每块超时 + 退避重试(吞掉瞬态掉线)。final 收尾走事务+内容寻址,重跑安全。
     importReplace: async (id: string, file: File): Promise<{ id: string }> => {
-      const CHUNK = 8 * 1024 * 1024;
+      const CHUNK = 4 * 1024 * 1024;
+      const ATTEMPTS = 5, ATTEMPT_MS = 45000;
       const uploadId = (crypto.randomUUID?.() || String(Date.now()) + Math.random().toString(36).slice(2)).replace(/[^A-Za-z0-9-]/g, '').slice(0, 64);
+      // 单块带超时 + 退避重试。网络层失败(abort/PING/timeout)与 5xx → 重试;4xx(鉴权/坏块/坏 bundle)→ 立即抛。
+      const sendChunk = async (off: number, final: boolean, body: Blob): Promise<{ id: string }> => {
+        let lastErr: unknown;
+        for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+          if (attempt) await new Promise((r) => setTimeout(r, Math.min(8000, 500 * 2 ** attempt)));
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(), ATTEMPT_MS);
+          let res: Response;
+          try {
+            res = await fetch(`/api/projects/${id}/import?uploadId=${uploadId}&off=${off}&final=${final ? 1 : 0}`,
+              { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body, signal: ac.signal });
+          } catch (e) { lastErr = e; continue; } // 网络层中断(ERR_HTTP2_PING_FAILED / ERR_TIMED_OUT / abort)→ 重试
+          finally { clearTimeout(timer); }
+          if (res.ok) return res.json();
+          const msg = (await res.text().catch(() => '')) || `HTTP ${res.status}`;
+          if (res.status < 500) throw new Error(msg); // 4xx:永久错,重试无益
+          lastErr = new Error(msg); // 5xx:重试
+        }
+        throw lastErr instanceof Error ? lastErr : new Error('upload failed');
+      };
       let res: { id: string } | undefined;
       for (let off = 0; off < file.size || off === 0; off += CHUNK) {
         const final = off + CHUNK >= file.size;
-        const body = file.slice(off, off + CHUNK);
-        res = await fetch(`/api/projects/${id}/import?uploadId=${uploadId}&final=${final ? 1 : 0}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body }).then(J);
+        res = await sendChunk(off, final, file.slice(off, off + CHUNK));
         if (final) break;
       }
       return res as { id: string };

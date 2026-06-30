@@ -19,6 +19,21 @@ server {
     # 加上用户上传样本(§27)。默认 1m 会直接拦掉生成落库 —— 调大。
     client_max_body_size 50m;
 
+    # §38 项目导入:zip 分块上传 + final 块整体解包覆盖(大项目可能阻塞事件循环数十秒)。默认 60s 的
+    # proxy_read/send_timeout 会在收尾时把连接打掉(浏览器看到 net::ERR_HTTP2_PING_FAILED / ERR_TIMED_OUT)。
+    # 客户端已带超时 + 幂等重试,但仍把这条路的超时放宽,少触发重试、收尾更稳。
+    location ~ ^/api/projects/[^/]+/import$ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        client_body_timeout 300s;
+    }
+
     # 音频(模拟 CDN)带 immutable 长缓存,交给 nginx/上层 CDN 缓存。
     location /api/cdn/ {
         proxy_pass http://127.0.0.1:3000;
