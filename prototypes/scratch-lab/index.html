@@ -265,8 +265,13 @@ function startPlay(lock){
     const eb=((performance.now()/1000 - playStart)/beatSec) % routine._end;
     let idx=0; for(let i=0;i<routine.moves.length;i++){ if(eb>=routine._starts[i]) idx=i; else break; }
     const m=routine.moves[idx];
-    if(idx!==lastMoveIdx){ lastMoveIdx=idx; markMove(idx); }
-    if(m.tech==='rest'){ seqGate=0; }                       // 留白:关门即静,读头不动
+    if(idx!==lastMoveIdx){ lastMoveIdx=idx; markMove(idx);
+      if(m.tech==='play' && scrub){                          // 进入"让盘走":落撮点 + 松手让马达正向播(原子)
+        scrub.port.postMessage({type:'play', cue: Math.max(region.s,Math.min(region.e,m.cue)), rate:1});
+      }
+    }
+    if(m.tech==='rest'){ seqGate=0; }                        // 静音留白:盘停、推子关
+    else if(m.tech==='play'){ seqGate=1; }                   // 让盘走:马达正向播、推子开(free 模式自走,不发 scratch)
     else {
       const cb=CYCLE[m.tech]||1;
       const within=eb - routine._starts[idx];               // move 内已过几拍
@@ -299,12 +304,12 @@ for (const key of TECH_KEYS) {
     else { startPlay(key); [...grid.children].forEach(x=>x.classList.remove('on')); b.classList.add('on'); log('▶ 乐句 '+t.label); } };
   grid.appendChild(b);
 }
-const TCOL={baby:'#c2724f',forward:'#cf8a5c',chirp:'#d8a24a',transformer:'#6f9e8b',crab:'#7e8a9e',flare:'#b07f86',orbit:'#a77fb0',scribble:'#9a8b7c',tear:'#c98f3f',hydroplane:'#5e9ec2',rest:'#2a221c'};
+const TCOL={baby:'#c2724f',forward:'#cf8a5c',chirp:'#d8a24a',transformer:'#6f9e8b',crab:'#7e8a9e',flare:'#b07f86',orbit:'#a77fb0',scribble:'#9a8b7c',tear:'#c98f3f',hydroplane:'#5e9ec2',play:'#4f8c5e',rest:'#2a221c'};
 function renderRoutine(r){
   const v=$('routineView'); v.innerHTML='';
   r.moves.forEach((m,i)=>{ const el=document.createElement('span');
     el.style.cssText=`padding:2px 6px;border-radius:3px;background:${TCOL[m.tech]||'#333'};color:#160f0b;opacity:.9`;
-    el.textContent = m.tech==='rest' ? `· ${m.beats}` : `${m.tech} ${m.beats}`;
+    el.textContent = m.tech==='rest' ? `· ${m.beats}` : m.tech==='play' ? `▶ ${m.beats}` : `${m.tech} ${m.beats}`;
     v.appendChild(el); });
 }
 function markMove(idx){ [...$('routineView').children].forEach((el,i)=>{ el.style.outline=i===idx?'2px solid #fff':'none'; }); }

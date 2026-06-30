@@ -3,13 +3,12 @@
 // 左 = LoopManager(生成 + 真实库,可拖);中 = 操场(clip 画波形、拖库素材进空 slot=sample 乐器、hover 空 slot=＋sample/＋切片、拖进 collage=加片);
 // 底 = 编辑器(选库素材→预调 warp;选乐器→mixer + warp/collage 下钻)。生产 loop-machine 与 DB 的旧表不碰。
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
-import { createPortal } from 'react-dom';
+import type { CSSProperties } from 'react';
 import Link from 'next/link';
 import type { AutoPoint, Clip, CollageClip, FxConfig, GenPrefs, GridPrefs, Instrument, InstrumentPayload, InstrumentSends, Mixer, Quantize, SampleWarp, Session, SongLane, XYAutomation, XYAutoSet, XYProgram } from '@/contracts';
 import { activeInstruments, resolveInstruments, clipMixer, defaultMixer, defaultSends, DEFAULT_FX, DEFAULT_XY, instrumentBars, mixerToClipPatch, sessionBars, sessionColor, sessionRepeats, sessionSongEndBar, sessionSongLane, sessionSongStartBar, sessionSongAnchor, isMainLane, pickSessionColor, backfillSessionColors, SESSION_COLORS, SLOTS_PER_SESSION } from '@/contracts';
 import { resnapSong, mainLayout, anchorPatchAt, mainInsertIndex, moveMainTo, subDropLanding, nextFreeSubStart } from '@/studio/songLayout';
-import { normalize, diff, type Snapshot } from '@/studio/sync';
+import { normalize, type Snapshot } from '@/studio/sync';
 import { StudioEngine } from '@/audio/studioEngine';
 import { warpPtsSig } from '@/audio/warpMap';
 import { buildBuffer, decodeAsset, loadLibrary, regionFromClip, regionFromSound, soundToClip, warpToBuffer } from '@/studio/realLibrary';
@@ -17,8 +16,8 @@ import { loadGens, generateToLibrary, retryGen, uploadToLibrary, rechopSong, con
 import { addSession as docAddSession, cloneInstrument, duplicateSessionAt, findInst, freeSlots, moveSession, patchCollageClip, patchMixer, patchSession, removeInstrument as docRemove, removeSessionAt } from '@/studio/sessionDoc';
 import { placeItem, placeNear, roomAt, itemLengthSteps } from '@/studio/collageDoc';
 import { MixerStrip } from '@/studio/ui/MixerStrip';
-import { Wave, MasterMeter, TransportPos, SampleWave, CollageHead, LaunchLevel, SessionPlayhead, SongPlayhead } from '@/studio/ui/live';
-import { InstrumentIcon, INSTRUMENT_ICONS, ICON_KEYS, DEFAULT_ICON } from '@/studio/ui/instrumentIcons';
+import { MasterMeter, TransportPos, SampleWave, CollageHead, LaunchLevel, SessionPlayhead } from '@/studio/ui/live';
+import { InstrumentIcon } from '@/studio/ui/instrumentIcons';
 import { TransportIcon } from '@/studio/ui/glyphs';
 import { ConfirmDialog, type ConfirmOpts } from '@/ui/ConfirmDialog';
 import { LoopManager } from '@/studio/ui/LoopManager';
@@ -33,10 +32,24 @@ import type { GenView, LoopView } from '@/contracts/studioViews';
 import { api, type ApiSound } from '@/studio/api';
 import { ClipEditor } from '@/studio/ui/WarpEditor';
 import { ChopView } from '@/studio/ui/ChopView';
+import { CollagePadBody } from '@/studio/ui/CollagePadBody';
+import { SongZoomScope } from '@/studio/ui/SongZoomScope';
+import { SessionColorDot } from '@/studio/ui/SessionColorDot';
+import { InstrumentChip } from '@/studio/ui/InstrumentChip';
+import { SongInstrumentCount } from '@/studio/ui/SongInstrumentCount';
+import { InstrumentName } from '@/studio/ui/InstrumentName';
+import { Metronome } from '@/studio/ui/Metronome';
+import { ProjectNameInput } from '@/studio/ui/ProjectNameInput';
+import { TempoInput } from '@/studio/ui/TempoInput';
+import { CollageEditor } from '@/studio/ui/CollageEditor';
+import { RailScroll } from '@/studio/ui/SongTimeline';
+import { ArrangePopover } from '@/studio/ui/ArrangePopover';
+import { EmptyEditor } from '@/studio/ui/EmptyEditor';
+import { nid, cvar, FAINT, SONG_ZOOM_DEFAULT, clampZoom } from '@/studio/shared';
+import { computePeaks, peaksFromRegion, lanePeaksCache, pieceKey } from '@/studio/peaks';
+import { emptySessions, normalizeSongLayout, songTotalBars, SONG_TRACK_COUNT, songActiveAt, songForeground, songNextBoundaryAfter, sessionInstIds, enabledInstIds } from '@/studio/songQuery';
+import { usePersistence } from '@/studio/hooks/usePersistence';
 
-// 客户端生成稳定 id(§15:落库与内存共用同一 id,支撑自动保存,刷新不变)。
-const nid = (p: string) => `${p}-${crypto.randomUUID()}`;
-const cvar = (c: string): CSSProperties => ({ ['--c']: c } as CSSProperties);
 
 // 生成框默认提示词池:都是「整条 beat」(鼓+贝斯+旋律的完整律动),非单乐器;每次进入随机换一条。
 const BEAT_PROMPTS = [
@@ -84,128 +97,8 @@ function setDragImage(ev: React.DragEvent, label: string): void {
   try { ev.dataTransfer.setDragImage(g, 14, 12); } catch { /* */ }
   setTimeout(() => g.remove(), 0);
 }
-const PX = 12;
-const FAINT = 'rgba(255,255,255,0.032)'; // 很浅的网格线
-const SONG_ZOOM_DEFAULT = 40; // §37 Song zoom 默认 px/bar = 滑块正中(范围 20..60);双击 slider 回到这里
-
-// 波形峰值采样点数:全用同一高密度值 —— pad/lane/编辑器/库卡共享 lanePeaksCache(同 region 同 key),
-// 且 peaksFromRegion 是 O(span)(与 n 无关,只多写几个数组元素),故拉高几乎免费,换来宽编辑器里不再有可见折线。
-// 旧值 72/100/120 在宽 collage 轨上每个 transient 只摊到 ~6 点 → 圆钝折面;768 让每片 transient 有几十点 → 贴近逐像素的细腻。
-const WAVE_N = 768;
-
-function computePeaks(buf: AudioBuffer, n = WAVE_N): number[] {
-  const ch0 = buf.getChannelData(0);
-  const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
-  const len = ch0.length, out = new Array(n).fill(0), step = len / n;
-  let max = 0;
-  for (let i = 0; i < n; i++) {
-    const a = Math.floor(i * step), b = Math.min(len, Math.floor((i + 1) * step));
-    let pk = 0;
-    for (let j = a; j < b; j++) { const v = ch1 ? (Math.abs(ch0[j]) + Math.abs(ch1[j])) * 0.5 : Math.abs(ch0[j]); if (v > pk) pk = v; }
-    out[i] = pk; if (pk > max) max = pk;
-  }
-  if (max > 0) for (let i = 0; i < n; i++) out[i] /= max;
-  return out;
-}
-// 取源解码声道里 [start,end) 区(= trim 后那段)的峰值,供 collage 轨上每片画 trim 后波形。
-function peaksFromRegion(channels: Float32Array[], startSample: number, endSample: number, n = WAVE_N): number[] {
-  const ch0 = channels[0]; if (!ch0) return [];
-  const len = ch0.length;
-  // ⚠不夹 span:trim 区可越界(负起点/超尾),越界处算静音补零 —— 与 warp sliceChannelsPadded / 播放一致,否则波形会"丢掉"前导静音、整体左移。
-  const a = Math.round(startSample), b = Math.max(a + 1, Math.round(endSample));
-  const span = b - a, out = new Array(n).fill(0), step = span / n;
-  let max = 0;
-  for (let i = 0; i < n; i++) {
-    const s0 = a + Math.floor(i * step), s1 = a + Math.floor((i + 1) * step);
-    let pk = 0;
-    for (let j = s0; j < s1; j++) { if (j >= 0 && j < len) { const v = Math.abs(ch0[j]); if (v > pk) pk = v; } }
-    out[i] = pk; if (pk > max) max = pk;
-  }
-  if (max > 0) for (let i = 0; i < n; i++) out[i] /= max;
-  return out;
-}
-const lanePeaksCache = new Map<string, number[]>(); // key = assetId:start:end → 峰值(跨乐器/渲染复用)
-const pieceKey = (c: { assetId: string; startSample: number; endSample: number }) => `${c.assetId}:${Math.round(c.startSample)}:${Math.round(c.endSample)}`;
-// collage 每片配色:按片序号轮一个调色板(相邻片必不同色,方便分辨);lane 与 pad 用同一序号 → 同片同色。
-const SLICE_COLORS = ['#c2724f', '#6a86a0', '#c2a24f', '#8a9b6a', '#a06f8a', '#9a7bc0', '#5a9b9b', '#b56a6a'];
-const sliceColor = (i: number) => SLICE_COLORS[((i % SLICE_COLORS.length) + SLICE_COLORS.length) % SLICE_COLORS.length];
-// 按片 id 哈希取色 —— 稳定:排序/拖移/重排都不变色(别用数组下标,下标会随 sortItems 漂)。
-const sliceColorFor = (id: string) => { let h = 0; for (let k = 0; k < id.length; k++) h = (Math.imul(h, 31) + id.charCodeAt(k)) | 0; return sliceColor(h); };
-
-/** collage 乐器 pad 的**静态**底:每片一个彩色底块 + 片色波形 + 小节/拍网格线。memo:payload 不变就不重渲
- *  (播放头是独立的 <CollageHead> 自驱动叶子,不在这里;故播放时本体一帧都不用重算)。
- *  peaksSig:各片峰值是否已进 lanePeaksCache 的签名('0'/'1' 串)。reload 后缓存是异步填的、payload 不变,
- *  纯 memo(payload) 会跳过重渲 → pad 只剩色块不显波形;靠此 prop 从 '0…' 变 '1…' 打破 memo,峰值到位即重画。 */
-const CollagePadBody = memo(function CollagePadBody({ payload }: { payload: Extract<InstrumentPayload, { kind: 'collage' }>; peaksSig: string }) {
-  const spb = payload.stepsPerBar;
-  const loopLen = Math.max(1, Math.round(payload.bars * spb));
-  const barPct = (spb / loopLen) * 100, beatPct = barPct / 4; // 每小节/每拍一条线
-  return (
-    <div className="cwave" aria-hidden="true">
-      {payload.clips.map((c) => {
-        const x = ((c.startStep - payload.loopStartStep) / loopLen) * 100;
-        const w = (Math.max(1, Math.round(c.bars * spb)) / loopLen) * 100;
-        const vx = Math.max(0, x), vw = Math.min(100, x + w) - vx;
-        if (vw <= 0) return null;
-        const col = sliceColorFor(c.id), pk = lanePeaksCache.get(pieceKey(c));
-        return (
-          <div key={c.id} style={{ position: 'absolute', top: 0, bottom: 0, left: `${vx}%`, width: `${vw}%`, overflow: 'hidden', background: `color-mix(in srgb, ${col} 26%, transparent)`, borderRight: `1px solid color-mix(in srgb, ${col} 50%, transparent)` }}>
-            {pk && pk.length > 1 && <div style={{ position: 'absolute', inset: 0, color: `color-mix(in srgb, ${col} 88%, #fff)`, opacity: 0.92 }}><Wave className="" peaks={pk} /></div>}
-          </div>
-        );
-      })}
-      {/* 网格线叠在彩色块之上 */}
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,0.14) 0 1px, transparent 1px ${barPct}%), repeating-linear-gradient(90deg, rgba(255,255,255,0.06) 0 1px, transparent 1px ${beatPct}%)` }} />
-    </div>
-  );
-});
-
 interface Ctx { soundsById: Map<string, ApiSound>; bpm: number; beatsPerBar: number }
 
-// 空工程兜底:1 个默认会话(与服务端 /api/studio 一致;真正落库由首次保存的 sess.add 完成)
-const emptySessions = (): Session[] => [
-  { id: nid('sess'), name: 'Scene 1', index: 0, songLane: 0, songStartBar: 0, repeats: 1, color: SESSION_COLORS[0], instruments: [] }, // §37 默认场景即带色(非 null)→ 新工程不触发加载补色的早期 sess.add
-];
-
-function normalizeSongLayout(sessions: Session[]): Session[] {
-  return resnapSong(sessions); // §37 加载即派生:主轨吸附 / sub 锚定跟随 / 失效锚降级孤儿
-}
-
-function songTotalBars(sessions: Session[]): number {
-  return sessions.reduce((m, s) => Math.max(m, sessionSongEndBar(s)), 0);
-}
-
-const SONG_TRACK_COUNT = 10; // §37 Song 固定 track 数(Main + Sub 1..9);不增删,空轨常驻,arranger 纵向 scroll。
-function songLaneCount(sessions: Session[]): number {
-  return sessions.reduce((m, s) => Math.max(m, sessionSongLane(s) + 1), 1);
-}
-
-function songActiveAt(sessions: Session[], bar: number): Session[] {
-  return sessions.filter((s) => {
-    const start = sessionSongStartBar(s), end = sessionSongEndBar(s);
-    return bar >= start && bar < end;
-  });
-}
-
-/** §37 多轨「前景块」= 驱动播放头跟随 / 视图 / XY automation 的那一块。统一口径:主轨块(lane 0)优先(歌的主干),否则当前重叠中最晚开始的 active 块。prime 与稳态 coordinator 必须用同一个,免 XY automation 来源在起播瞬间和稳态打架。 */
-function songForeground(active: Session[]): Session | undefined {
-  if (!active.length) return undefined;
-  return active.find(isMainLane) ?? [...active].sort((a, b) => sessionSongStartBar(b) - sessionSongStartBar(a))[0];
-}
-
-function songNextBoundaryAfter(sessions: Session[], bar: number): number | null {
-  let next: number | null = null;
-  for (const s of sessions) {
-    for (const b of [sessionSongStartBar(s), sessionSongEndBar(s)]) {
-      if (b > bar + 1e-6 && (next == null || b < next)) next = b;
-    }
-  }
-  return next;
-}
-
-const sessionInstIds = (sessions: Session[]): string[] => sessions.flatMap((s) => resolveInstruments(s).map((i) => i.id));
-// §37 只起「激活(enabled)」乐器的 voice:Song 播放起声路径用它(停声仍用全部 sessionInstIds),否则禁用乐器也会随块进 active 被点响。
-const enabledInstIds = (sessions: Session[]): string[] => sessions.flatMap((s) => activeInstruments(s).map((i) => i.id));
 
 export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = null, genPrefs = null, gridPrefs = null, fx: fxProp = null, quantize: propQuantize = '1bar', beatsPerBar = 4, loopSong: propLoopSong = false, playMode: propPlayMode = 'live', showAutomation: propShowAutomation = true, songLanes: songLanesProp = null }: { projectId: string; name?: string; masterBpm: number; masterKey?: string | null; genPrefs?: GenPrefs | null; gridPrefs?: GridPrefs | null; fx?: FxConfig | null; quantize?: Quantize; beatsPerBar?: number; loopSong?: boolean; playMode?: 'live' | 'song'; showAutomation?: boolean; songLanes?: SongLane[] | null }) {
   const [ctx, setCtx] = useState<Ctx | null>(null);
@@ -220,8 +113,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const playingIdxRef = useRef(0); playingIdxRef.current = playingIdx; // §26 回放 rAF 闭包读最新播放块
   const [playingSongIds, setPlayingSongIds] = useState<Set<string>>(() => new Set()); // §37 Song 多轨:当前正在出声的 session id 集
   const playingSongIdsRef = useRef<Set<string>>(new Set()); playingSongIdsRef.current = playingSongIds;
-  const [songZoom, setSongZoom] = useState(gridPrefs?.songZoom ?? SONG_ZOOM_DEFAULT); // §26/§37 Song 比例时间轴:px/bar。默认=滑块正中(范围 20..60);Alt 滚轮可越界,双击 slider 回正。§15.A 持久化(gridPrefs)
-  const [songGrid, setSongGrid] = useState(gridPrefs?.songGrid ?? 1); // §37 track 网格密度:每几 bar 一条竖线(全高、两边通);0=关。§15.A 持久化(gridPrefs)
+  // perf:songZoom/songGrid 已下放到 <SongZoomScope>(隔离重渲,见组件) —— zoom 高频改动不再触发 3100 行单体全量重渲。
   const [arrangerH, setArrangerH] = useState(208); // §37 arranger(track 区)定高:内部纵向 scroll(默认露 ~3 条收起 track);分隔条拖动改它
   const [songVScroll, setSongVScroll] = useState(0); // §37 lanes 纵向 scrollTop → gutter 表头同步平移(冻结窗格)
   const stageRef = useRef<HTMLElement>(null); // §37 量 stage 可用高 → arranger 上限按它的一半(留给乐器区一半,而非整屏一半)
@@ -318,6 +210,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [building, setBuilding] = useState<Record<string, boolean>>({}); // ⑩ 新乐器入场:正在首建 buffer 的乐器 id(无 peaks 时 → 压暗 + 锁 ▶)
   const [playing, setPlaying] = useState(false);
   const playingRef = useRef(false); playingRef.current = playing; // §26.4 coordinator 常驻 rAF 闭包读最新播放态
+  const [prepping, setPrepping] = useState(false); // §44 起播准备态:点 Play 后到 startTransport 之间(冷启动建 active 块 voice)→ 按钮转圈 + 禁重入
+  const preloadAbort = useRef(false); // §44 起播入口**同步**置 true → 立即停后台预载,把主线程让给起播(避免预载与起播 build 并发争抢 = 实测「播放期间一次性 build 全曲」式 ~1s 卡;只一件在途的 build 会越界,可接受)
   const [soloIds, setSoloIds] = useState<Set<string>>(() => new Set()); // §18 独奏集(瞬态,不落库/不进 undo);隔离式 + 多选
   // 顶栏:量化粒度 / 节拍器(开关·音量·几小节响一次) / 主音量。引擎能力见 StudioEngine。
   const [quantize, setQuantizeState] = useState<Quantize>(propQuantize);
@@ -344,9 +238,22 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const [dragInstSlot, setDragInstSlot] = useState<number | null>(null); // 正在拖的乐器 slot → 拖单 sample 乐器进 chop 时复制其 clip / 占位块按真实小节
   const [hoverSlot, setHoverSlot] = useState<number | null>(null);
   const [, setTick] = useState(0);
+  // perf:LIBRARY(LoopManager,~700 节点)+ pad grid 回调走稳定 ref 路由 —— 元素引用稳定 + memo 包裹后,
+  //   zoom / 播放跨块 / 切场景时这些与它们无关的子树不再陪着 reconcile。ref.current 每渲染刷新=闭包永新鲜。
+  const libCbRef = useRef<Record<string, (...a: any[]) => any>>({});
+  const libCb = useMemo(() => {
+    const k = ['onGenBpm', 'onGenKey', 'onGenerate', 'onUpload', 'onSelect', 'onAudition', 'onAssignNext', 'onSeparate', 'onRetryGen', 'onCancelGen', 'onDeleteGen', 'onDeleteSound'] as const;
+    return Object.fromEntries(k.map((n) => [n, (...a: any[]) => libCbRef.current[n]?.(...a)])) as Record<(typeof k)[number], (...a: any[]) => any>;
+  }, []);
+  // perf:songZoom/songGrid 下放到 <SongZoomScope>(rAF 合并 + 钳制 + 持久化都在那);这里只留:
+  //   ① songZoomRef —— 暴露当前 zoom 给 StudioApp 体内的拖拽 handler 读(scope 每渲染回写);
+  //   ② persistGrid —— scope 改 zoom/grid 时防抖落 gridPrefs 的回调。
+  const songZoomRef = useRef(clampZoom(gridPrefs?.songZoom ?? SONG_ZOOM_DEFAULT));
+  const persistGrid = useCallback((zoom: number, grid: number) => {
+    gridRef.current = { ...gridRef.current, songZoom: zoom, songGrid: grid };
+    api.projects.update(projectId, { gridPrefs: gridRef.current }).catch(() => {});
+  }, [projectId]);
   const [status, setStatus] = useState('Loading library + generation records…');
-  const [sync, setSync] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle'); // 自动保存状态(替代 Save 按钮)
-  const [saveErr, setSaveErr] = useState<string | null>(null); // 保存失败的真实原因(后端 500 body / 网络)——显式暴露,绝不再静默重试丢数据
 
   const eng = useRef<StudioEngine | null>(null);
   const ctxRef = useRef<Ctx | null>(null);
@@ -357,12 +264,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const trashableSounds = useRef<Set<string>>(new Set());
   const trashableGens = useRef<Set<string>>(new Set());
   const genAborts = useRef<Map<string, AbortController>>(new Map()); // 生成中的 gen → 取消句柄(随时干掉)
-  const loaded = useRef(false); // 加载完成前不触发自动保存
-  const saving = useRef(false); // 保存锁:避免并发 flush
-  const pendingSave = useRef(false); // 保存期间又有改动 → 存完再存一次
-  const synced = useRef<Snapshot>({ sessions: {}, instruments: {}, clips: {} }); // 上次已落库的规范化快照,diff 的基准
-  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null); // 失败退避重试
-  const retryCount = useRef(0); // 连续重试次数:可重试错误(网络/5xx/skipped)退避递增并设上限,挡无限 retry storm
+  const loaded = useRef(false); // 加载完成前不触发自动保存(usePersistence 读它判断是否落库)
+  const synced = useRef<Snapshot>({ sessions: {}, instruments: {}, clips: {} }); // 上次已落库的规范化快照,diff 基准(load 写初值,usePersistence flush 推进)
+  const { sync, saveErr } = usePersistence({ projectId, sessions, sessionsRef, loaded, synced }); // §15 自动保存发件箱(抽成 hook;sync/saveErr 供顶栏状态点 + 错误横幅)
   const dragOK = useRef(true);
   const gainDragged = useRef(false); // 拖 gain 线刚结束 → 吞掉随之而来的 click(否则冒泡到卡片 onClick 误触 previewInst)
   const soloRef = useRef<Set<string>>(new Set()); soloRef.current = soloIds; // §18 独奏集 authority(toggle/clear 读最新值,避免闭包旧值)
@@ -371,10 +275,41 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const buildSeq = useRef<Record<string, number>>({}); // per-乐器 build 单调号:异步 build 完成后若已被更晚一次编辑/重载取代 → 丢弃旧结果,别用过期 buffer 覆盖引擎(防"画面新声音旧";对标旧 useLoopMachine 的 seqRef)
   ctxRef.current = ctx; sessionsRef.current = sessions; gensRef.current = gens; quantizeRef.current = quantize;
 
-  const loadInstrumentToEngine = useCallback(async (inst: Instrument, seamless = false, arm = true) => {
+  // §44 perf:把 loadInstrumentToEngine 的 setPeaks/setBuilding **合批**——首播/预载会并发 build 全曲乐器,
+  //   原本每件 3 次全树 setState(building↑→peaks→building↓)= 几十次单体重渲 = 起播卡顿真因(见 [[studio-render-perf]])。
+  //   累进 pending,setTimeout(0) 一帧内攒齐再一次性 flush:N×3 → ~2 次重渲。
+  //   附带「暖建跳 spinner」:某件 build 在一个 flush 窗口内 start→finish(命中缓存,亚毫秒),building 的 true 与 delete
+  //   落在同一 pending(后写覆盖)→ 只剩 delete → 从不闪 spinner、不多渲。冷建(true 先 flush)才显。
+  const peaksPending = useRef<Record<string, number[] | null>>({}); // null = 删除该乐器峰值(缺源)
+  const buildingPending = useRef<Record<string, boolean>>({});      // false = 删除该 building 标记
+  const flushScheduled = useRef(false);
+  const flushBuildState = useCallback(() => {
+    flushScheduled.current = false;
+    const pp = peaksPending.current; peaksPending.current = {};
+    const bp = buildingPending.current; buildingPending.current = {};
+    if (Object.keys(pp).length) setPeaks((prev) => {
+      const next = { ...prev };
+      for (const [id, v] of Object.entries(pp)) { if (v === null) delete next[id]; else next[id] = v; }
+      return next;
+    });
+    if (Object.keys(bp).length) setBuilding((prev) => {
+      let next = prev, changed = false;
+      for (const [id, on] of Object.entries(bp)) {
+        if (on) { if (next[id] !== true) { if (!changed) { next = { ...prev }; changed = true; } next[id] = true; } }
+        else if (next[id]) { if (!changed) { next = { ...prev }; changed = true; } delete next[id]; }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+  const scheduleBuildFlush = useCallback(() => { if (!flushScheduled.current) { flushScheduled.current = true; setTimeout(flushBuildState, 0); } }, [flushBuildState]);
+  const queuePeaks = useCallback((id: string, v: number[] | null) => { peaksPending.current[id] = v; scheduleBuildFlush(); }, [scheduleBuildFlush]);
+  const queueBuilding = useCallback((id: string, on: boolean) => { buildingPending.current[id] = on; scheduleBuildFlush(); }, [scheduleBuildFlush]);
+
+  // setIntent=false = 纯预载:建 buffer+voice+peaks 但**绝不碰** wantOn/enabled(voice 默认 wantOn=false=静默)→ songPlayFrom 的 sweep 是唯一播放意图源 → 无竞态、不会点亮别块(§44 预载安全前提,区别于会污染意图的旧 loadSessionAdditive 预载)。
+  const loadInstrumentToEngine = useCallback(async (inst: Instrument, seamless = false, arm = true, setIntent = true) => {
     const e = eng.current; if (!ctxRef.current || !e) return;
     const myV = (buildSeq.current[inst.id] = (buildSeq.current[inst.id] ?? 0) + 1); // 本次 build 代号:完成后据此判废,后发先至的旧 build 不再盖回引擎
-    setBuilding((b) => ({ ...b, [inst.id]: true })); // ⑩ 入场/重建中;无缝重建(已有 peaks)不显遮罩,只锁全新乐器
+    queueBuilding(inst.id, true); // ⑩ 入场/重建中;无缝重建(已有 peaks)不显遮罩,只锁全新乐器(§44 合批 flush:暖建随后被 delete 抵消 → 不闪 spinner)
     try {
       // §34 竞态修复:新上传/生成的 asset 偶发「落库已返回但 CDN 还没就绪」→ 紧接着的 buildBuffer(取流/decode)**抛错**
       //   = 这件乐器建不出 voice(预览不出声、开了也不跟走带,要刷新才好)。只对**抛错**退避重试(asset 就绪后即成功);
@@ -390,7 +325,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         }
       }
       if (buildSeq.current[inst.id] !== myV) return; // 成功路径也判废:build 期间被更晚操作取代 → 不动引擎/peaks
-      if (!buf) { e.clearInstrument(inst.id); setPeaks((p) => { const q = { ...p }; delete q[inst.id]; return q; }); return; }
+      if (!buf) { e.clearInstrument(inst.id); queuePeaks(inst.id, null); return; }
       if (seamless && e.hasVoice(inst.id)) {
         e.swapBuffer(inst.id, buf, instrumentBars(inst)); // 在播时:下一个小节边界无缝接管,不断声
       } else {
@@ -411,7 +346,8 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         // 取 sessionsRef 里**最新**的 enabled,而非这次异步 build 捕获时的旧 inst.enabled:bake 期间用户点了激活 →
         //   捕获值已过期,旧值会把刚点的激活回写覆盖掉(同源的次生 desync)。乐器找不到(已删)则回落捕获值。
         const liveEnabled = sessionsRef.current.flatMap((s) => s.instruments).find((i) => i.id === inst.id)?.enabled ?? inst.enabled;
-        if (arm && soundingNow) e.setEnabled(inst.id, liveEnabled); // 活动场景:走带在跑时即量化起声
+        if (!setIntent) { /* §44 纯预载:不碰 wantOn/enabled(voice 建出即 wantOn=false 静默)→ 不会点亮别块,songPlayFrom 起播时由 sweep 统一上意图 */ }
+        else if (arm && soundingNow) e.setEnabled(inst.id, liveEnabled); // 活动场景:走带在跑时即量化起声
         else e.setWantOn(inst.id, liveEnabled);      // §20 预载非活动场景 / 查看非播放块:只记意图,到换场边界再起
       }
       // sample:pad 波形 = 源的 trim 区(与 ClipEditor 同一段,所见=所见);collage:乐器层 = 整条 baked loop。
@@ -426,9 +362,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         for (const cc of inst.payload.clips) { const k = pieceKey(cc); if (cc.assetId && !lanePeaksCache.has(k)) { try { const d = await decodeAsset(cc.assetId); lanePeaksCache.set(k, peaksFromRegion(d.channels, cc.startSample, cc.endSample)); } catch { /* 源缺失 */ } } }
       }
       if (buildSeq.current[inst.id] !== myV) return; // peaks 计算又经一次 await(decodeAsset);仍可能被取代 → 别写旧波形
-      setPeaks((p) => ({ ...p, [inst.id]: peaks }));
+      queuePeaks(inst.id, peaks);
     } finally {
-      if (buildSeq.current[inst.id] === myV) setBuilding((b) => { if (!b[inst.id]) return b; const q = { ...b }; delete q[inst.id]; return q; }); // 只有最新一次 build 负责收掉 building 遮罩,免被作废的旧调用提前清掉
+      if (buildSeq.current[inst.id] === myV) queueBuilding(inst.id, false); // 只有最新一次 build 负责收掉 building 遮罩,免被作废的旧调用提前清掉(§44 合批)
     }
   }, []);
   const loadSession = useCallback(async (s: Session) => {
@@ -513,14 +449,23 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         loaded.current = true; // 之后任何 setSessions 才触发自动保存
         // §37 一次性补色:给历史「未设色」场景钉上不撞色的稳定色(loaded 后 setSessions → autosave 落库;之后非 null 不再补)。颜色从此只随用户改色而变,不再随数组下标洗牌。
         { const colored = backfillSessionColors(sessions); if (colored !== sessions) setSessions(colored); }
-        // 后台预热其余场景的 warp/decode 缓存(只暖数据缓存,不在引擎里建 voice → 不违反 §20 常驻口径)。
-        // 首切某场景时 buildBuffer 直接命中缓存 → 边界不被冷渲(网络 warpRender + signalsmith)拖过头 = 换场不延迟。best-effort,失败静默。
-        (async () => { for (let i = 1; i < sessions.length && alive; i++) for (const inst of resolveInstruments(sessions[i])) { if (!alive) return; try { await buildBuffer(inst, c.bpm, c.soundsById); } catch { /* 暖缓存失败不影响播放 */ } } })();
+        // §44 后台预载:把其余场景的 voice 也建进引擎,但 setIntent=false=**绝不碰 wantOn/enabled**(voice 默认静默)。
+        //   → 首播 songPlayFrom 的 missing 已基本就绪 = 起播无需现场 decode/warp/建 voice/算 peaks(实测这才是冷首播 ~300ms 卡的真因,非渲染),起播降到 warm 档(~30ms)。
+        //   与旧「loadSessionAdditive 预载」的本质区别:那个 setIntent 默认 true → 后台迟到 setWantOn 点亮别块 = 播放不正常 + 抢机;这个永不上意图 → 无竞态。songPlayFrom 起播时 sweep 仍是唯一意图源。
+        //   逐件串行(不淹没主线程);build 经 §44 合批 flush;失败静默。Live 起播 retainOnly 照旧剔别场。
+        //   并发硬化:① playingRef.current 一旦起播立即停预载(songPlayFrom L768 早早置 true)→ 绝不在播放后重建/重载 voice(避免 dispose 掉正在出声的 player = 抖动);② hasVoice 已建则跳过(被 songPlayFrom 或上一轮建过)→ 不重载、不与起播抢 buildSeq。
+        (async () => { for (let i = 1; i < sessions.length && alive; i++) for (const inst of resolveInstruments(sessions[i])) { if (!alive || preloadAbort.current) return; if (eng.current?.hasVoice(inst.id)) continue; try { await loadInstrumentToEngine(inst, false, false, false); } catch { /* 预载失败不影响播放 */ } } })();
         setStatus(restored ? 'Loaded · drag a sample into an empty slot / hover a slot to add an instrument · ⌘Z · changes auto-save' : 'Empty stage · generate or pick a sample on the left, drag it into a slot = sample instrument · hover a slot to add a slice instrument · changes auto-save');
       } catch (err) { setStatus('Load failed: ' + conciseError(err)); }
     })();
     return () => { alive = false; eng.current?.dispose(); };
   }, [loadSession, projectId, masterBpm, beatsPerBar]);
+
+  // §44 起播 loading 态:点 Play → startTransport 之间(冷启动现建 active 块 voice)按钮转圈。
+  //   只在 >120ms 才显(命中预载/缓存的暖起播亚毫秒完成 → 定时器未触发即被 endPrepping 取消 → 不闪 spinner、零额外重渲)。
+  const preppingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const beginPrepping = () => { if (preppingTimer.current) return; preppingTimer.current = setTimeout(() => { preppingTimer.current = null; setPrepping(true); }, 120); };
+  const endPrepping = () => { if (preppingTimer.current) { clearTimeout(preppingTimer.current); preppingTimer.current = null; } setPrepping(false); };
 
   // 走带启停只切 playing(setState 即重渲一次);高频视觉(电平/走带位置/播放头)由自驱动叶子按 playing 起停 rAF。
   const togglePlay = () => {
@@ -541,7 +486,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const songMaxH = Math.max(songMinH, Math.min(22 + SONG_TRACK_COUNT * songLaneH, Math.round(songAvailH * 0.5) - 28)); // 上限:不超过 stage 一半(减 song-ctl+splitter 开销)→ 乐器区始终保住一半;再多的轨靠纵滚
   const arrangerHc = Math.max(songMinH, Math.min(songMaxH, arrangerH)); // 布局用的钳过高(automation 切换/localStorage 恢复都不越界)
   const songLanes = SONG_TRACK_COUNT; // §37 固定 10 条 track(Main + Sub 1..9),不增删;空轨也常驻,纵向 scroll 看下面的
-  const songTrackW = Math.max(1, songTotalBars(sessions) * songZoom);
+  // songTrackW 移进 <SongZoomScope> 的 render-prop(用其 zoom 参数算),此处不再持有 songZoom。
   // §16 撤销宪法:快照口径 = sessions 整树 + 各库声音 warp(预调改 Sound.warp,不在 sessions 里)+ 主 bpm(项目级标量,亦在 sessions 外)。
   // sessionId 可显式指定(undo/redo 时让对侧快照携带"改动归属的 session",见 undo/redo);默认 = 当前活动 session。
   const snapshot = (sessionId?: string): HistEntry => {
@@ -773,7 +718,12 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const startIds = enabledInstIds(startSessions);   // §37 起:只起激活乐器(禁用的不随块进 active 被点响)
     for (const id of stopIds) e.setWantOn(id, false);
     for (const id of startIds) e.setWantOn(id, true);
-    if (time != null) e.swapAndRelease(stopIds, startIds, time);
+    // §37 Song 换场只 stop/start、**不销毁**旧场 voice(用 swapVoicesAt 而非 swapAndRelease)。
+    //   songPlayFrom 已把全曲所有 session 预载常驻 = 无缝换场的前提;换完再 clearInstrument 旧场是反设计:
+    //   ① 一次销毁 N 个 voice(player+eq×3+gain+panner+meter)同步耗时 ~100ms,Song 连续换场时这块极易压上**下一个**边界的 swap 回调
+    //      → 回调迟到、lead 掉到 ~55ms 偶尔过点 → fire(time) 被 clamp → 下一段开头被吞(间歇 80/20,Live 单次换场不连发故无此症);
+    //   ② 销毁后循环回放该 session 无声(voice 没了)。常驻则两病同消;内存由 songPlayFrom 的 retainOnly 兜底(只留全曲乐器)。
+    if (time != null) e.swapVoicesAt(stopIds, startIds, time);
     setSongActiveIds(next);
     const foreground = songForeground(active); // §37 与 primeSongAutomation 同口径(主轨优先);驱动 playingIdx / songBlockStart / 视图跟随 / XY automation 源
     if (foreground) {
@@ -821,12 +771,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   //   起播期间是异步窗口(load 缺的 voice),用 starting 锁挡住重入起播 + 并发 switchSession,避免交错混场。
   const songPlayFrom = async (P: number) => {
     const e = eng.current; if (!e || starting.current || playModeRef.current !== 'song') return;
+    preloadAbort.current = true; // §44 起播即停后台预载(同步,先于一切 await)→ 让出主线程
     if (e.auditioningId() != null) { e.stopAudition(); setTick((t) => t + 1); } // 先停松散预览
     const list = sessionsRef.current; if (!list.length) return;
     const total = songTotalBars(list);
     const pos = Math.max(0, Math.min(P, Math.max(0, total - 1e-4))); // clamp 进曲长;不 floor(无极)
     const active = songActiveAt(list, pos);
-    starting.current = true;
+    starting.current = true; beginPrepping();
     try {
       await e.resume().catch(() => {});
       cancelSongSchedule();
@@ -845,9 +796,6 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       if (eng.current !== e) return;
       const rest = missing.filter((i) => !activeIdSet.has(i.id));
       if (rest.length) void Promise.all(rest.map((inst) => loadInstrumentToEngine(inst, false, false).catch((err) => console.warn('Song bg-load skip:', inst.id, err)))); // 后台补:不阻塞起播
-      // wantOn:全关 → 只起 active 块的激活乐器(§37 禁用乐器不随块进活跃)
-      for (const inst of list.flatMap((s) => resolveInstruments(s))) e.setWantOn(inst.id, false);
-      for (const inst of active.flatMap((s) => activeInstruments(s))) e.setWantOn(inst.id, true);
       // per-voice 相位 offset(秒)
       const mb = (beatsPerBar * 60) / (ctxRef.current?.bpm ?? masterBpm); // 每 bar 秒数(master 速率)
       const offsets = new Map<string, number>();
@@ -865,24 +813,31 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       setSongActiveIds(new Set(active.map((s) => s.id)));
       if (fg) { const bi = list.findIndex((s) => s.id === fg.id); if (bi >= 0) { setSessionIdx(bi); setPlayingIdx(bi); playingIdxRef.current = bi; reconcileSelToSession(list[bi]); setLibSel(null); } }
       await primeSongAutomation(active, pos); if (eng.current !== e) return;
+      // wantOn:全关 → 只起 active 块的激活乐器(§37 禁用乐器不随块进活跃)。
+      //   ⚠必须紧贴 startTransport(在 primeSongAutomation 的 await 之后):否则后台补载 rest(L847)的
+      //   loadInstrumentToEngine 会在 await 窗口里 setWantOn(enabled=true)重新点亮别块乐器,
+      //   startTransport 按 wantOn 全量起声 → 整个 session/别块乐器一起响(有一定几率的声音泄漏)。
+      for (const inst of list.flatMap((s) => resolveInstruments(s))) e.setWantOn(inst.id, false);
+      for (const inst of active.flatMap((s) => activeInstruments(s))) e.setWantOn(inst.id, true);
       // 走带置 pos(小数 bar → Bars:Beats[可小数]:0)+ 各 voice 按相位 offset 起声
       const bb = Math.floor(pos);
       e.setTransportPosition(`${bb}:${(pos - bb) * beatsPerBar}:0`);
       e.startTransport(offsets); setPlaying(true);
       scheduleNextSongBoundary(pos);
-    } finally { starting.current = false; }
+    } finally { starting.current = false; endPrepping(); }
   };
 
   // §20 起播(Live):收敛到「仅当前选中场景」再起,否则 startTransport 把别场残留 armed voice 一起点响。
   //   ① 当前场已在引擎(常态)→ retainOnly 瞬时剔残留(保 solo、不重建);② 不在(从 Song 钉住视图切回)→ loadSession 重灌。
   //   Song 模式统一委派 songPlayFrom(0)(从头无极起播)。starting 锁挡重入 + 并发 switchSession。
   const startPlayback = async () => {
+    preloadAbort.current = true; // §44 起播即停后台预载(同步)→ 让出主线程
     if (playModeRef.current === 'song') { void songPlayFrom(0); return; } // §39 Song:从头无极起播
     const e = eng.current; if (!e || starting.current) return;
     if (e.auditioningId() != null) { e.stopAudition(); setTick((t) => t + 1); } // 提前关掉松散预览窗口
     const s = sessionsRef.current[sessionIdx]; if (!s) return;
     const ids = resolveInstruments(s).map((i) => i.id);
-    starting.current = true;
+    starting.current = true; beginPrepping();
     try {
       await e.resume().catch(() => {});
       cancelSongSchedule();
@@ -894,7 +849,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
         e.retainOnly(ids); // 常态:瞬时剔别场残留(保 solo)
       }
       e.startTransport(); setPlaying(true);
-    } finally { starting.current = false; }
+    } finally { starting.current = false; endPrepping(); }
   };
 
   // 点场景卡:走带停 → 硬切(无声可断);走带在跑 → Live=量化换场(改播放);Song=只查看(不动播放,见 §20)。
@@ -985,7 +940,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   // §37 指针 X → 绝对小节(鼠标真实位置;lanes 容器是滚动内容,其 rect.left 自带滚动偏移 → 不用加 scrollLeft)。主轨 reorder 用它当插入判据。
   const songBarAt = (clientX: number): number => {
     const el = songLanesRef.current; if (!el) return 0;
-    return Math.max(0, (clientX - el.getBoundingClientRect().left) / songZoom);
+    return Math.max(0, (clientX - el.getBoundingClientRect().left) / songZoomRef.current);
   };
   const cloneSessionDeep = (src: Session): Session => ({ ...src, id: nid('sess'), index: sessionsRef.current.length, songAnchorId: null, songOffsetBar: 0, color: pickSessionColor(sessionsRef.current), instruments: src.instruments.map((i) => cloneInstrument(i, nid)) }); // §37 复制=新场景,取不撞色(不继承源色)
   const commitSongDrag = (id: string, vbar: number, vlane: number, clone: boolean, cursorBar: number) => {
@@ -1018,7 +973,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   };
   const songBlockMove = (e: React.PointerEvent) => {
     const d = songDragRef.current; if (!d) return;
-    const vbar = Math.max(0, d.origStart + Math.round((e.clientX - d.grabX) / songZoom));
+    const vbar = Math.max(0, d.origStart + Math.round((e.clientX - d.grabX) / songZoomRef.current));
     const vlane = songLaneAt(e.clientY);
     const cursorBar = songBarAt(e.clientX); // 鼠标真实小节(主轨 reorder 判据;vbar 仅供浮块跟手)
     if (!d.moved && Math.abs(e.clientX - d.grabX) < 4 && vlane === d.vlane) return; // 阈值内不算拖(留给 click 选/改名)
@@ -1038,7 +993,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   };
   const songResizeMove = (e: React.PointerEvent) => {
     const r = songResizeRef.current; if (!r) return;
-    const dR = Math.round((e.clientX - r.grabX) / Math.max(1, r.bars * songZoom));
+    const dR = Math.round((e.clientX - r.grabX) / Math.max(1, r.bars * songZoomRef.current));
     setSongResize({ id: r.id, reps: Math.max(1, Math.min(16, r.origReps + dR)) });
   };
   const songResizeUp = () => {
@@ -1419,12 +1374,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     return () => clearTimeout(t);
   }, [projectId, fx]);
   // §37 Song 视图偏好:缩放 / 网格密度改即乐观持久化 gridPrefs(防抖 300ms,合并滑块/滚轮连续变化;§15.A 同 gridPrefs 套路)。视图态不进 undo(§16:缩放/网格=视图,排除)。
-  const songViewHydrated = useRef(false);
-  useEffect(() => {
-    if (!songViewHydrated.current) { songViewHydrated.current = true; return; } // 首帧是 load 进来的值,不回写
-    const t = setTimeout(() => { gridRef.current = { ...gridRef.current, songZoom, songGrid }; api.projects.update(projectId, { gridPrefs: gridRef.current }).catch(() => {}); }, 300);
-    return () => clearTimeout(t);
-  }, [projectId, songZoom, songGrid]);
+  // songZoom/songGrid 持久化已移进 <SongZoomScope>(防抖 + 首帧不回写),见 persistGrid。
   const onGenBpm = (n: number) => { if (Number.isFinite(n)) setGbpm(n); };
   const onGenKey = (k: string) => { setGkey(k); api.projects.update(projectId, { masterKey: k || null }).catch(() => {}); }; // 即写工程调
 
@@ -1766,79 +1716,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   // 自动保存(§15.C:没有 Save —— 改即存,字段级细粒度 op)。
   // 当前树 vs synced 快照做 diff → 最小 op 列表 → POST /api/studio/ops;成功后 synced=target。
   // 保存锁串行化;保存期间又有改动则存完再存一次;失败退避重试。
-  const flushOps = useCallback(async (fromRetry = false) => {
-    if (saving.current) { pendingSave.current = true; return; }
-    if (!fromRetry) retryCount.current = 0; // 新的(非重试)flush = 用户又改了 → 重置退避计数,outage 恢复后能重新自动重试
-    saving.current = true;
-    do {
-      pendingSave.current = false;
-      const target = normalize(sessionsRef.current);
-      const ops = diff(synced.current, target);
-      if (ops.length === 0) break; // 无实质变化
-      setSync('saving');
-      try {
-        const r = await fetch('/api/studio/ops', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId, ops }) });
-        if (!r.ok) {
-          const body = await r.text().catch(() => '');
-          // 错误是否值得重试:网络层(下面 catch 里没 status 的)、429、5xx = 瞬态可重试;其余 4xx(400 坏 op/403/404)= 永久,重试也是同样的毒 op,只会 storm。
-          const retryable = r.status === 429 || r.status >= 500;
-          const e = new Error(`HTTP ${r.status}${body ? ` · ${body.slice(0, 300)}` : ''}`) as Error & { retryable?: boolean };
-          e.retryable = retryable;
-          throw e;
-        }
-        const res = await r.json().catch(() => null);
-        // 后端据实回报丢弃数:若 skipped>0,说明有 op 的父 session/instrument 不在库(基准失配)——
-        // 绝不能当成功推进基准,否则又变回"显示 Saved 实则没存"。当失败处理,基准不动、下次带 sess.add 重发(可重试)。
-        if (res && res.skipped) { const e = new Error(`后端丢弃了 ${res.skipped} 条改动(父 session/instrument 不在库)`) as Error & { retryable?: boolean }; e.retryable = true; throw e; }
-        synced.current = target; // 这批已落库,推进基准
-        retryCount.current = 0;
-        if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null; }
-        setSync('saved'); setSaveErr(null);
-      } catch (err) {
-        // 关键:别再静默吞掉失败。真实原因打到 console,并经 saveErr 弹横幅。
-        // ⚠ 但绝不能无脑每 3s 重试同一批:永久错误(400 坏 op / Prisma Unknown arg 这类 schema 失配)重试一万次还是同样的毒 op ——
-        //   只会无限 storm。故区分可重试(网络/429/5xx/skipped,带退避 + 次数上限)与永久(其余 4xx,直接停手只留横幅)。
-        const e = err as Error & { retryable?: boolean };
-        const isNetwork = !(err instanceof Error) || e.retryable === undefined; // fetch reject(断网/CORS)= 无 status,按瞬态处理
-        const retryable = isNetwork || e.retryable === true;
-        const msg = e instanceof Error ? e.message : String(err);
-        setSync('error'); setSaveErr(msg);
-        saving.current = false;
-        const MAX_RETRY = 8;
-        if (retryable && retryCount.current < MAX_RETRY) {
-          retryCount.current += 1;
-          const delay = Math.min(30_000, 3000 * retryCount.current); // 线性退避封顶 30s
-          console.error(`[studio] 保存失败(可重试 ${retryCount.current}/${MAX_RETRY},${delay}ms 后重试):`, msg, ops);
-          if (!retryTimer.current) retryTimer.current = setTimeout(() => { retryTimer.current = null; flushOps(true); }, delay);
-        } else {
-          // 永久错误,或重试次数耗尽:停手。基准不前进(改动仍在内存),横幅长亮提示用户——别再 storm。
-          console.error(`[studio] 保存失败,已停止重试(${retryable ? '次数耗尽' : '永久错误'}),改动仍只在内存里:`, msg, ops);
-        }
-        return;
-      }
-    } while (pendingSave.current);
-    saving.current = false;
-  }, [projectId]);
-
-  // 防抖:sessions 有实质变化 → 350ms 后落库(加载完成前不触发)。diff 天然合并连续改动。
-  useEffect(() => {
-    if (!loaded.current) return;
-    if (diff(synced.current, normalize(sessionsRef.current)).length === 0) return;
-    const t = setTimeout(() => { flushOps(); }, 350);
-    return () => clearTimeout(t);
-  }, [sessions, flushOps]);
-  useEffect(() => () => { if (retryTimer.current) clearTimeout(retryTimer.current); if (collageRebakeTimer.current) clearTimeout(collageRebakeTimer.current); }, []); // 卸载清掉待跑定时器(collage 重 bake 防抖否则会在引擎已 dispose 后 setState/动引擎)
-  // 离开/刷新守卫:仍有改动没落库(正在保存,或 diff 非空=被卡住的重试)→ 拦一下浏览器卸载,
-  // 避免重演"退出即丢全部 pad"。注:只挡整页刷新/关标签;App Router 客户端路由跳转挡不住(那条另说)。
-  useEffect(() => {
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (!loaded.current) return;
-      const dirty = saving.current || diff(synced.current, normalize(sessionsRef.current)).length > 0;
-      if (dirty) { e.preventDefault(); e.returnValue = ''; }
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, []);
+  useEffect(() => () => { if (collageRebakeTimer.current) clearTimeout(collageRebakeTimer.current); }, []); // 卸载清掉待跑的 collage 重 bake 定时器(否则引擎已 dispose 后 setState/动引擎);自动保存/退避重试/卸载守卫已抽进 usePersistence
 
   const e = eng.current;
   // 走带位置 / 主电平 不在此处每帧取了 —— 交给 <TransportPos>/<MasterMeter> 自驱动叶子(见 ui/live.tsx)。
@@ -1913,6 +1791,13 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const canDropOnLane = !!dragSound || !!dragSampleInst; // 库素材任意可落;乐器只接 sample(chop/空格落进来无效 → 不亮提示)
   const dragBars = dragSound ? soundToClip(dragSound).bars : dragSampleInst && dragSampleInst.payload.kind === 'sample' ? dragSampleInst.payload.clip.bars : null; // 占位块按真实小节(lane 内长度锁死 = clip.bars,不含 timeMul)
 
+  // perf:刷新 LIBRARY 回调 ref(libCb 稳定包装器在调用时读这里 → 闭包永远是最新一渲染的)。见 libCb 定义处。
+  libCbRef.current = {
+    onGenBpm, onGenKey, onGenerate, onUpload, onAudition: auditionSound, onSeparate: separateSound, onRetryGen, onCancelGen, onDeleteGen, onDeleteSound,
+    onSelect: (id: string) => { eng.current?.stopAudition(); focusSound(id); },
+    onAssignNext: (id: string) => { const slot = (() => { let s = 0; const used = new Set(curSession.instruments.map((i) => i.slot)); while (used.has(s)) s++; return s; })(); addSampleFromSound(id, slot); },
+  };
+
   return (
     <main className="daw" translate="no">
       <header className="tbar">
@@ -1922,7 +1807,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
 
         {/* 走带 */}
         <span className="tb-sep" />
-        <button className="tp" data-on={playing} onClick={togglePlay} aria-label={playing ? 'Stop' : 'Play'}><TransportIcon stop={playing} size={12} /></button>
+        <button className="tp" data-on={playing} disabled={prepping} onClick={togglePlay} aria-label={prepping ? 'Loading…' : playing ? 'Stop' : 'Play'} title={prepping ? 'Preparing playback…' : undefined}>{prepping ? <span className="sg-spin" aria-hidden="true" /> : <TransportIcon stop={playing} size={12} />}</button>
         {/* §20 播放模式 + 循环整首:演奏态,紧挨播放键 */}
         <span className="seg sm">
           <button className={playMode === 'live' ? 'on' : ''} onClick={() => changePlayMode('live')}>Live</button>
@@ -2009,13 +1894,18 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
           <LoopManager
             gens={gens} selectedLoopId={libSel} previewing={auditioning != null && auditioning === libSel} warmingId={warming} peaks={libPeaks} masterBpm={ctx.bpm}
             genPrompt={gp} genMode={gmode} genLoop={gloop} genBpm={gbpm} genKey={gkey}
-            onGenPrompt={setGp} onGenMode={setGmode} onGenLoop={setGloop} onGenBpm={onGenBpm} onGenKey={onGenKey}
-            onGenerate={onGenerate} onUpload={onUpload} onSelect={(id) => { eng.current?.stopAudition(); focusSound(id); }} onAudition={auditionSound} onDragSound={setDragSoundId}
-            onAssignNext={(id) => { const slot = (() => { let s = 0; const used = new Set(curSession.instruments.map((i) => i.slot)); while (used.has(s)) s++; return s; })(); addSampleFromSound(id, slot); }}
-            onSeparate={separateSound} onRetryGen={onRetryGen} onCancelGen={onCancelGen} onDeleteGen={onDeleteGen} onDeleteSound={onDeleteSound} stemServiceUp={stemUp}
+            onGenPrompt={setGp} onGenMode={setGmode} onGenLoop={setGloop} onGenBpm={libCb.onGenBpm} onGenKey={libCb.onGenKey}
+            onGenerate={libCb.onGenerate} onUpload={libCb.onUpload} onSelect={libCb.onSelect} onAudition={libCb.onAudition} onDragSound={setDragSoundId}
+            onAssignNext={libCb.onAssignNext}
+            onSeparate={libCb.onSeparate} onRetryGen={libCb.onRetryGen} onCancelGen={libCb.onCancelGen} onDeleteGen={libCb.onDeleteGen} onDeleteSound={libCb.onDeleteSound} stemServiceUp={stemUp}
           />
         </aside>
 
+        {/* perf:整个 stage section(arranger+pad)包进 SongZoomScope;zoom 改动只重渲这里,StudioApp 体/toolbar/footer/library 全不动。pad 不用 zoom 但重渲它仅 ~0.7ms,不值得为它再拆 div。 */}
+        <SongZoomScope initialZoom={gridPrefs?.songZoom ?? SONG_ZOOM_DEFAULT} initialGrid={gridPrefs?.songGrid ?? 1} zoomRef={songZoomRef} onPersist={persistGrid}>
+        {(songZoom, songGrid, commitZoom, setSongGrid) => {
+        const songTrackW = Math.max(1, songTotalBars(sessions) * songZoom);
+        return (
         <section ref={stageRef} className={'stage' + (playMode === 'song' ? ' song' : '')} style={{ minWidth: 0, paddingBottom: arrangeInst ? arrangeH + 24 : undefined }}>
           <div className="srail-sticky">
           {playMode === 'song' && (
@@ -2066,7 +1956,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
               </span>
               <span className="song-ctl-z" title="Zoom (px per bar) — 双击回到中线">
                 <span className="song-ctl-zl">zoom</span>
-                <input type="range" min={20} max={60} step={1} value={songZoom} onChange={(ev) => setSongZoom(Number(ev.target.value))} onDoubleClick={() => setSongZoom(SONG_ZOOM_DEFAULT)} />
+                <input type="range" min={20} max={60} step={1} value={songZoom} onChange={(ev) => commitZoom(Number(ev.target.value))} onDoubleClick={() => commitZoom(SONG_ZOOM_DEFAULT)} />
               </span>
             </div>
           )}
@@ -2097,7 +1987,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
             </div>
           )}
           <div style={playMode === 'song' ? { flex: 1, minWidth: 0, height: '100%' } : undefined}>
-          <RailScroll song={playMode === 'song'} zoom={songZoom} onZoom={setSongZoom} sessions={sessions} selectedIdx={sessionIdx} engine={e} playing={playing} onSeekBar={songPlayFrom} onVScroll={setSongVScroll} gridEvery={songGrid}>
+          <RailScroll song={playMode === 'song'} zoom={songZoom} onZoom={commitZoom} sessions={sessions} selectedIdx={sessionIdx} engine={e} playing={playing} onSeekBar={songPlayFrom} onVScroll={setSongVScroll} gridEvery={songGrid}>
             <div ref={songLanesRef} className={'banks srail' + (playMode === 'song' ? ' song' : '') + ((songDrag || songResize) ? ' song-reflow' : '')} style={playMode === 'song' ? { position: 'relative', display: 'block', width: songTrackW, minWidth: '100%', height: songLanes * songLaneH } : undefined}>{/* §37 minWidth:100% 让 lane 横线铺满可视宽;song-reflow:拖动/resize 时给其他块加位置过渡=平滑滑动不跳 */}
               {playMode === 'song' && Array.from({ length: songLanes }, (_, lane) => (
                 <div key={'lane' + lane} className={'song-lane-bg' + (lane === 0 ? ' main' : '')} style={{ top: lane * songLaneH, height: songLaneH }} aria-hidden="true" />
@@ -2231,7 +2121,7 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
                       </div>
                     )}
                     {/* §37 右缘 resize 改 repeat(仅主轨;sub 无手柄)。 */}
-                    {isMainLane(s) && <span className="sblk-rs" title="拖动改 repeat" onPointerDown={(ev) => songResizeDown(ev, s)} onPointerMove={songResizeMove} onPointerUp={songResizeUp} />}
+                    {isMainLane(s) && <span className="sblk-rs" title="拖动改 repeat" style={{ height: SONG_CLIP_H }} onPointerDown={(ev) => songResizeDown(ev, s)} onPointerMove={songResizeMove} onPointerUp={songResizeUp} />}{/* 只盖 clip 头:别让 handle 压住下方 automation lane 最右的尾点(否则点不到/抓不住) */}
                   </div>
                 );
               })}
@@ -2360,6 +2250,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
             })}
           </div>
         </section>
+        );
+        }}
+        </SongZoomScope>
       </div>
 
       {/* 底部常驻编辑器:按聚焦渲染(素材 / 单sample clip / 切片片 / 空)。切片乐器的 arrange 轨另在浮层(见下)。 */}
@@ -2499,616 +2392,4 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   );
 }
 
-const CHIP_COLORS = ['#c2724f', '#6a86a0', '#c2a24f', '#8a9b6a', '#a06f8a', '#9a7bc0', '#5a9b9b', '#b56a6a'];
-
-/** §26 session 标题栏换色点:展示当前 session 色,点开 SESSION_COLORS 浮层换色(管理颜色)。portal 挂 body,绕开块的 overflow:hidden。 */
-function SessionColorDot({ color, onPick }: { color: string; onPick: (c: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  const place = useCallback(() => { const r = btnRef.current?.getBoundingClientRect(); if (!r) return; const winW = window.innerWidth || 1280; setPos({ left: Math.max(8, Math.min(r.left, winW - 170)), top: r.bottom + 6 }); }, []);
-  const toggle = (e: React.MouseEvent) => { e.stopPropagation(); place(); setOpen((o) => !o); };
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => { const t = e.target as Node; if (!btnRef.current?.contains(t) && !popRef.current?.contains(t)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDoc); document.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', place, true); window.addEventListener('resize', place);
-    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); };
-  }, [open, place]);
-  return (
-    <>
-      <button ref={btnRef} className="sblk-cdot" title="Session 颜色" draggable={false} onMouseDown={(e) => e.preventDefault()} onClick={toggle} style={{ background: color }} />
-      {open && pos && createPortal(
-        <div ref={popRef} style={{ position: 'fixed', left: pos.left, top: pos.top, zIndex: 260, background: 'var(--bg-1)', border: '1px solid var(--line-2)', borderRadius: 8, padding: 8, display: 'flex', gap: 6, boxShadow: '0 10px 28px rgba(0,0,0,0.45)' }}>
-          {SESSION_COLORS.map((c) => (
-            <button key={c} onClick={(e) => { e.stopPropagation(); onPick(c); setOpen(false); }} title={c} style={{ width: 20, height: 20, borderRadius: 5, cursor: 'pointer', background: c, border: c === color ? '2px solid #fff' : '1px solid var(--line-2)' }} />
-          ))}
-        </div>, document.body)}
-    </>
-  );
-}
-
-/** 乐器色块 + 图标:展示当前图标(底色 = 乐器色),点开浮层换颜色/图标。浮层用 portal 挂到 body 上弹,绕开外壳的 overflow:hidden 裁剪。 */
-function InstrumentChip({ color, icon, size = 26, onPick }: { color: string; icon?: string | null; size?: number; onPick: (patch: { color?: string; icon?: string }) => void }) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ left: number; top: number; below: boolean } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  // 上方放不下(如 arrange 浮层贴到视口顶,chip 在很上面)→ 翻到锚点下方;左缘夹进视口。否则浮层会跑到屏幕外。
-  const place = useCallback(() => {
-    const r = btnRef.current?.getBoundingClientRect(); if (!r) return;
-    const winW = window.innerWidth || 1280;
-    const below = r.top < 200;
-    setPos({ left: Math.max(8, Math.min(r.left, winW - 230)), top: below ? r.bottom + 6 : r.top - 6, below });
-  }, []);
-  const toggle = () => { place(); setOpen((o) => !o); };
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => { const t = e.target as Node; if (!btnRef.current?.contains(t) && !popRef.current?.contains(t)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDoc); document.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', place, true); window.addEventListener('resize', place); // 滚动/resize 跟着锚点走
-    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); };
-  }, [open, place]);
-  const cur = icon || DEFAULT_ICON;
-  return (
-    <>
-      <button ref={btnRef} onClick={toggle} title="Change icon / color" style={{ flex: 'none', width: size, height: size, borderRadius: 6, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${color} 30%, transparent)`, color: `color-mix(in srgb, ${color} 80%, #fff)` }}>
-        <InstrumentIcon icon={cur} size={Math.round(size * 0.7)} />
-      </button>
-      {open && pos && createPortal(
-        <div ref={popRef} style={{ position: 'fixed', left: pos.left, top: pos.top, transform: pos.below ? 'none' : 'translateY(-100%)', zIndex: 260, background: 'var(--bg-1)', border: '1px solid var(--line-2)', borderRadius: 8, padding: 9, width: 222, boxShadow: '0 10px 28px rgba(0,0,0,0.45)' }}>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 9 }}>
-            {CHIP_COLORS.map((c) => (
-              <button key={c} onClick={() => onPick({ color: c })} title={c} style={{ width: 20, height: 20, borderRadius: 5, cursor: 'pointer', background: c, border: c === color ? '2px solid #fff' : '1px solid var(--line-2)' }} />
-            ))}
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', gap: 4 }}>
-            {ICON_KEYS.map((k) => (
-              <button key={k} title={INSTRUMENT_ICONS[k].label} onClick={() => onPick({ icon: k })} style={{ height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 5, cursor: 'pointer', color: cur === k ? `color-mix(in srgb, ${color} 80%, #fff)` : 'var(--tx-2)', background: cur === k ? `color-mix(in srgb, ${color} 24%, transparent)` : 'var(--bg-2)', border: cur === k ? `1px solid ${color}` : '1px solid transparent' }}>
-                <InstrumentIcon icon={k} size={16} />
-              </button>
-            ))}
-          </div>
-        </div>, document.body)}
-    </>
-  );
-}
-
-/** §26.11 Song block 数字条左下:激活(enabled)乐器计数胶囊;hover 出名单浮层。
- *  浮层走 portal 挂 body,绕开 `.sblk-nums`/`.sblock` 的 overflow:hidden 裁剪(同 InstrumentChip)。
- *  纯只读派生:count/名单都从 session 实时算,无新状态、不进 undo;点击冒泡到块=选 session。 */
-function SongInstrumentCount({ session }: { session: Session }) {
-  const active = activeInstruments(session);
-  const count = active.length;
-  const total = resolveInstruments(session).length;
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ left: number; top: number; below: boolean } | null>(null);
-  const badgeRef = useRef<HTMLSpanElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  const openT = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const closeT = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const place = useCallback(() => {
-    const r = badgeRef.current?.getBoundingClientRect(); if (!r) return;
-    const winW = window.innerWidth || 1280;
-    const below = r.top < 220; // 贴视口顶 → 翻下方,免跑出屏外
-    setPos({ left: Math.max(8, Math.min(r.left, winW - 196)), top: below ? r.bottom + 6 : r.top - 6, below });
-  }, []);
-  const cancelTimers = () => { if (openT.current) clearTimeout(openT.current); if (closeT.current) clearTimeout(closeT.current); };
-  const scheduleOpen = () => { cancelTimers(); openT.current = setTimeout(() => { place(); setOpen(true); }, 120); };
-  const scheduleClose = () => { cancelTimers(); closeT.current = setTimeout(() => setOpen(false), 80); };
-  useEffect(() => () => cancelTimers(), []); // 卸载清定时器
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', place, true); window.addEventListener('resize', place); // 滚动/resize 跟锚点走
-    return () => { document.removeEventListener('keydown', onKey); window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); };
-  }, [open, place]);
-  return (
-    <>
-      <span ref={badgeRef} title="" className={'sblk-icount' + (count === 0 ? ' zero' : '')} aria-label={count ? `Active instruments: ${active.map((i) => i.label).join(', ')}` : 'No active instruments'}
-        onMouseEnter={scheduleOpen} onMouseLeave={scheduleClose}>{count}</span>{/* title="" 抑制继承自 .sblock 的原生 name tooltip(否则与自定义浮层重叠=hover 出现两个) */}
-      {open && pos && createPortal(
-        <div ref={popRef} onMouseEnter={cancelTimers} onMouseLeave={scheduleClose}
-          style={{ position: 'fixed', left: pos.left, top: pos.top, transform: pos.below ? 'none' : 'translateY(-100%)', zIndex: 260, background: 'var(--bg-1)', border: '1px solid var(--line-2)', borderRadius: 8, padding: '8px 9px', width: 180, boxSizing: 'border-box', boxShadow: '0 10px 28px rgba(0,0,0,0.45)' }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: count ? 7 : 0, padding: '0 1px' }}>
-            <span style={{ fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--tx-3)' }}>Active</span>
-            <span style={{ fontSize: 10, fontVariantNumeric: 'tabular-nums', color: 'var(--tx-2)' }}>{count} / {total}</span>
-          </div>
-          {count === 0
-            ? <div style={{ fontSize: 11, color: 'var(--tx-2)', paddingTop: 6 }}>No active instruments</div>
-            : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 168, overflowY: 'auto' }}>
-                {active.map((i) => (
-                  <div key={i.id} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '2px 1px' }}>
-                    <span style={{ flex: 'none', width: 9, height: 9, borderRadius: 2, background: i.color || 'var(--tx-3)' }} />
-                    <span style={{ fontSize: 11, color: 'var(--tx)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{i.label}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-        </div>, document.body)}
-    </>
-  );
-}
-
-/** 乐器名:单击就地编辑;Enter/失焦提交,Esc 取消。 */
-function InstrumentName({ label, onCommit, style }: { label: string; onCommit: (v: string) => void; style?: CSSProperties }) {
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(label);
-  useEffect(() => { if (!editing) setVal(label); }, [label, editing]);
-  if (editing) {
-    return (
-      <input autoFocus value={val} onChange={(e) => setVal(e.target.value)}
-        onBlur={() => { setEditing(false); const v = val.trim(); if (v && v !== label) onCommit(v); else setVal(label); }}
-        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); else if (e.key === 'Escape') { setVal(label); setEditing(false); } }}
-        style={{ font: 'inherit', fontSize: 13, color: 'var(--tx)', background: 'var(--bg-0)', border: '1px solid var(--line-2)', borderRadius: 4, padding: '1px 6px', minWidth: 0, width: Math.max(80, Math.min(220, val.length * 9 + 22)), ...style }} />
-    );
-  }
-  return <span onClick={() => setEditing(true)} title="Click to rename" style={{ cursor: 'text', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', ...style }}>{label}</span>;
-}
-
-/** 顶栏节拍器:按钮 toggle 开关(开=橙),▾ 弹设置面板(音量 + 几小节响一次)。点外面关。 */
-type MetroIv = 'beat' | 'bar' | '2bar' | '4bar';
-function Metronome({ on, vol, iv, onToggle, onVol, onIv }: { on: boolean; vol: number; iv: MetroIv; onToggle: () => void; onVol: (db: number) => void; onIv: (iv: MetroIv) => void }) {
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (ev: MouseEvent) => { if (!wrapRef.current?.contains(ev.target as Node)) setOpen(false); };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
-  const IVS: [string, MetroIv][] = [['Beat', 'beat'], ['Bar', 'bar'], ['2 bars', '2bar'], ['4 bars', '4bar']];
-  return (
-    <div className="tb-metro" ref={wrapRef}>
-      <button className={'metro-btn' + (on ? ' on' : '')} title={on ? 'Metronome: on (click to stop)' : 'Metronome: off (click to start)'} aria-pressed={on} onClick={onToggle}>♩</button>
-      <button className="metro-caret" title="Metronome settings" aria-label="Metronome settings" onClick={() => setOpen((o) => !o)}>▾</button>
-      {open && (
-        <div className="metro-pop" role="dialog">
-          <div className="mp-h">Metronome</div>
-          <div className="mp-row"><span className="mp-l">Volume</span><input type="range" min={-30} max={0} step={1} value={vol} onChange={(ev) => onVol(Number(ev.target.value))} /></div>
-          <div className="mp-row"><span className="mp-l">Interval</span><div className="seg sm mp-iv">{IVS.map(([lab, v]) => <button type="button" key={v} className={iv === v ? 'on' : ''} onClick={() => onIv(v)}>{lab}</button>)}</div></div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** 顶栏工程名:点击改名;Enter/失焦提交,Esc 取消,空名回弹。提交走 commitProjName(乐观写 Project.name)。 */
-function ProjectNameInput({ name, onCommit }: { name: string; onCommit: (v: string) => void }) {
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(name);
-  const ref = useRef<HTMLInputElement | null>(null);
-  const escRef = useRef(false); // Esc 退出时跳过 blur 的提交
-  useEffect(() => { if (!editing) setVal(name); }, [name, editing]); // 非编辑态跟随真值
-  useEffect(() => { if (editing) { ref.current?.focus(); ref.current?.select(); } }, [editing]);
-  const commit = () => {
-    setEditing(false);
-    if (escRef.current) { escRef.current = false; setVal(name); return; }
-    const t = val.trim();
-    if (t && t !== name) onCommit(t); else setVal(name);
-  };
-  if (!editing) return (
-    <span className="tb-proj" title={`${name} — click to rename`} role="button" tabIndex={0}
-      onClick={() => setEditing(true)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(true); } }}>{name}</span>
-  );
-  return (
-    <input ref={ref} className="tb-proj-in" value={val} maxLength={80} aria-label="Project name"
-      onChange={(e) => setVal(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); else if (e.key === 'Escape') { escRef.current = true; e.currentTarget.blur(); } }} />
-  );
-}
-
-/** 顶栏主 BPM:可编辑;Enter/失焦提交,Esc 取消,↑↓ 微调(±1)。提交后真正的 clamp/re-warp/undo 在 commitBpm 里。 */
-function TempoInput({ bpm, onCommit }: { bpm: number; onCommit: (v: number) => void }) {
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(String(bpm));
-  useEffect(() => { if (!editing) setVal(String(bpm)); }, [bpm, editing]); // 非编辑态跟随真值(含 undo/clamp 回弹)
-  const commit = () => { setEditing(false); const n = parseInt(val, 10); if (Number.isFinite(n) && n !== bpm) onCommit(n); else setVal(String(bpm)); };
-  return (
-    <input className="tg-bpm" inputMode="numeric" value={val} title="Project master BPM · instruments re-warp to the new tempo after committing (Enter to commit · ↑↓ to nudge)"
-      onFocus={() => setEditing(true)}
-      onChange={(e) => setVal(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') e.currentTarget.blur();
-        else if (e.key === 'Escape') { setVal(String(bpm)); setEditing(false); e.currentTarget.blur(); }
-        else if (e.key === 'ArrowUp') { e.preventDefault(); setVal((v) => String((parseInt(v, 10) || bpm) + 1)); }
-        else if (e.key === 'ArrowDown') { e.preventDefault(); setVal((v) => String((parseInt(v, 10) || bpm) - 1)); }
-      }} />
-  );
-}
-
 const COLLAGE_GRID = [{ label: '1/1', bars: 1 }, { label: '1/2', bars: 0.5 }, { label: '1/4', bars: 0.25 }, { label: '1/8', bars: 0.125 }, { label: '1/16', bars: 0.0625 }];
-// arrange 轨(占单 sample 壳的 main 位):网格吸附拖移(夹邻不重叠、可留白)、拖库素材进网格位、尾部 headroom 供延长。
-// 选中片不在这里改 —— 点片弹出浮层 ClipEditor(在 footer 分支里渲染);片带 data-clip-id 供浮层锚定。
-function CollageEditor({ inst, gridBars, selClipId, onSelectClip, onMoveStart, onMove, onMoveEnd, onAltDuplicate, onDropSound, onDropInst, onLoop, previewing, getPhase, onPreviewToggle, canPreview, dragBars, acceptDrop = true }: {
-  inst: Instrument; gridBars: number; selClipId: string | null; onSelectClip: (id: string) => void;
-  onMoveStart: () => void; onMove: (clipId: string, startStep: number) => void; onMoveEnd: () => void;
-  onAltDuplicate?: (srcId: string, desiredStart: number) => string | null; // Alt 拖 = 复制一份再拖副本
-  onDropSound: (soundId: string, startStep: number) => void;
-  onDropInst?: (fromSlot: number, startStep: number) => void; // 拖单 sample 乐器进来 → 复制其 clip 成一片
-  onLoop: (loopStartStep: number, bars: number) => void;
-  previewing: boolean; getPhase: () => number | null; onPreviewToggle: () => void; canPreview: boolean;
-  dragBars?: number | null; // 正在拖入的素材/乐器小节数 → 占位块按真实长度画、判重叠;未知则按 1 小节
-  acceptDrop?: boolean;     // 当前拖的东西能不能落这条轨(乐器拖拽里只 sample 可)→ 不能则不亮占位提示
-}) {
-  const [over, setOver] = useState(false);
-  const [dropStep, setDropStep] = useState<number | null>(null); // 拖素材到轨上时,吸附后的落点 → 画占位波形 block
-  const [, setPeaksTick] = useState(0);
-  const [stepPx, setStepPx] = useState(PX);                 // 缩放:每 step 像素
-  const [thumb, setThumb] = useState({ left: 0, width: 100 });
-  const scrollRef = useRef<HTMLDivElement>(null);            // 横滚容器(原生 scrollLeft,藏掉系统滚动条)
-  const contentRef = useRef<HTMLDivElement>(null);           // 宽内容(坐标系原点)
-  const playheadRef = useRef<HTMLDivElement>(null);
-  const rafRef = useRef<number | null>(null);
-  const viewRef = useRef({ stepPx: PX });                    // 给原生 wheel 监听读最新缩放
-  const zoomApply = useRef<{ contentStep: number; cx: number } | null>(null);
-  const loopRef = useRef({ start: 0, len: 1 });              // 给 raf 播放线读最新 loop
-  const getPhaseRef = useRef(getPhase); getPhaseRef.current = getPhase;
-
-  const cp = inst.payload.kind === 'collage' ? inst.payload : null;
-  const spb = cp?.stepsPerBar ?? 16;
-  const color = inst.color ?? 'var(--acc)';
-  const snapSteps = Math.max(1, Math.round(gridBars * spb));
-  const loopStart = cp?.loopStartStep ?? 0;
-  const loopEnd = loopStart + Math.round((cp?.bars ?? 1) * spb);        // loop 区间 [loopStart, loopEnd)
-  const clips = cp?.clips ?? [];
-  const contentEnd = clips.reduce((m, c) => Math.max(m, c.startStep + Math.max(1, Math.round(c.bars * spb))), 0);
-  const laneSteps = Math.max(loopEnd, contentEnd, spb) + 2 * spb;       // 显示到 loop/内容最远处 + 2 bar headroom(往右拖会再长)
-  viewRef.current = { stepPx };
-  loopRef.current = { start: loopStart, len: loopEnd - loopStart };
-
-  const peakKey = (c: { assetId: string; startSample: number; endSample: number }) => `${c.assetId}:${Math.round(c.startSample)}:${Math.round(c.endSample)}`;
-  const clipsSig = clips.map(peakKey).join('|');
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      for (const c of clips) { const key = peakKey(c); if (!c.assetId || lanePeaksCache.has(key)) continue; try { const d = await decodeAsset(c.assetId); if (!alive) return; lanePeaksCache.set(key, peaksFromRegion(d.channels, c.startSample, c.endSample)); setPeaksTick((t) => t + 1); } catch { /* 源缺失 */ } }
-    })();
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clipsSig]);
-  // 自定义滚动条 thumb 同步 scrollLeft / resize / 缩放
-  useEffect(() => {
-    const el = scrollRef.current; if (!el) return;
-    const sync = () => { const sw = el.scrollWidth || 1; setThumb({ left: (el.scrollLeft / sw) * 100, width: Math.min(100, (el.clientWidth / sw) * 100) }); };
-    sync(); el.addEventListener('scroll', sync);
-    const ro = new ResizeObserver(sync); ro.observe(el);
-    return () => { el.removeEventListener('scroll', sync); ro.disconnect(); };
-  }, [stepPx, laneSteps]);
-  // 滚轮=左右平移;Alt+滚轮=以光标为支点缩放(原生非被动监听才能 preventDefault)。
-  useEffect(() => {
-    const el = scrollRef.current; if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      if (e.altKey) {
-        e.preventDefault();
-        const cx = e.clientX - el.getBoundingClientRect().left;
-        const contentStep = (el.scrollLeft + cx) / viewRef.current.stepPx;
-        zoomApply.current = { contentStep, cx };
-        setStepPx(Math.max(4, Math.min(64, viewRef.current.stepPx * Math.exp(-e.deltaY * 0.0015))));
-      } else {
-        const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-        if (d === 0) return; e.preventDefault(); el.scrollLeft += d;
-      }
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, []);
-  useEffect(() => { const el = scrollRef.current, z = zoomApply.current; if (el && z) { el.scrollLeft = Math.max(0, z.contentStep * stepPx - z.cx); zoomApply.current = null; } }, [stepPx]);
-  // 播放线:previewing 时 raf 读 getPhase 定位(content 内坐标,随滚动自然移动)。
-  useEffect(() => {
-    const stop = () => { if (rafRef.current != null) cancelAnimationFrame(rafRef.current); rafRef.current = null; };
-    stop();
-    if (playheadRef.current) playheadRef.current.style.display = 'none';
-    if (!previewing) return;
-    const tick = () => {
-      const el = playheadRef.current;
-      if (el) { const phase = getPhaseRef.current(); if (phase == null) el.style.display = 'none'; else { el.style.display = 'block'; el.style.left = ((loopRef.current.start + phase * loopRef.current.len) * viewRef.current.stepPx) + 'px'; } }
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-    return stop;
-  }, [previewing]);
-
-  if (!cp) return null;
-
-  const stepFromX = (clientX: number) => { const r = contentRef.current?.getBoundingClientRect(); if (!r) return 0; return Math.max(0, Math.round((clientX - r.left) / stepPx / snapSteps) * snapSteps); };
-  const startDrag = (e: React.PointerEvent, id: string, origStart: number) => {
-    e.stopPropagation(); onSelectClip(id);
-    const alt = e.altKey && !!onAltDuplicate; // 按住 Alt 拖 = 拖出一个副本(原片留位)
-    const x0 = e.clientX; let moved = false; let dragId = id;
-    const mv = (ev: PointerEvent) => {
-      const want = origStart + Math.round((ev.clientX - x0) / stepPx); const snapped = Math.max(0, Math.round(want / snapSteps) * snapSteps);
-      if (!moved) {
-        onMoveStart(); moved = true;
-        if (alt) { const nid = onAltDuplicate!(id, snapped); if (nid) { dragId = nid; return; } } // 副本已落在 snapped;本帧别再 onMove(此刻 ref 还没含副本,会覆盖掉)
-      }
-      onMove(dragId, snapped);
-    };
-    const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); if (moved) onMoveEnd(); };
-    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
-  };
-  const dragLoop = (e: React.PointerEvent, edge: 'start' | 'end') => {
-    e.stopPropagation();
-    const x0 = e.clientX; let moved = false;
-    const mv = (ev: PointerEvent) => {
-      const d = Math.round((ev.clientX - x0) / stepPx);
-      if (!moved) { onMoveStart(); moved = true; }
-      if (edge === 'start') { const ls = Math.max(0, Math.min(loopEnd - snapSteps, Math.round((loopStart + d) / snapSteps) * snapSteps)); onLoop(ls, (loopEnd - ls) / spb); }
-      else { const le = Math.max(loopStart + snapSteps, Math.round((loopEnd + d) / snapSteps) * snapSteps); onLoop(loopStart, (le - loopStart) / spb); }
-    };
-    const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); if (moved) onMoveEnd(); };
-    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
-  };
-  const thumbDown = (e: React.PointerEvent) => {
-    e.preventDefault(); // 拖滚动条时别选中页面内容
-    const track = e.currentTarget as HTMLElement; const el = scrollRef.current; if (!el) return;
-    const prevSel = document.body.style.userSelect; document.body.style.userSelect = 'none';
-    const seek = (clientX: number) => { const r = track.getBoundingClientRect(); const frac = Math.max(0, Math.min(1, (clientX - r.left) / (r.width || 1))); el.scrollLeft = frac * Math.max(0, el.scrollWidth - el.clientWidth); };
-    seek(e.clientX);
-    const mv = (ev: PointerEvent) => seek(ev.clientX);
-    const up = () => { document.body.style.userSelect = prevSel; window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
-    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 130, gap: 6 }}>
-      <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0 }}>
-      <div ref={scrollRef} className="lane-scroll" style={{ overflowX: 'auto', overflowY: 'hidden', height: '100%', minWidth: 0, border: '1px solid var(--line)', borderRadius: 'var(--r)', scrollbarWidth: 'none' }}>
-        <div ref={contentRef}
-          onDragOver={(e) => { if (!acceptDrop) return; e.preventDefault(); if (!over) setOver(true); const st = stepFromX(e.clientX); setDropStep((p) => (p === st ? p : st)); }} onDragLeave={() => { setOver(false); setDropStep(null); }}
-          onDrop={(e) => { e.preventDefault(); setOver(false); setDropStep(null); const st = stepFromX(e.clientX); const slot = e.dataTransfer.getData('application/x-inst-slot'); if (slot !== '') { onDropInst?.(Number(slot), st); return; } const id = e.dataTransfer.getData('text/plain'); if (id) onDropSound(id, st); }}
-          onPointerDown={() => onSelectClip('')}
-          style={{ position: 'relative', height: '100%', minHeight: 116, width: laneSteps * stepPx, minWidth: '100%', background: 'var(--bg-0)', userSelect: 'none', WebkitUserSelect: 'none',
-            boxShadow: over ? `inset 0 0 0 1px ${color}` : undefined }}>
-          <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: loopStart * stepPx, background: 'rgba(0,0,0,0.34)', pointerEvents: 'none', zIndex: 3 }} />
-          <div style={{ position: 'absolute', top: 0, bottom: 0, left: loopEnd * stepPx, right: 0, background: 'rgba(0,0,0,0.34)', pointerEvents: 'none', zIndex: 3 }} />
-          {Array.from({ length: Math.ceil(laneSteps / spb) }, (_, b) => (<span key={b} className="muted" style={{ position: 'absolute', top: 3, left: b * spb * stepPx + 4, fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--tx-3)', pointerEvents: 'none' }}>{b + 1}</span>))}
-          {cp.clips.map((c) => {
-            const isSel = c.id === selClipId; const pk = lanePeaksCache.get(peakKey(c)); const pcol = sliceColorFor(c.id); // 每片一色(按 id 稳定,移动不变色)
-            return (
-              <div key={c.id} data-clip-id={c.id} className={'lane-clip' + (isSel ? ' csel' : '')} onPointerDown={(e) => startDrag(e, c.id, c.startStep)} title={c.soundId}
-                style={{ ...cvar(pcol), left: c.startStep * stepPx, width: Math.max(3, Math.round(c.bars * spb) * stepPx) }}>
-                {pk && pk.length > 1 && <div style={{ position: 'absolute', inset: 0, color: `color-mix(in srgb, ${pcol} 82%, #fff)`, opacity: isSel ? 0.95 : 0.7, pointerEvents: 'none' }}><Wave className="lanewave" peaks={pk} /></div>}
-                {c.semitones !== 0 && <em style={{ position: 'absolute', top: 2, right: 3, fontStyle: 'normal', fontSize: 9, color: 'var(--tx)', background: 'color-mix(in srgb, var(--bg-0) 65%, transparent)', borderRadius: 3, padding: '0 3px', zIndex: 1, pointerEvents: 'none' }}>{c.semitones > 0 ? `+${c.semitones}` : c.semitones}</em>}
-              </div>
-            );
-          })}
-          {/* 网格线移到波形之上(放到片前面,做对齐参考,与 pad 的叠加式网格同观感);zIndex:2 在片(auto)之上、loop 暗罩(3)之下 → out-of-loop 仍被罩暗 */}
-          <div aria-hidden="true" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, backgroundImage: `repeating-linear-gradient(90deg, rgba(255,255,255,0.18) 0 1px, transparent 1px ${spb * stepPx}px), repeating-linear-gradient(90deg, rgba(255,255,255,0.07) 0 1px, transparent 1px ${snapSteps * stepPx}px)` }} />
-          {dropStep != null && (() => {
-            const gSteps = Math.max(1, Math.round((dragBars ?? 1) * spb)); // 占位块宽 = 素材真实小节(未知则 1 小节)
-            const occupied = clips.some((c) => dropStep < c.startStep + Math.max(1, Math.round(c.bars * spb)) && c.startStep < dropStep + gSteps); // 与已有片重叠 → 落不下
-            const col = occupied ? 'var(--danger)' : 'var(--acc)';
-            return (
-              <div style={{ position: 'absolute', top: 20, bottom: 10, left: dropStep * stepPx, width: gSteps * stepPx, zIndex: 4, pointerEvents: 'none', boxSizing: 'border-box',
-                border: `1px dashed ${col}`, background: `color-mix(in srgb, ${col} 16%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <span style={{ fontSize: 10, color: col, fontWeight: 500 }}>{occupied ? 'Slot occupied' : 'Drop here'}</span>
-              </div>
-            );
-          })()}
-          <div ref={playheadRef} style={{ position: 'absolute', top: 0, bottom: 0, width: 1, background: '#fff', boxShadow: '0 0 4px rgba(255,255,255,0.7)', zIndex: 6, pointerEvents: 'none', display: 'none' }} />
-          {([['start', loopStart, '#7cd17c'], ['end', loopEnd, '#e8a33d']] as const).map(([edge, step, hc]) => (
-            // 满高线只做视觉(pointerEvents:none),不挡下方 clip;抓手只在顶部标尺带(clip 从 top:20 起,与抓手永不重叠)
-            // → 解决「拖 clip 时被 loop 起/止线抢指针」的冲突:clip body 全程可拖,loop 线从顶部三角拖。
-            <div key={edge} style={{ position: 'absolute', top: 0, bottom: 0, left: step * stepPx - 4, width: 8, zIndex: 5, pointerEvents: 'none' }}>
-              <div style={{ position: 'absolute', top: 0, bottom: 0, left: 3, width: 2, background: hc }} />
-              <div style={{ position: 'absolute', top: 0, left: 0, width: 8, height: 8, background: hc, clipPath: 'polygon(0 0,100% 0,50% 100%)' }} />
-              <div onPointerDown={(e) => dragLoop(e, edge)} title={edge === 'start' ? 'Loop start (drag)' : 'Loop end (drag)'}
-                style={{ position: 'absolute', top: 0, left: -4, width: 16, height: 20, pointerEvents: 'auto', cursor: 'ew-resize' }} />
-            </div>
-          ))}
-        </div>
-      </div>
-      <button onClick={() => canPreview && onPreviewToggle()} disabled={!canPreview} title={canPreview ? 'Preview collage' : 'Transport is running — no preview needed'}
-        style={{ position: 'absolute', right: 8, bottom: 8, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, lineHeight: 1, border: 'none', borderRadius: 'var(--r)', zIndex: 7,
-          cursor: canPreview ? 'pointer' : 'default', opacity: canPreview ? 1 : 0.35, background: previewing ? 'var(--play)' : 'var(--acc)', color: previewing ? '#23201d' : 'var(--acc-ink)' }}><TransportIcon stop={previewing} size={11} /></button>
-      </div>
-      <div className="we-scroll" onPointerDown={thumbDown}><div className="we-thumb" style={{ left: thumb.left + '%', width: thumb.width + '%' }} /></div>
-    </div>
-  );
-}
-
-type SongTimelineProps = { zoom: number; onZoom: (z: number) => void; sessions: Session[]; selectedIdx: number; engine: StudioEngine | null; playing: boolean; onSeekBar: (bar: number) => void; onVScroll?: (top: number) => void; gridEvery?: number; children: ReactNode };
-
-/** §26.9 song 用滚动容器:在 HScroll 之上加 ① 滚轮平移 ② Alt 滚轮缩放(光标钉住) ③ 全局 bar 标尺(播放头穿标尺 + hover 引导线 + 喇叭点击跳播)。
- *  blocks 作 children 原样塞入(flex order 拖拽不变);标尺/播放头/引导线在同一 scroll 内容里按 cumBars 定位。 */
-function SongTimeline({ zoom, onZoom, sessions, selectedIdx, engine, playing, onSeekBar, onVScroll, gridEvery = 1, children }: SongTimelineProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const guideRef = useRef<HTMLDivElement>(null);
-  const zoomRef = useRef(zoom); zoomRef.current = zoom;
-  const zoomApply = useRef<{ contentBar: number; cx: number } | null>(null); // Alt 缩放后回正 scrollLeft(光标钉住)
-  const [thumb, setThumb] = useState({ left: 0, width: 100, show: false });
-  const [viewW, setViewW] = useState(0); // §37 滚动容器可视宽 → bar 号画满整条标尺(不止 session 长度)
-
-  const total = Math.max(1, songTotalBars(sessions)); const W = Math.max(1, total * zoom);
-  const divs = [...new Set([0, total, ...sessions.flatMap((s) => [sessionSongStartBar(s), sessionSongEndBar(s)])])].sort((a, b) => a - b);
-  // 选中 session → 标尺上对应 bar 段铺同色淡底(left/width 用 cum,与块精确对齐)
-  const selS = sessions[selectedIdx];
-  const selColor = selS ? sessionColor(selS) : null;
-  const selLeft = selS ? sessionSongStartBar(selS) * zoom : 0;
-  const selW = selS ? (sessionSongEndBar(selS) - sessionSongStartBar(selS)) * zoom : 0;
-
-  const onVScrollRef = useRef(onVScroll); onVScrollRef.current = onVScroll; // §37 纵向 scrollTop → gutter 同步(ref 防 [] 闭包过期)
-  // 自定义横向滚动条 thumb 同步(同 HScroll)+ 上报纵向 scrollTop(冻结窗格:gutter 表头跟着平移)
-  useEffect(() => {
-    const el = scrollRef.current; if (!el) return;
-    const update = () => { const w = el.clientWidth, sw = el.scrollWidth; setViewW(w); const width = sw > 0 ? Math.min(100, (w / sw) * 100) : 100; setThumb({ left: sw > w ? (el.scrollLeft / (sw - w)) * (100 - width) : 0, width, show: sw > w + 1 }); onVScrollRef.current?.(el.scrollTop); };
-    update(); el.addEventListener('scroll', update, { passive: true });
-    const ro = new ResizeObserver(update); ro.observe(el); if (el.firstElementChild) ro.observe(el.firstElementChild);
-    return () => { el.removeEventListener('scroll', update); ro.disconnect(); };
-  }, []);
-  // 滚轮=平移;Alt+滚轮=以光标为支点缩放(原生非被动监听才能 preventDefault);照搬 CollageEditor。
-  useEffect(() => {
-    const el = scrollRef.current; if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      if (e.altKey) {
-        e.preventDefault();
-        const cx = e.clientX - el.getBoundingClientRect().left;
-        zoomApply.current = { contentBar: (el.scrollLeft + cx) / zoomRef.current, cx };
-        onZoom(Math.max(16, Math.min(220, zoomRef.current * Math.exp(-e.deltaY * 0.0015)))); // §37 范围放大到 16..220(与 slider 一致),配合删 floor 后 zoom 是唯一缩放杠杆
-      } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) { // §37 横滚(bar):Shift+滚轮 或 横向 trackpad
-        const d = e.deltaX || e.deltaY; if (d === 0) return; e.preventDefault(); el.scrollLeft += d;
-      } // §37 else 平 wheel = 纵向滚 track:不 preventDefault,交给容器 overflow-y 原生处理
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, [onZoom]);
-  useEffect(() => { const el = scrollRef.current, z = zoomApply.current; if (el && z) { el.scrollLeft = Math.max(0, z.contentBar * zoom - z.cx); zoomApply.current = null; } }, [zoom]);
-
-  const barAtX = (clientX: number, snap = false) => { const el = scrollRef.current; if (!el) return 0; const raw = (el.scrollLeft + clientX - el.getBoundingClientRect().left) / zoom; return Math.max(0, Math.min(total - 1e-6, snap ? Math.round(raw) : raw)); }; // §39 底层无极(songPlayFrom 吃小数 bar);snap=吸附到整 bar 的体验层(Alt 绕过=精细无极)
-  const onRulerMove = (e: React.PointerEvent) => { const g = guideRef.current; if (g) { g.style.display = 'block'; g.style.left = barAtX(e.clientX, !e.altKey) * zoom + 'px'; } }; // guide 吸到 bar 线:所见即起播点
-  const onRulerLeave = () => { const g = guideRef.current; if (g) g.style.display = 'none'; };
-  const thumbDown = (e: React.PointerEvent) => {
-    e.preventDefault();
-    const track = e.currentTarget as HTMLElement; const el = scrollRef.current; if (!el) return;
-    const prevSel = document.body.style.userSelect; document.body.style.userSelect = 'none';
-    const seek = (clientX: number) => { const r = track.getBoundingClientRect(); el.scrollLeft = Math.max(0, Math.min(1, (clientX - r.left) / (r.width || 1))) * Math.max(0, el.scrollWidth - el.clientWidth); };
-    seek(e.clientX);
-    const mv = (ev: PointerEvent) => seek(ev.clientX);
-    const up = () => { document.body.style.userSelect = prevSel; window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
-    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
-  };
-
-  const labelEvery = Math.max(gridEvery || 1, zoom >= 26 ? 1 : zoom >= 15 ? 2 : 4); // §37 bar 号间隔跟 GRID(2→1 3 5、4→1 5 9),低 zoom 再按密度疏一档
-  const nums: React.ReactNode[] = [];
-  const lastBar = Math.max(total, Math.ceil(viewW / zoom)); // §37 画到 session 长度 与 可视宽度 的较大者 → 标尺数字铺满整条
-  for (let b = 0; b < lastBar; b++) if (b % labelEvery === 0) nums.push(<span key={b} className="song-rn" style={{ left: b * zoom + 3 }}>{b + 1}</span>);
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, height: '100%' }}>
-      <div ref={scrollRef} className="lane-scroll" style={{ overflowX: 'auto', overflowY: 'auto', minWidth: 0, scrollbarWidth: 'none', flex: 1, minHeight: 0 }}>
-        <div className="song-content" style={{ position: 'relative', width: 'max-content', minWidth: '100%', backgroundImage: gridEvery > 0 ? `repeating-linear-gradient(90deg, rgba(236,233,227,.08) 0 1px, transparent 1px ${gridEvery * zoom}px, rgba(236,233,227,.025) ${gridEvery * zoom}px ${gridEvery * zoom + 1}px, transparent ${gridEvery * zoom + 1}px ${gridEvery * zoom * 2}px)` : undefined }}>{/* §37 全高 bar 网格:两边通、一深一浅交替(深.08@0 / 浅.025@1单位,周期2单位) */}
-          <div className="song-ruler" style={{ width: W, minWidth: '100%', backgroundImage: gridEvery > 0 ? `repeating-linear-gradient(90deg, rgba(236,233,227,.07) 0 1px, transparent 1px ${gridEvery * zoom}px, rgba(236,233,227,.022) ${gridEvery * zoom}px ${gridEvery * zoom + 1}px, transparent ${gridEvery * zoom + 1}px ${gridEvery * zoom * 2}px)` : undefined }} onPointerMove={onRulerMove} onPointerLeave={onRulerLeave} onClick={(e) => onSeekBar(barAtX(e.clientX, !e.altKey))}>
-            {nums}
-          </div>
-          {children}
-          <div ref={guideRef} className="song-guide" style={{ display: 'none' }} aria-hidden="true" />
-          <SongPlayhead engine={engine} playing={playing} px={zoom} blockStartBars={0} loopBars={total} />{/* §39 走带单调递增 → 按总长取模回绕(非循环时 pos≤total,取模恒等) */}
-        </div>
-      </div>
-      {thumb.show && <div className="we-scroll song-hscroll" onPointerDown={thumbDown}><div className="we-thumb" style={{ left: thumb.left + '%', width: thumb.width + '%' }} /></div>}
-    </div>
-  );
-}
-
-/** Song 模式走 SongTimeline(标尺/滚轮/缩放),Live 模式走朴素 HScroll。 */
-function RailScroll({ song, children, ...rest }: SongTimelineProps & { song: boolean }) {
-  return song ? <SongTimeline {...rest}>{children}</SongTimeline> : <HScroll>{children}</HScroll>;
-}
-
-/** §20 横向自定义滚动容器 —— 复用 collage lane 的 .we-scroll 条:藏原生横滚条,底部挂一条可拖的细条。内容溢出才显条。 */
-function HScroll({ children }: { children: ReactNode }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [thumb, setThumb] = useState({ left: 0, width: 100, show: false });
-  useEffect(() => {
-    const el = scrollRef.current; if (!el) return;
-    const update = () => {
-      const w = el.clientWidth, sw = el.scrollWidth;
-      const width = sw > 0 ? Math.min(100, (w / sw) * 100) : 100;
-      const left = sw > w ? (el.scrollLeft / (sw - w)) * (100 - width) : 0;
-      setThumb({ left, width, show: sw > w + 1 });
-    };
-    update();
-    el.addEventListener('scroll', update, { passive: true });
-    const ro = new ResizeObserver(update); ro.observe(el);
-    if (el.firstElementChild) ro.observe(el.firstElementChild); // session 增删 → 内容宽变 → 重算条
-    return () => { el.removeEventListener('scroll', update); ro.disconnect(); };
-  }, []);
-  const thumbDown = (e: React.PointerEvent) => {
-    e.preventDefault(); // 拖滚动条时别选中页面内容
-    const track = e.currentTarget as HTMLElement; const el = scrollRef.current; if (!el) return;
-    const prevSel = document.body.style.userSelect; document.body.style.userSelect = 'none';
-    const seek = (clientX: number) => { const r = track.getBoundingClientRect(); const frac = Math.max(0, Math.min(1, (clientX - r.left) / (r.width || 1))); el.scrollLeft = frac * Math.max(0, el.scrollWidth - el.clientWidth); };
-    seek(e.clientX);
-    const mv = (ev: PointerEvent) => seek(ev.clientX);
-    const up = () => { document.body.style.userSelect = prevSel; window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
-    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
-  };
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
-      <div ref={scrollRef} className="lane-scroll" style={{ overflowX: 'auto', overflowY: 'hidden', minWidth: 0, scrollbarWidth: 'none', paddingBottom: 2 }}>
-        {children}
-      </div>
-      {thumb.show && <div className="we-scroll" onPointerDown={thumbDown}><div className="we-thumb" style={{ left: thumb.left + '%', width: thumb.width + '%' }} /></div>}
-    </div>
-  );
-}
-
-/** arrange 轨浮层:portal 挂 body,落在底部编辑器(footer)之上、左缘让开素材列表(aside.br),近满主区宽;Esc 收起;resize/scroll 跟随。 */
-function ArrangePopover({ onClose, onHeight, children }: { onClose: () => void; onHeight?: (h: number) => void; children: ReactNode }) {
-  const [box, setBox] = useState<{ left: number; width: number; top: number } | null>(null);
-  const [h, setH] = useState(0);
-  const popRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const place = () => {
-      const footer = document.querySelector('footer.daw-editor');
-      const lib = document.querySelector('aside.br');
-      const winW = window.innerWidth || 1280, winH = window.innerHeight || 800;
-      const top = footer ? footer.getBoundingClientRect().top : winH - 220;     // 落在底部编辑器之上
-      const left = (lib ? lib.getBoundingClientRect().right : 312) + 8;          // 让开左侧素材列表
-      setBox({ left, width: Math.max(420, winW - left - 10), top });
-    };
-    place();
-    window.addEventListener('scroll', place, true); window.addEventListener('resize', place);
-    const footer = document.querySelector('footer.daw-editor');
-    const ro = footer ? new ResizeObserver(place) : null; if (footer && ro) ro.observe(footer); // 底部编辑器高度变(空↔片)→ 重新贴
-    return () => { window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); ro?.disconnect(); };
-  }, []);
-  useEffect(() => { if (popRef.current) { const oh = popRef.current.offsetHeight; if (oh && oh !== h) { setH(oh); onHeight?.(oh); } } });
-  useEffect(() => {
-    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-  if (!box) return null;
-  const top = Math.max(8, box.top - 8 - h); // 放在编辑器上方;太高就夹到视口顶
-  return createPortal(
-    <div ref={popRef} style={{ position: 'fixed', left: box.left, top, width: box.width, zIndex: 240, background: 'var(--bg-1)', border: '1px solid var(--line-2)', borderRadius: 10, boxShadow: '0 14px 36px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
-      {children}
-    </div>, document.body);
-}
-
-/** 空状态:沿用素材编辑器(ClipEditor compact)的外壳,数据为空、禁用。 */
-function EmptyEditor({ hint }: { hint?: string }) {
-  const cells: [string, string][] = [['Tempo', '—'], ['Length', '—'], ['Pitch', '—'], ['Stretch', '—']];
-  return (
-    <div className="ed-wrap">
-      <div className="we we-compact" style={{ opacity: 0.72 }}>
-        <div className="we-ctrl">
-          <div className="we-ctrl-body">
-            <div className="we-rail">
-              <div className="we-grid">
-                {cells.map(([l, v]) => (<div className="we-cell" key={l}><span className="we-lab">{l}</span><div className="we-box">{v}</div></div>))}
-              </div>
-              <div className="we-gridrow"><div className="seg we-gseg">{['1/1', '1/2', '1/4', '1/8', '1/16'].map((g, i) => (<button key={g} className={i === 2 ? 'on' : ''} disabled>{g}</button>))}</div></div>
-            </div>
-          </div>
-        </div>
-        <div className="we-main">
-          <div className="we-stage" style={{ cursor: 'default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <span className="muted small" style={{ textAlign: 'center', padding: '0 20px' }}>{hint ?? 'Click a sample on the left to pre-adjust · or click a stage instrument'}</span>
-          </div>
-          <div className="we-scroll"><div className="we-thumb" style={{ left: 0, width: '100%' }} /></div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Knob({ label, min, max, step = 1, val, unit, onChange, onCommit }: { label: string; min: number; max: number; step?: number; val: number; unit?: string; onChange: (v: number) => void; onCommit?: () => void }) {
-  return (
-    <label className="muted small" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-      {label}
-      <input type="range" min={min} max={max} step={step} value={val} onChange={(ev) => onChange(Number(ev.target.value))} onPointerUp={onCommit} style={{ width: 84 }} />
-      <b style={{ color: 'var(--tx)', fontFamily: 'var(--mono)', minWidth: 38, textAlign: 'right' }}>{step < 1 ? val.toFixed(2) : val}{unit ?? ''}</b>
-    </label>
-  );
-}

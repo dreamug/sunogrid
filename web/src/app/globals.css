@@ -922,7 +922,8 @@ a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underlin
 .sblk-auto.sblk-auto-sel { background:#211f1c; } /* 选中:automation 区微抬亮;白边+外发光来自父 .sblock.sblk-sel,包住整块 */
 .sblk-auto .auto-svg { width:100%; height:100%; }
 /* §37 主/sub 多轨:右缘 resize 手柄 + sub/孤儿态 + 主轨 lane 标识 */
-.sblk-rs { position:absolute; top:0; right:0; bottom:0; width:9px; z-index:6; cursor:ew-resize; touch-action:none; }
+.sblk-rs { position:absolute; top:0; right:0; width:9px; z-index:6; cursor:ew-resize; touch-action:none; }
+/* ⚠ 高度只盖 clip 头(SONG_CLIP_H,内联给),别 bottom:0 拉满整块:展开 automation 时,handle 下半截(z-index:6)会压住自动化 lane 最右那个点(默认 bar=T 的尾点),令它点不到/抓不住。 */
 .sblk-rs::after { content:""; position:absolute; right:2px; top:32px; width:2px; height:18px; border-radius:1px; background:color-mix(in srgb, var(--c) 78%, var(--line-2)); opacity:0; transition:opacity .1s; } /* §37 把手居中对齐数字条(name 20px 下方,非整块居中)+ 实心色(无透明) */
 .sblock:hover .sblk-rs::after, .sblock.sblk-sel .sblk-rs::after { opacity:1; }
 .sblk-sub { border-style:solid; } /* sub 块默认实线;孤儿态转虚线见下 */

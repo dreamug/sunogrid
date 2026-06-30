@@ -73,13 +73,21 @@ export function duplicateSessionAt(sessions: Session[], idx: number, newId: NewI
   const src = sessions[idx];
   if (!src) return { sessions, newIndex: idx };
   const copyStart = sessionSongEndBar(src);
-  const copy: Session = { ...src, id: newId('sess'), name: `${src.name} copy`, songStartBar: copyStart, instruments: src.instruments.map((i) => cloneInstrument(i, newId)) };
-  const next = [...sessions.slice(0, idx + 1), copy, ...sessions.slice(idx + 1)];
-  return { sessions: reindex(next), newIndex: idx + 1 };
+  // 副本 index 紧跟源场景(= Song 主轨 / Live 阅读序里排在它后面);其余 index>src 的整体 +1 让位。
+  // ⚠ 不用 reindex 按「数组下标」重置全体 index:Song 主轨顺序就存在 index 里、可经 moveMainTo 与数组序分叉,
+  //   reindex 会把 index 抹回数组序 = 撤销用户在 Song 排过的段落顺序(复制后整轨跳回 Live 序的 bug)。
+  const copy: Session = { ...src, id: newId('sess'), name: `${src.name} copy`, index: src.index + 1, songStartBar: copyStart, instruments: src.instruments.map((i) => cloneInstrument(i, newId)) };
+  const bumped = sessions.map((s) => (s.index > src.index ? { ...s, index: s.index + 1 } : s));
+  const next = [...bumped.slice(0, idx + 1), copy, ...bumped.slice(idx + 1)];
+  return { sessions: next, newIndex: idx + 1 };
 }
 
-/** 删场景(按下标),其余 reindex。调用方保证至少留一个。 */
-export const removeSessionAt = (sessions: Session[], idx: number): Session[] => reindex(sessions.filter((_, i) => i !== idx));
+/** 删场景(按下标):移除后,index 大于它的整体 −1(保留既有 index 顺序,不按数组序 reindex,理由同 duplicateSessionAt)。调用方保证至少留一个。 */
+export const removeSessionAt = (sessions: Session[], idx: number): Session[] => {
+  const gone = sessions[idx];
+  if (!gone) return sessions;
+  return sessions.filter((_, i) => i !== idx).map((s) => (s.index > gone.index ? { ...s, index: s.index - 1 } : s));
+};
 
 /** 拖拽换位:把 from 处的场景移到 to 处(splice 语义),其余 reindex。 */
 export function moveSession(sessions: Session[], from: number, to: number): Session[] {

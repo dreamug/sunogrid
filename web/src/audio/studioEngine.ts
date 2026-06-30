@@ -572,7 +572,12 @@ export class StudioEngine {
   /** 在给定上下文时刻 time:停 stopIds、起 startIds 中该响的 voice(保相位,不再二次量化)= 换场的实际动作。 */
   swapVoicesAt(stopIds: string[], startIds: string[], time: number): void {
     for (const id of stopIds) { const v = this.voices.get(id); if (!v) continue; this.cancelPending(v); this.clearScheduled(v); try { v.player.stop(time); } catch { /* */ } v.state = 'off'; v.startTime = undefined; }
-    for (const id of startIds) { const v = this.voices.get(id); if (!v || !this.shouldRun(id, v)) continue; this.clearScheduled(v); this.fire(v, time); v.state = 'on'; v.muteGain.gain.value = this.isAudible(id, v) ? 1 : 0; }
+    for (const id of startIds) { const v = this.voices.get(id); if (!v || !this.shouldRun(id, v)) continue; this.clearScheduled(v); this.fire(v, time); v.state = 'on'; v.muteGain.gain.setValueAtTime(this.isAudible(id, v) ? 1 : 0, time); }
+    // ⚠ 解遮罩必须排在边界 time(= fire 起声同刻),不能用 `.muteGain.gain.value =`:Tone 的 value setter 把事件落在 `context.now()` = currentTime + lookAhead(≈+100ms),
+    //   而 swap 回调在 time − lead(lead<lookAhead,如 ~60ms)处运行 → value 设值迟到约一个 lookahead 落在 ~time+40ms,但 fire 的 source 在 time 准点起声
+    //   → 新场头 ~40ms attack 放进还关着的 muteGain = 静音/咔(听感:换场卡顿 + 声音延迟 + glitch)。setValueAtTime(…, time) 把解遮罩钉在 time、与起声对齐 → 首段不被吞。
+    //   ⚠ 首播侥幸无症的原因:首播时新场 voice 还在后台懒载、startTransport 没碰到它们 → 它们以默认 muteGain=1 建出、从未被置 0 → 这条迟到的 value=1 是 no-op;复播 voice 已常驻、被 startTransport 置 0 → 迟到才暴露成真空洞。
+    //   (startTransport 用 `.value=` 不受影响:它的 fire(now=Tone.now()=currentTime+lookAhead) 与 value 设值同样落在 currentTime+lookAhead → 天然对齐。)
     this.onChange?.();
   }
   /** 换场 + **延迟**释放旧场 voice。swapVoicesAt 已把旧 voice 排成在 time 停;真正销毁必须等过了 time 再做 ——
@@ -583,7 +588,13 @@ export class StudioEngine {
     // 捕获此刻要释放的 voice 引用:同时又要起的(stop∩start,如 A→B→A 抢回当前场)不释放;延迟到边界后再销毁。
     const startSet = new Set(startIds);
     const captured = stopIds.filter((id) => !startSet.has(id)).map((id) => ({ id, v: this.voices.get(id) }));
-    const delayMs = Math.max(0, (time - Tone.now()) * 1000) + 80; // 过了边界(+安全余量)再销毁,确保 stop(time) 已执行
+    // ⚠ 销毁延迟基准必须用**原始音频时钟** currentTime(不含 lookahead),不能用 Tone.now()(= currentTime + lookAhead)。
+    //   本回调在 time − lookAhead 触发,此刻 Tone.now() ≈ time → 旧式 (time − Tone.now()) ≈ 0 → 定时器从「现在」算 80ms,
+    //   反而落在边界 time **之前**(lookahead 越大越早)→ clearInstrument 的立即 player.stop() 顶掉精确的 stop(time)、
+    //   提前切断上一个 session → 边界前一段静音(听感=下一段开头被吞);setTimeout 主线程抖动 → 时早时晚 = 间歇 80/20。
+    //   用 currentTime 后 (time − currentTime)=真正距边界秒数,+ 安全余量 → 销毁**必然在边界之后**,届时 stop(time) 已执行、
+    //   这里的 player.stop() 成无操作。setTimeout 偶发延迟只会更晚触发(更安全),不再提前。
+    const delayMs = Math.max(0, (time - Tone.getContext().currentTime) * 1000) + 120;
     const tid = setTimeout(() => {
       this.disposeTimers.delete(tid);
       for (const { id, v } of captured) if (v && this.voices.get(id) === v) this.clearInstrument(id); // 仍是同一 voice 才释放(被后续换场重建过 → 交给新主,别误销)

@@ -1,6 +1,6 @@
 'use client';
 // 左列:Suno 生成(控件)+ 素材库(两级卡片:一级=全混变体,二级=分离出的乐器轨,凹陷一层、可折叠)。
-import { useState, Fragment } from 'react';
+import { memo, useState, Fragment } from 'react';
 import type { GenView, LoopView } from '@/contracts/studioViews';
 import { SunoStatus, type SunoConnState } from '@/studio/ui/SunoStatus';
 import { PromptAssist } from '@/studio/ui/PromptAssist';
@@ -115,7 +115,8 @@ function KeyKeyboard({ value, onChange }: { value: string; onChange: (k: string)
   );
 }
 
-export function LoopManager(p: Props) {
+// perf:memo 包裹 —— 父(StudioApp)因 zoom/播放/切场景重渲时,本面板 props 全引用稳定(数据=state,回调=父侧 libCb 稳定路由)→ 整片跳过 reconcile。
+export const LoopManager = memo(function LoopManager(p: Props) {
   // 变体全被软删后的 complete 空壳不再展示(避免无内容、无操作的孤卡)。
   const gens = p.gens.filter((g) => !(g.status === 'complete' && g.sounds.length === 0));
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({}); // 变体 id → 二级收起
@@ -380,4 +381,4 @@ export function LoopManager(p: Props) {
       </section>
     </>
   );
-}
+});

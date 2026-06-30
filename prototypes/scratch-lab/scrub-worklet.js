@@ -57,6 +57,11 @@ class ScrubProcessor extends AudioWorkletProcessor {
           this.mode = 'filter'; this.targetPhase = m.phase; break;
         case 'release': this.mode = 'free'; break;
         case 'jump': if (this.len) this.phase = m.value * this.len; break;  // cue 跳位(0..1)
+        case 'play':  // 让盘走(原子):落到 cue 并以马达速正向播 —— 一条消息,免两消息竞争
+          if (this.len) this.phase = m.cue * this.len;
+          this.freeRate = m.rate != null ? m.rate : 1;
+          this.mode = 'free';
+          break;
         case 'vel': this.mode = 'direct'; this.vTarget = m.value; break;
         case 'scratch':
           // 位置驱动(技巧/撮盘序列器):给绝对目标位置,读头精确跟随。

@@ -20,11 +20,12 @@ function mulberry32(a) {
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
 
 // 风格 = 低/高强度技巧池 + 留白倾向
+// rest = 静音留白倾向;play = "松手让盘正常播(马达)"倾向
 export const STYLES = {
-  battle:   { label: 'Battle',      lo: ['baby', 'forward', 'chirp', 'tear'], hi: ['flare', 'crab', 'orbit', 'transformer'], rest: 0.22 },
-  minimal:  { label: 'Minimal',     lo: ['baby', 'forward'],                  hi: ['chirp', 'transformer'],                  rest: 0.42 },
-  chirpy:   { label: 'Chirp-heavy', lo: ['chirp', 'baby'],                    hi: ['chirp', 'flare', 'orbit'],               rest: 0.26 },
-  scribble: { label: 'Scribble',    lo: ['scribble', 'baby', 'hydroplane'],   hi: ['scribble', 'crab', 'flare'],             rest: 0.20 },
+  battle:   { label: 'Battle',      lo: ['baby', 'forward', 'chirp', 'tear'], hi: ['flare', 'crab', 'orbit', 'transformer'], rest: 0.18, play: 0.28 },
+  minimal:  { label: 'Minimal',     lo: ['baby', 'forward'],                  hi: ['chirp', 'transformer'],                  rest: 0.34, play: 0.34 },
+  chirpy:   { label: 'Chirp-heavy', lo: ['chirp', 'baby'],                    hi: ['chirp', 'flare', 'orbit'],               rest: 0.22, play: 0.24 },
+  scribble: { label: 'Scribble',    lo: ['scribble', 'baby', 'hydroplane'],   hi: ['scribble', 'crab', 'flare'],             rest: 0.16, play: 0.22 },
 };
 export const STYLE_KEYS = Object.keys(STYLES);
 
@@ -69,6 +70,14 @@ export function genRoutine(seed, style, intensity, bars, opts = {}) {
     if ((rng() < restP || forceRest) && remain > 0.5) {
       const d = Math.min(pick(rng, [1, 1, 2, 2, onDown ? 2 : 1]), remain);
       moves.push({ tech: 'rest', beats: d, cue: cues[cueIdx % cues.length], params: {}, accent: onDown });
+      acc += d; sinceRest = 0; continue;
+    }
+
+    // 释放 / 让盘走:松手让马达把这一句正常播出来 —— 撮盘的重要一环(不是冻住)
+    if (rng() < S.play && remain > 0.5) {
+      const d = Math.min(pick(rng, [1, 2, 2, 4]), remain);   // 可放长 = 放一整句
+      moves.push({ tech: 'play', beats: d, cue: cues[cueIdx % cues.length], params: {}, accent: onDown });
+      if (rng() < 0.5) cueIdx++;
       acc += d; sinceRest = 0; continue;
     }
 
