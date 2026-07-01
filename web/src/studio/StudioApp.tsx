@@ -602,21 +602,28 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
   const savedKey = useRef<string | null>(null);    // 上次存点的项目态 key(脏检测基准;null=本会话未建立基准 → 不显脏)
   const showCkptToast = (msg: string) => { setCkptToast(msg); if (ckptToastTimer.current) clearTimeout(ckptToastTimer.current); ckptToastTimer.current = setTimeout(() => setCkptToast(null), 3000); };
   // 项目态 key = 版本快照涵盖的口径(§16 口径的项目子集);脏检测 + 存点基准 + 挂载初始化共用同一算法。
+  // ⚠ projStateKey 内部先 normSess 归一 —— live 原始树与存点归一树若口径不一会误判脏 / 漏判 no-op(review #3)。归一集中一处,所有 key 天然对齐。
+  const normSess = (ss: Session[]): Session[] => normalizeSongLayout((ss ?? []).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto), volAuto: normalizeVolAuto(s.volAuto) })));
   const projStateKey = (ss: Session[], bpm: number, fxc: FxConfig, q: Quantize, st: SongLane[]): string =>
-    JSON.stringify(ss) + '‖' + bpm + '‖' + JSON.stringify(fxc) + '‖' + q + '‖' + JSON.stringify(st);
-  // 落库快照(可能来自旧版)按 load 同款归一后算 key —— 与 live 口径对齐,避免刚加载就误判脏。
+    JSON.stringify(normSess(ss)) + '‖' + bpm + '‖' + JSON.stringify(fxc) + '‖' + q + '‖' + JSON.stringify(st);
   const snapProjKey = (snap: CkptSnap): string => {
-    const ss = normalizeSongLayout((snap.sessions ?? []).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto), volAuto: normalizeVolAuto(s.volAuto) })));
     const fxc: FxConfig = { ...DEFAULT_FX, ...(snap.fx ?? {}), xy: { ...DEFAULT_XY, ...((snap.fx as FxConfig)?.xy ?? {}) }, master: normalizeMaster((snap.fx as FxConfig)?.master) };
-    return projStateKey(ss, typeof snap.bpm === 'number' ? snap.bpm : masterBpm, fxc, (snap.quantize ?? '1bar') as Quantize, Array.isArray(snap.songTracks) ? snap.songTracks : []);
+    return projStateKey(snap.sessions ?? [], typeof snap.bpm === 'number' ? snap.bpm : masterBpm, fxc, (snap.quantize ?? '1bar') as Quantize, Array.isArray(snap.songTracks) ? snap.songTracks : []);
   };
-  const liveProjKey = useMemo(() => projStateKey(sessions, ctx?.bpm ?? masterBpm, fx, quantize, songTracks), [sessions, ctx?.bpm, fx, quantize, songTracks, masterBpm]); // eslint-disable-line react-hooks/exhaustive-deps
-  const liveProjKeyRef = useRef(liveProjKey); liveProjKeyRef.current = liveProjKey;
-  const ckptDirty = savedKey.current != null && liveProjKey !== savedKey.current; // 有基准且不同 = 有未保存改动
+  // 脏检测(review #4 perf):把「整树 stringify」从渲染热路径挪进防抖 effect —— 拖动/编辑按 300ms 合并,不再每帧同步序列化整棵树。
+  const [liveKey, setLiveKey] = useState<string | null>(null);
+  useEffect(() => {
+    const t = setTimeout(() => setLiveKey(projStateKey(sessions, ctx?.bpm ?? masterBpm, fx, quantize, songTracks)), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, ctx?.bpm, fx, quantize, songTracks, masterBpm]);
+  const ckptDirty = savedKey.current != null && liveKey != null && liveKey !== savedKey.current; // 有基准且不同 = 有未保存改动
 
   const doSaveCheckpoint = useCallback(async () => {
     if (!loaded.current || ckptSaving) return;
     const snap: CkptSnap = { sessions: sessionsRef.current, bpm: ctxRef.current?.bpm ?? masterBpm, fx: fxRef.current, quantize: quantizeRef.current, songTracks: songTracksRef.current };
+    // review #2:Next route handler raw-body ~10MiB 硬上限([[large-upload-chunking]])。整树快照超限会被截断→req.json() 抛→400「Save failed」原因不明。前置拦截给明确提示(自动保存走增量 op 不受此限)。
+    if (new Blob([JSON.stringify(snap)]).size > 9 * 1024 * 1024) { showCkptToast('Project too large to save a version'); return; }
     const key = projStateKey(snap.sessions, snap.bpm, snap.fx, snap.quantize, snap.songTracks);
     setCkptSaving(true);
     try {
@@ -637,17 +644,22 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
       snap = checkpoint.snapshot as CkptSnap;
     } catch (err) { showCkptToast('Restore failed'); console.error('[studio] §44 取存点失败:', err); return; }
     if (!snap || !Array.isArray(snap.sessions)) { showCkptToast('Restore failed'); return; }
-    const sessions = normalizeSongLayout((snap.sessions as Session[]).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto), volAuto: normalizeVolAuto(s.volAuto) })));
+    const sessions = normSess(snap.sessions as Session[]);
+    if (!sessions.length) { showCkptToast('Restore failed'); return; } // 空快照(异常)不进 applyEntry,避免越界
     const fxNorm: FxConfig = { ...DEFAULT_FX, ...(snap.fx ?? {}), xy: { ...DEFAULT_XY, ...((snap.fx as FxConfig)?.xy ?? {}) }, master: normalizeMaster((snap.fx as FxConfig)?.master) };
     const bpm = typeof snap.bpm === 'number' ? snap.bpm : (ctxRef.current?.bpm ?? masterBpm);
     const q = (snap.quantize ?? quantizeRef.current) as Quantize;
     const st = (Array.isArray(snap.songTracks) ? snap.songTracks : songTracksRef.current) as SongLane[];
     const nextKey = projStateKey(sessions, bpm, fxNorm, q, st);
-    if (nextKey === liveProjKeyRef.current) { savedKey.current = nextKey; showCkptToast('Already at last saved'); return; } // 与当前完全一致 → 免空 undo 步
+    const liveKeyNow = projStateKey(sessionsRef.current, ctxRef.current?.bpm ?? masterBpm, fxRef.current, quantizeRef.current, songTracksRef.current); // 点击时即时算 live key(离散动作,非热路径),口径与 nextKey 一致
+    if (nextKey === liveKeyNow) { savedKey.current = nextKey; showCkptToast('Already at last saved'); return; } // 与当前完全一致 → 免空 undo 步
     // 回退本身可 ⌘Z:先压当前 live 态。库字段中性化(warps 空 / live 集取当前)→ applyEntry 库分支 no-op(不碰声音库)。
     pushHistory();
     const sb = ctxRef.current?.soundsById;
-    applyEntry({ sessions, warps: new Map(), bpm, fx: fxNorm, sessionId: sessionsRef.current[sessionIdx]?.id ?? '', quantize: q, liveSounds: new Set(sb ? sb.keys() : []), liveGens: new Set(gensRef.current.map((g) => g.id)), songTracks: st });
+    // review #1 关键:sessionId 必须是「存点树里存在的」session —— 否则存点后新加场景再回退,applyEntry 的 findIndex 落空
+    //   → idx=sessionIdx 越界 → reconcile/loadSession(undefined) 崩 + 引擎清空 + 编辑器掉回空白骨架。clamp 到存点范围即安全。
+    const revIdx = Math.min(Math.max(sessionIdx, 0), sessions.length - 1);
+    applyEntry({ sessions, warps: new Map(), bpm, fx: fxNorm, sessionId: sessions[revIdx]?.id ?? sessions[0].id, quantize: q, liveSounds: new Set(sb ? sb.keys() : []), liveGens: new Set(gensRef.current.map((g) => g.id)), songTracks: st });
     savedKey.current = nextKey; // 回退后 live == saved
     showCkptToast('Reverted to last saved · ⌘Z to undo');
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -661,6 +673,9 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     window.addEventListener('keydown', onSaveKey);
     return () => window.removeEventListener('keydown', onSaveKey);
   }, [doSaveCheckpoint]);
+
+  // review #5:卸载清掉待跑的 toast 定时器(否则卸载后 setCkptToast + 悬挂闭包;对齐本文件既有 timer 清理惯例)。
+  useEffect(() => () => { if (ckptToastTimer.current) clearTimeout(ckptToastTimer.current); }, []);
 
   // 挂载:取最新存点 → 启用 Restore + 初始化脏检测基准(内容与当前一致 → 显干净;有存点即可回退)。
   useEffect(() => {

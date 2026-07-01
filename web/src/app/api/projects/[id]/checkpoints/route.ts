@@ -27,7 +27,8 @@ export async function POST(req: Request, { params }: P) {
   if (!user) return unauthorized();
   if (!(await owned(id, user.id))) return new Response('not found', { status: 404 });
   const b = await req.json().catch(() => null);
-  if (!b || typeof b.snapshot !== 'object' || b.snapshot == null) return new Response('bad snapshot', { status: 400 });
+  // review #6:拒绝数组 / 缺 sessions 的畸形快照 —— 否则存进永远 Restore 失败的垃圾行(还占 KEEP 名额、误让 ckptHas=true)。
+  if (!b || typeof b.snapshot !== 'object' || b.snapshot == null || Array.isArray(b.snapshot) || !Array.isArray(b.snapshot.sessions)) return new Response('bad snapshot', { status: 400 });
   const checkpoint = await db.projectCheckpoint.create({
     data: { projectId: id, label: typeof b.label === 'string' ? b.label.slice(0, 120) : null, snapshot: b.snapshot },
   });
