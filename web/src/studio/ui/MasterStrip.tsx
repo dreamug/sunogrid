@@ -270,8 +270,13 @@ export function MasterStrip({ fx, engine, playing, onFx, onStart }: { fx: FxConf
                 <Knob label="DRIVE" value={lim.gainDb} min={0} max={18} def={0} fmt={(v) => `+${v.toFixed(1)}`} dim={!lim.on} onStart={onStart} onChange={(v) => setLim({ gainDb: v })} />
                 <Knob label="CEILING" value={lim.ceilingDb} min={-6} max={0} def={-1} fmt={(v) => `${v.toFixed(1)}`} dim={!lim.on} onStart={onStart} onChange={(v) => setLim({ ceilingDb: v })} />
                 <Knob label="RELEASE" value={lim.release} min={20} max={800} def={200} fmt={(v) => `${Math.round(v)}ms`} dim={!lim.on} onStart={onStart} onChange={(v) => setLim({ release: v })} />
+                <Knob label="CROSS" value={lim.crossHz} min={60} max={300} def={120} fmt={(v) => `${Math.round(v)}Hz`} dim={!lim.on || !lim.multiband} onStart={onStart} onChange={(v) => setLim({ crossHz: v })} />
               </div>
-              <span className="fx-note">DRIVE 推响度(maximizer)· lookahead brickwall · softclip 仍兜底{lim.targetLufs != null ? ` · 目标 ${lim.targetLufs} LUFS(待对齐)` : ''}</span>
+              <div className="fx-row" style={{ justifyContent: 'center', gap: 6, alignItems: 'center' }}>
+                <button type="button" className={'fx-chip' + (lim.multiband ? ' on' : '')} onClick={() => { onStart(); setLim({ multiband: !lim.multiband }); }}>MULTIBAND</button>
+                <span className="fx-note">{lim.multiband ? '低频单独限幅 = 更响还干净' : '单段'}</span>
+              </div>
+              <span className="fx-note">DRIVE 推响度(maximizer)· 2-band lookahead brickwall · softclip 仍兜底{lim.targetLufs != null ? ` · 目标 ${lim.targetLufs} LUFS(待对齐)` : ''}</span>
             </div>
           </div>
 

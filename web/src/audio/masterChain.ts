@@ -192,49 +192,67 @@ class GlueComp extends AudioWorkletProcessor {
 }
 registerProcessor('glue-comp', GlueComp);
 
-// ---- §42 Bus Limiter:真峰 lookahead 砖墙限幅(opt-in,strip 最后一级)。softClip(§17)仍在 strip 之后做最终兜底。----
-class BrickLimiter extends AudioWorkletProcessor {
+// ---- §42 Bus Maximizer / Limiter:多段(2-band)真峰 lookahead 砖墙 + 输入 drive(灌满天花板=推响度)。----
+// 多段命门:低频(kick/bass)单独限幅,不把整条 mix 一起摁 → 能推更响还干净(Ozone maximizer 核心)。
+// 分频=一阶互补(low=one-pole LP,high=x−low → 精确重建,不限幅时 low+high 严格=输入,零染色/低风险)。
+// 每段各自 lookahead 限幅 → 求和 → 最终限幅保证天花板;立体声联动(每段 L/R 同 gain,保像)。softClip(§17)仍在 strip 后兜底。
+class Lim { // 单个 lookahead 峰值限幅器(输出写实例字段,不分配 → 音频线程无 GC)
+  constructor(look) { this.look = look; this.max = look + 4; this.bL = new Float32Array(this.max); this.bR = new Float32Array(this.max); this.w = 0; this.g = 1; this.oL = 0; this.oR = 0; }
+  reset() { this.g = 1; this.oL = 0; this.oR = 0; for (let i = 0; i < this.max; i++) { this.bL[i] = 0; this.bR[i] = 0; } }
+  step(l, r, ceil, atkC, relC) {
+    this.bL[this.w] = l; this.bR[this.w] = r;
+    const peak = Math.max(Math.abs(l), Math.abs(r)), target = peak > ceil ? ceil / peak : 1;
+    this.g = target < this.g ? atkC * this.g + (1 - atkC) * target : relC * this.g + (1 - relC) * target;
+    const ri = (this.w - this.look + this.max) % this.max;
+    this.oL = this.bL[ri] * this.g; this.oR = this.bR[ri] * this.g;
+    this.w = (this.w + 1) % this.max;
+  }
+}
+class MBMax extends AudioWorkletProcessor {
   constructor() {
     super();
     this.sr = sampleRate;
-    this.cfg = { on:false, gainDb:0, ceilingDb:-1, release:0.2 };
-    this.look = Math.max(1, Math.round(0.0015 * this.sr)); // 1.5ms lookahead
-    this.maxLook = this.look + 4;
-    this.bL = new Float32Array(this.maxLook); this.bR = new Float32Array(this.maxLook);
-    this.w = 0; this.gain = 1;
+    this.cfg = { on:false, gainDb:0, ceilingDb:-1, release:0.2, multiband:true, crossHz:120 };
+    const look = Math.max(1, Math.round(0.0015 * this.sr)); // 1.5ms lookahead
+    this.lo = new Lim(look); this.hi = new Lim(look); this.fin = new Lim(look);
+    this.lpL = 0; this.lpR = 0;
     this.port.onmessage = (e) => { if (e.data && e.data.cfg) this.cfg = e.data.cfg; };
   }
   process(inputs, outputs) {
     const inp = inputs[0], out = outputs[0];
     if (!out || out.length === 0) return true;
     const oL = out[0], oR = out[1] || out[0], n = oL.length, c = this.cfg;
-    if (!c.on || !inp || inp.length === 0) { // 旁路:直通,无 lookahead 余延迟
+    if (!c.on || !inp || inp.length === 0) { // 旁路:直通,清状态
       const iL = inp && inp[0], iR = inp && (inp[1] || inp[0]);
       for (let i = 0; i < n; i++) { oL[i] = iL ? iL[i] : 0; if (oR !== oL) oR[i] = iR ? iR[i] : 0; }
-      this.gain = 1; return true;
+      this.lpL = 0; this.lpR = 0; this.lo.reset(); this.hi.reset(); this.fin.reset();
+      return true;
     }
     const L = inp[0], R = inp[1] || inp[0], sr = this.sr;
-    const ceil = Math.pow(10, c.ceilingDb / 20);
-    const drive = Math.pow(10, (c.gainDb || 0) / 20); // maximizer:输入 drive 把信号灌进天花板=推响度
-    const relC = Math.exp(-1 / (Math.max(0.005, c.release) * sr));
-    const atkC = Math.exp(-1 / (0.0003 * sr)); // 快攻(在 lookahead 窗内压下)
-    const look = this.look;
+    const drive = Math.pow(10, (c.gainDb || 0) / 20), ceil = Math.pow(10, c.ceilingDb / 20);
+    const relC = Math.exp(-1 / (Math.max(0.005, c.release) * sr)), atkC = Math.exp(-1 / (0.0003 * sr));
+    const mb = c.multiband !== false;
+    const a = 1 - Math.exp(-2 * Math.PI * Math.min(0.49 * sr, Math.max(20, c.crossHz || 120)) / sr); // one-pole 分频系数
     for (let i = 0; i < n; i++) {
-      const l = L[i] * drive, r = R[i] * drive;   // 先灌增益,再砖墙;峰值恒钉天花板,平均电平随 drive 升
-      this.bL[this.w] = l; this.bR[this.w] = r;
-      const peak = Math.max(Math.abs(l), Math.abs(r)), target = peak > ceil ? ceil / peak : 1;
-      this.gain = target < this.gain ? atkC * this.gain + (1 - atkC) * target : relC * this.gain + (1 - relC) * target;
-      const ri = (this.w - look + this.maxLook) % this.maxLook, dl = this.bL[ri], dr = this.bR[ri];
-      this.w = (this.w + 1) % this.maxLook;
-      let yl = dl * this.gain, yr = dr * this.gain;
-      if (yl > ceil) yl = ceil; else if (yl < -ceil) yl = -ceil;   // 砖墙硬夹(brickwall 保证)
+      const l = L[i] * drive, r = R[i] * drive; // 先灌 drive
+      let sl, sr2;
+      if (mb) {
+        this.lpL += a * (l - this.lpL); this.lpR += a * (r - this.lpR);       // 低频(一阶 LP)
+        const loL = this.lpL, loR = this.lpR, hiL = l - loL, hiR = r - loR;   // 高频=精确互补(x−low)
+        this.lo.step(loL, loR, ceil, atkC, relC);                            // 低频段独立限幅
+        this.hi.step(hiL, hiR, ceil, atkC, relC);                            // 高频段独立限幅
+        sl = this.lo.oL + this.hi.oL; sr2 = this.lo.oR + this.hi.oR;         // 求和(不限幅时 = drive×输入)
+      } else { sl = l; sr2 = r; }
+      this.fin.step(sl, sr2, ceil, atkC, relC);                              // 最终限幅保证天花板
+      let yl = this.fin.oL, yr = this.fin.oR;
+      if (yl > ceil) yl = ceil; else if (yl < -ceil) yl = -ceil;             // 砖墙硬夹兜底
       if (yr > ceil) yr = ceil; else if (yr < -ceil) yr = -ceil;
       oL[i] = yl; if (oR !== oL) oR[i] = yr;
     }
     return true;
   }
 }
-registerProcessor('brick-limiter', BrickLimiter);
+registerProcessor('mb-max', MBMax);
 `;
 let _glueUrl: string | null = null;
 function glueWorkletUrl(): string { if (!_glueUrl) _glueUrl = URL.createObjectURL(new Blob([GLUE_WORKLET_SRC], { type: 'application/javascript' })); return _glueUrl; }
@@ -301,7 +319,7 @@ class LimiterNode {
   set(c: import('@/contracts').MasterLimiter): void {
     this.cfg = c;
     if (this.node) {
-      this.node.port.postMessage({ cfg: { on: c.on, gainDb: c.gainDb, ceilingDb: c.ceilingDb, release: c.release / 1000 } }); // ms→s
+      this.node.port.postMessage({ cfg: { on: c.on, gainDb: c.gainDb, ceilingDb: c.ceilingDb, release: c.release / 1000, multiband: c.multiband, crossHz: c.crossHz } }); // ms→s
       this.wet.gain.value = c.on ? 1 : 0; this.bypass.gain.value = c.on ? 0 : 1;
     } else { this.wet.gain.value = 0; this.bypass.gain.value = 1; } // 未就绪 → 直通
   }
@@ -311,7 +329,7 @@ class LimiterNode {
       const ctx = Tone.getContext();
       await ctx.addAudioWorkletModule(glueWorkletUrl()); // 同一模块(含 glue-comp + brick-limiter),_workletPromise 缓存
       const raw = ctx.rawContext as unknown as BaseAudioContext;
-      this.node = new AudioWorkletNode(raw, 'brick-limiter', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      this.node = new AudioWorkletNode(raw, 'mb-max', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       this.input.connect(this.node);
       this.node.connect(this.wet.input as unknown as AudioNode);
       this.set(this.cfg);

@@ -1,8 +1,8 @@
 # SunoGrid
 
-> Browser-based AI loop machine / groovebox (style-agnostic): generate loops in any style with Suno, auto-warp them to your project BPM, drag them onto a grid, and start/stop with **bar-level quantization** to build beats and arrangements.
+> Browser-based **AI music studio / groovebox (style-agnostic)**: generate loops in any style with Suno — or bring your own samples — and auto-warp them to your project BPM. Jam by triggering clips on a **bar-quantized** grid (**Live**), or build full tracks on a multitrack timeline with automation (**Song**). Slice and warp clips, split stems, play drum racks, mix with sends and master FX, master the bus, version with checkpoints, and export to WAV/MP3 — all in the browser.
 >
-> 浏览器里的 **AI loop 机 / groovebox(风格无关)**:用 Suno 生成任意风格的 loop,自动对齐到工程 BPM,拖进网格,**小节级量化**启停,做 beat 与编曲。
+> 浏览器里的 **AI 音乐工作站 / groovebox(风格无关)**:用 Suno 生成任意风格的 loop——或导入你自己的采样——并自动对齐到工程 BPM。在**小节量化**网格上触发 loop 即兴(**Live**),或在多轨时间轴上带自动化地做完整曲子(**Song**)。切片/变速、分离 stem、玩鼓机、用 send 与总线效果混音、做母带、用存点做版本、导出 WAV/MP3——全程在浏览器。
 
 <p align="center">
   <a href="https://sunogrid.com/"><img src="https://img.shields.io/badge/%E2%96%B6%20Try%20it%20live-sunogrid.com-FF5500?style=for-the-badge&labelColor=222222" alt="Try SunoGrid live at sunogrid.com" height="38"></a>

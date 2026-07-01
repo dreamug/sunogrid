@@ -39,7 +39,7 @@ export const MASTER_PRESETS: MasterPreset[] = [
       comp: { ...B.comp, on: true, threshold: -24, ratio: 3, attack: 15, release: 150, autoRelease: true, makeup: 3, scHpf: 90, mix: 0.85 },
       sat: { on: true, drive: 0.4, character: 'soft', mix: 0.4 },
       width: { on: true, width: 1.15, monoBelowHz: 130, air: 1.5 },
-      limiter: { on: true, gainDb: 7, ceilingDb: -1, targetLufs: -9, release: 120 },
+      limiter: { on: true, gainDb: 7, ceilingDb: -1, targetLufs: -9, release: 120, multiband: true, crossHz: 130 },
     },
   },
   {
@@ -50,7 +50,7 @@ export const MASTER_PRESETS: MasterPreset[] = [
       comp: { ...B.comp, on: false },
       sat: { on: false, drive: 0.3, character: 'tape', mix: 1 },
       width: { on: true, width: 1.0, monoBelowHz: 0, air: 1 },
-      limiter: { on: true, gainDb: 2, ceilingDb: -1, targetLufs: null, release: 200 },
+      limiter: { on: true, gainDb: 2, ceilingDb: -1, targetLufs: null, release: 200, multiband: false, crossHz: 120 },
     },
   },
   {
@@ -61,7 +61,7 @@ export const MASTER_PRESETS: MasterPreset[] = [
       comp: { ...B.comp, on: true, threshold: -20, ratio: 2, attack: 35, release: 250, autoRelease: true, makeup: 1.5, scHpf: 100, mix: 0.5 },
       sat: { on: true, drive: 0.25, character: 'tape', mix: 0.35 },
       width: { on: true, width: 1.35, monoBelowHz: 120, air: 2 },
-      limiter: { on: true, gainDb: 4, ceilingDb: -1, targetLufs: null, release: 180 },
+      limiter: { on: true, gainDb: 4, ceilingDb: -1, targetLufs: null, release: 180, multiband: true, crossHz: 120 },
     },
   },
   {
@@ -72,7 +72,7 @@ export const MASTER_PRESETS: MasterPreset[] = [
       comp: { ...B.comp, on: true, threshold: -20, ratio: 2, attack: 30, release: 200, autoRelease: true, makeup: 1, scHpf: 80, mix: 0.5 },
       sat: { on: false, drive: 0.3, character: 'tape', mix: 1 },
       width: { on: true, width: 1.0, monoBelowHz: 0, air: 0.5 },
-      limiter: { on: true, gainDb: 4, ceilingDb: -1, targetLufs: -14, release: 200 },
+      limiter: { on: true, gainDb: 4, ceilingDb: -1, targetLufs: -14, release: 200, multiband: true, crossHz: 120 },
     },
   },
 ];

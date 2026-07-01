@@ -13,6 +13,8 @@ export interface ApiGenPrefs { mode: 'sound' | 'advanced'; loop: boolean; bpm: n
 export interface ApiGridPrefs { arrange: number; warp: number; snap: boolean; songZoom?: number; songGrid?: number }
 export interface ApiProject { id: string; name: string; masterBpm: number; masterKey: string | null; genPrefs: ApiGenPrefs | null; gridPrefs: ApiGridPrefs | null; fx: FxConfig | null; quantize: string; beatsPerBar: number; loopSong: boolean; playMode: string; showAutomation: boolean; songLayoutVersion: number; songLanes: SongLane[] | null; isExample: boolean; owned: boolean }
 export interface ApiAsset { id: string; path: string; contentType: string }
+// §44 手动版本 / 存点:snapshot = 项目态快照 { sessions, bpm, fx, quantize, songTracks }(§44.3)。
+export interface ApiCheckpoint { id: string; label: string | null; snapshot: unknown; createdAt: string }
 export interface ApiSound {
   id: string; name: string; mode: string; sourceBpm: number; musicalKey: string | null;
   durationSec: number; sampleRate: number; channels: number;
@@ -37,6 +39,9 @@ export const api = {
     // §25 示例项目:进入示例 → 写时复制出我的副本(返回副本 id);把示例从我的列表隐藏。
     fork: (id: string): Promise<{ id: string; resumed: boolean }> => post(`/api/projects/${id}/fork`, {}),
     dismiss: (id: string): Promise<{ ok: boolean }> => post(`/api/projects/${id}/dismiss`, {}),
+    // §44 手动版本 / 存点:存一版(仅项目态快照)/ 取最新一版(v1 单还原点)。
+    saveCheckpoint: (id: string, b: { snapshot: unknown; label?: string }): Promise<{ checkpoint: ApiCheckpoint }> => post(`/api/projects/${id}/checkpoints`, b),
+    latestCheckpoint: (id: string): Promise<{ checkpoint: ApiCheckpoint | null }> => fetch(`/api/projects/${id}/checkpoints`).then(J),
     // §38 导出:下载 zip 用此 URL 直接 <a download>(GET 带 cookie 即鉴权)。
     exportUrl: (id: string): string => `/api/projects/${id}/export`,
     // §38 导入(覆盖):分块上传 zip。Next 截断 >10MiB 的 raw body、formData 在大文件上触发 undici 解析 bug,

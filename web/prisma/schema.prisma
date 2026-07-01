@@ -78,10 +78,25 @@ model Project {
   padClips         PadClip[]
   originatedSounds Sound[]         @relation("SoundOrigin")
   studioSessions   StudioSession[]
+  checkpoints      ProjectCheckpoint[] // §44 手动版本 / 存点
 
   @@unique([userId, forkedFromExampleId]) // §25 每个用户对每个母版至多一份副本(MySQL 多 NULL 互不冲突 → 普通项目不受限)
   @@index([userId])
   @@index([isExample])
+}
+
+// §44 手动版本 / 存点:用户显式打的可回退版本快照(仅项目态:sessions 编排 + bpm + fx + quantize + songTracks)。
+// 不可变归档快照(§15.A 派生/快照 → 留 JSON),整体读写、从不查内部;单开表不上 GET /api/studio 热路径。
+// 每项目保留最近 N=20 条(存点时 prune);UI v1 只取最新一条做「回到上一次保存」。
+model ProjectCheckpoint {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  label     String?  // 预留命名(v1 留空 / 客户端可传时间戳)
+  snapshot  Json     // { sessions, bpm, fx, quantize, songTracks } —— 见 PRODUCT §44.3
+  createdAt DateTime @default(now())
+
+  @@index([projectId, createdAt])
 }
 
 // §25 示例项目:用户把某个示例母版"从我的列表移除"= 这里加一行(per-user 隐藏,不删母版/不删任何副本)。

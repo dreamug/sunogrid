@@ -4,7 +4,7 @@
 
 ## 1. 一句话
 
-浏览器里的 **AI loop 机 / groovebox(任意风格)**:用 Suno 生成任意风格的 loop 素材,拖进 16-pad 网格,**小节级量化**启停,做 beat 和编曲。
+浏览器里的 **AI 音乐工作站 / groovebox(任意风格)**:用 Suno 生成(或自己上传)任意风格的 loop,自动对齐到工程 BPM,在**小节量化**网格上即兴(Live)或在多轨里带自动化编曲(Song),含混音、母带、存点与导出。
 > 初始用例是 jazzhiphop,但**产品本身风格无关**——任何 Suno 能生成的风格都能用(trap、house、ambient、funk…)。架构里没有任何 jazzhiphop 专属逻辑。
 
 ## 2. 背景与演变
@@ -1946,6 +1946,7 @@ MasterStrip.tsx        // .fx-pop 浮层壳 + header + 预设 chip 行 + 点外/
 
 **v2(opt-in 动态 + 预设 + 真 LUFS)**:⑦ ✅ 压缩器 AudioWorklet(路线 A,纯 JS):侧链 HPF/lookahead 环形缓冲/软膝/auto-release/GR 回传 + CompNode 外做并行(干声同步延迟对齐)+ 离线同 blob-URL 注册。⑧ ✅(部分)limiter(真峰 lookahead 砖墙 JS worklet,`brick-limiter` 与 glue-comp 同模块)+ 预设系统 `masterPresets.ts`(6 个,套预设=onFx 整块替换+一次 pushHistory);**⏳ 响度对齐 trim 未做**(targetLufs 已存未强制,需真 LUFS)。⑧.5 ⏳ 真 LUFS(BS.1770 K 加权+门限;现 getMeters 是 RMS 近似)。⑨〔路线 B〕Faust→WASM 换内核(用户 2026-07-01 决定先不上,保持路线 A)。
 > v2 落地补注(2026-07-01):glue-comp worklet 经对抗审查修了 3 个 low(GR 少报→minG 实例字段跨块累积、关闭仍报 GR→worklet 加 c.on 旁路分支、关闭留 3ms 余延迟→dryDelay 关时置 0)。worklet 不内做并行(在 CompNode dry/wet);comp.on/limiter.on 各自结构式真旁路(关=零延迟直通)。
+> **maximizer(2026-07-01,用户反馈"开了跟没开差不多"对标 Ozone):** limiter = **maximizer** —— `MasterLimiter.gainDb`(输入 drive 灌满天花板,峰值恒钉不爆)+ **2-band multiband**(`mb-max` worklet:一阶互补分频 low=onepole-LP/high=x−low=**精确重建**,每段各自 lookahead 限幅→求和→最终限幅;`multiband` 开关+`crossHz`)。数值验证:重建 err 3.7e-9 / 砖墙不破顶 / drive+6dB=响度+5.5dB。老工程归一化 `normalizeMaster()`(逐子对象深合并,补 gainDb/multiband/crossHz 等后加字段,防 UI 读 undefined 崩)。**离 Ozone 仍差:过采样真峰(ISP)、真 LUFS+响度对齐、3+ band。**
 
 ⑩ review 真机:套预设音色变响度不跳、压缩走带多圈不抽吸(对照 §17)、GR/LUFS 准、宽度过 mono 不塌、bypass A/B、停播无残留、undo/redo、刷新还在、导出听感一致。
 
@@ -2020,3 +2021,101 @@ warp/trim/marker 的所有偏移量都是**整数采样下标**(`Clip.startSampl
 - 数值:44.1k 资产区间短 8.12%、48k 资产 0%;偏移量迁到 48k 域后**全部 0.000%** 误差(= 真实小节时长)。
 - app 端到端:把该项目偏移量迁到 48k 域 + 刷新 → 编辑器 bass `98→90`、LEX `100→92`、jazz `95→88`,全读回真实 sourceBpm、跑拍消失(验证后已还原原值)。
 - `new AudioContext({sampleRate})` 被浏览器完整尊重(44.1k/48k/96k 解码样本数各异、与设备无关)。
+
+## §44 手动版本 / 存点(Checkpoint:手动 Save + 回到上一次保存)—— ✅ 实现 + 真机实测 · 2026-07-01
+
+**一句话**:在 §15「改即存」的自动同步之上,叠一层**用户显式的、落库的、可回退的版本快照(checkpoint)**。顶栏加 **Save** 按钮 + **⌘/Ctrl+S**(灭浏览器保存框)存一版;旁边 **Restore** 回到上一次保存的版本。范围**仅项目态**(编排 + 音乐设置),**不含**跨用户共享的声音库。**不造新引擎**:存 = 序列化 client store 成一条 JSON 行;回退 = 复用 §16 的 `pushHistory`+`applyEntry` + §15 发件箱自动落库。
+
+> **与 §15 原则② 的关系(必须先讲清,否则像自打脸)**:§15「没有 Save,改即存」说的是**没有"手动写盘"这个动作** —— 持久化是自动的。§44 **不推翻它**:自动同步照旧一行不动,checkpoint 是**版本层**,不是持久化层。手动 Save 存的不是"把改动写进 DB"(那一直在发生),而是"打一个能挺过刷新、能回退的还原点"。两者正交。
+
+### §44.0 为什么需要它(补的是哪个洞)
+
+§16 的 undo 栈是**内存态、刷新即失**(`StudioApp` 的 `past/future`,上限 50,不落库)。刷新后就再也回不去任何早前状态。checkpoint 恰好补这个洞:**落库的、粗粒度的、跨刷新存活的**还原点。undo = 细粒度瞬时后悔药,checkpoint = 粗粒度持久里程碑,两者互补不重叠。
+
+### §44.1 范围决策:仅项目态(不含声音库)—— 已拍板
+
+§16 快照口径 8 项里,② 各库声音 `Sound.warp`、⑦ 已删声音/生成组集,是**库态(per-user 跨项目共享)**,不是项目态。checkpoint **只快照项目态**,库态**不碰**:
+
+- **理由**:`Sound` 是跨项目共享库(§15.D)。若回退连库一起还原,"回退项目 A"就会**改动项目 B 也依赖的库**,并重演 fork 那个命门(§25,[[example-projects]])。
+- **代价其实极小**:clip 自己的 warp/trim/变调(`Clip.warpPts/timeMul/semitones/startSample`)**全在项目树里、在快照里**,回退时**听感几乎全回来**;② 的 `Sound.warp` 只是"建新 clip 时的默认种子",不影响已排好的声音。
+- **实现最干净**:回退时把 `applyEntry` 的库字段喂中性值(见 §44.5)→ 库分支天然 no-op,`applyEntry` 一行不用改。
+
+### §44.2 版本数量:底层存多版本,UI 先给一个 —— 已拍板
+
+`ProjectCheckpoint` 是一叠行(按 `createdAt` 排),存点极便宜。UI v1 只暴露 **"Restore → 回到上一次保存"**(取最新一行);数据层已是列表 → 以后升级成"版本历史"下拉是免费的。每项目**保留最近 N=20 条**,超出裁掉最老(存点时 prune)。
+
+### §44.3 数据模型(§15 合规 —— 单开快照表)
+
+```prisma
+model ProjectCheckpoint {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  label     String?                    // 预留命名(v1 留空 / 自动时间戳)
+  snapshot  Json                       // 不可变项目态快照(见下)
+  createdAt DateTime @default(now())
+  @@index([projectId, createdAt])
+}
+```
+- **§15.A 合规**:checkpoint 是**不可变归档快照**(§15.A 明列"派生/快照 → 留 JSON"),整体读写、从不查内部 —— 与被禁的"往 live 行堆可编辑状态"是两回事。
+- **单开表、不塞进 `Project` 行**:snapshot blob 不会被 `GET /api/studio` 每次拖出来 → 热路径零负担。
+- **snapshot 形状 = §16 八项口径的"项目子集"**(这样回退 = 纯 `applyEntry`,零额外还原代码):
+  ```ts
+  { sessions: Session[],        // 完整编排树(sessionsRef.current;含各 session 的 xyAuto/volAuto/songLane、乐器、clip)= 口径①
+    bpm, quantize,              // 项目级音乐设置 = 口径③⑥
+    fx: FxConfig,               // 主总线效果器 = 口径④
+    songTracks: SongLane[] }    // §37 主轨配置
+  ```
+  **去掉**库态②⑦ 与活动 sessionId⑤。`beatsPerBar/masterKey/gridPrefs/genPrefs` 等项目偏好**暂不入版本**;要纳入须按 §16 铁律②**同时扩** `applyEntry` + snapshot(留作后续)。
+
+### §44.4 存(Save / ⌘S)路径
+
+`saveCheckpoint()`(客户端 hook):
+1. 序列化当前 store 项目态(`sessions: sessionsRef.current` + 上列标量)。**client 即事实来源(§15②)** → 不等发件箱、不回读 DB;Save 与同步状态**解耦**(即便某次 sync 正在退避重试,Save 存的仍是 store 真态)。
+2. `POST /api/projects/[id]/checkpoints { snapshot, label? }` → 服务端校验 project 属当前用户 → INSERT 一行 → prune 到最近 20 条。
+3. 成功后 `savedKey.current = histDataKey(snapshot())`(脏检测基准,§44.6),toast「Saved version」。
+
+### §44.5 回退(Restore)路径 —— 复用 §16 + §15,零专用服务端变更逻辑
+
+`revertToLatest()`:
+1. **`pushHistory()`** —— 先把当前 live 态压 undo 栈 → **回退本身可 ⌘Z 撤销**(误点不致命)。
+2. `GET /api/projects/[id]/checkpoints/latest` 取最新快照(刷新后内存里没有,从库取 → 证明 checkpoint 真落库)。
+3. 构造一个**合成 HistEntry** 喂给现成的 `applyEntry`:
+   - 项目字段:`sessions/bpm/fx/quantize/songTracks` ← 快照。
+   - 库字段中性化:`warps = new Map()`(空 → applyEntry 的 warp-diff 循环不碰任何库声音)、`liveSounds/liveGens = 当前存活集`(→ ⑦ restore-only 自比 = no-op)、`sessionId = 当前活动`。
+   - 于是 `applyEntry` 的库分支②⑦ 全 no-op,只还原项目态:`setSessions` + bpm/fx/quantize 回引擎 + 反向 `api.projects.update` + `reconcile` 重灌。
+4. **DB 收敛靠 §15 发件箱**:`setSessions` 改了 store → 下一 tick `usePersistence` 的 `diff(normalize(new), synced)` 算出最小 ops(id 稳定:删的重建、多的删、变的 patch)→ POST `/api/studio/ops` 落库。**回退不需要专门的服务端 mutation**。
+5. toast「Reverted to last saved · ⌘Z to undo」。
+
+### §44.6 UI / 顶栏 / ⌘S
+
+落点:顶栏「历史 + 保存」组(`StudioApp` `tbar` 内 Undo/Redo 之后、`svc-dot` 之前)。
+
+- **Save 分裂按钮**:主体 `Save`(点 = 存版,`title="Save version (⌘S)"`)+ 右侧 caret `▾`(点 = 菜单:`Restore to last saved · <相对时间>`,无存点时禁用)。样式沿 `.out-btn` / `.metro-btn+caret`(暖橙 `--acc` 系)。
+- **脏标记**:`dirty = savedKey.current && histDataKey(snapshot()) !== savedKey.current`。脏 → Save 高亮(`--acc` 描边 + 小圆点);干净 → 灰、打勾。复用 §16 已有的 `histDataKey`,零新算法。
+- **与自动同步灯区分**(避免两个"Saved"打架):`svc-dot`("Saving/Saved/⚠Failed" = 同步到 DB)降级成一个**小图标/点**(云或圆点),把语义让给 Save 按钮(= 版本)。tooltip 分别写清:同步灯 = "改动自动同步到库"、Save = "存一个可回退的版本"。
+- **⌘/Ctrl+S**:studio 路由挂全局 `keydown`,`(e.metaKey||e.ctrlKey)&&(e.key==='s'||e.key==='S')` → **`e.preventDefault()` 灭浏览器"保存网页"框** → `saveCheckpoint()`。**不分焦点**(Save 是通用动作,与 ⌘Z 在输入框内退让不同;但仍 preventDefault 吃掉浏览器默认)。逻辑放独立 hook(`useCheckpoints`),**不塞进 3100 行的 `StudioApp`**([[studio-render-perf]])。
+- **Electron**:桌面壳可能把 ⌘S 映射成菜单 accelerator、在网页层之前吞掉 → 落地时验证事件能到 renderer,必要时在应用菜单加一项转发([[electron-desktop-launch]])。
+
+### §44.7 持久化(§15)/ undo(§16)合规
+
+- **§15**:新表是快照(§15.A 派生/快照 → JSON 正当),单开不上热路径;存 = 写一行,回退 = **骑现有发件箱**(无新同步机制);两条路由都经 project→userId scoping。
+- **§16**:**口径不扩**。Save 只读快照、不碰 undo 栈;回退 = `pushHistory()` + `applyEntry()`(现成 8 项还原器,库字段中性化),**回退整体 = 1 个 undo 步**。无新快照维度。
+
+### §44.8 已知边界与妥协
+
+- **引用了"已删声音"的 clip → 静音降级**:存版后把某声音从库软删,回退会让 clip 重新指向那条软删声音(FK 仍在,但 `reloadLibrary` 按 `trashed:false` 过滤 → 不进 `soundsById`)→ 该 clip 无声(§15 "解码失败跳过"式优雅降级)。可接受;后续可选补丁 = 回退时**只 un-trash 被当前编排引用的声音**(最小化、按需触库,不等于把库整体版本化)。
+- **不属当前用户的 `soundId`**:回退经 ops 落库时,`/api/studio/ops` 既有防护把非己 `soundId` 置 null(跨租户防护不变)。
+- **回退丢弃"存版后的改动"**:符合预期(这正是回退语义);但因 §44.5 先 `pushHistory` → 一键 ⌘Z 可救回,故**不弹模态确认**,只给可撤销 toast。
+
+### §44.9 落地顺序(doc-first / 每步 typecheck)
+
+① 本节。② `ProjectCheckpoint` 表 + `Project` 反向关系;`prisma db push` → **重启 next**([[prisma-stale-client-restart]])。③ API:`POST /api/projects/[id]/checkpoints`(create + prune N)、`GET …/checkpoints/latest`(userId scoping)。④ 客户端 `useCheckpoints` hook:`saveCheckpoint` / `revertToLatest`(合成 HistEntry → `applyEntry`)/ `dirtySinceSave`(`histDataKey` 比对)。⑤ ⌘S hotkey(`preventDefault` + `saveCheckpoint`)。⑥ 顶栏 Save 分裂按钮 + 脏标记 + `svc-dot` 降级。⑦ Electron ⌘S 验证。⑧ review 真机:存版 → 改几处 → Restore → 编排/设置回到存版态;Restore 可 ⌘Z 撤销;**刷新后仍能 Restore 到存的版**(证落库);引用已删声音的 clip 静音符合预期;⌘S 不弹浏览器保存框、Song/Live 两态都灵。
+
+### §44.10 实现记录(2026-07-01,与设计的差异)
+
+代码已落 + 端到端真机实测通过(tsc 干净)。**与上文设计的落地差异**:
+- **API GET 走 `GET /api/projects/[id]/checkpoints`(不是 `…/latest`)**:同一路由 GET 返回最新一条 `{ checkpoint }`(降序取首),POST 建 + prune 20。文件 `src/app/api/projects/[id]/checkpoints/route.ts`。
+- **未抽 `useCheckpoints` hook,§44 逻辑内联在 `StudioApp`**(`redo` 之后一段):因存/回退与 `snapshot`/`pushHistory`/`applyEntry` 深耦合,内联比穿一堆 ref 更直白。脏检测用 `liveProjKey`(memo,只在 sessions/bpm/fx/quantize/songTracks 变时重算,非每帧 stringify)对比 `savedKey` ref;挂载取最新存点初始化基准。
+- **顶栏两枚图标按钮(非分裂按钮)、放最右(Save 是最右元素)、纯图标无文字**(用户定):`Restore`(⟲,`.ic`)+ `Save`(软盘,`.ic ic-save`,脏时 `data-dirty` → `--acc` 描边 + `.ic-dot` 橙点)。`svc-dot` 未降级(用户只要求加最右 Save,保留同步灯避免超范围)。回退给底部居中 toast,不弹模态。CSS 在 `globals.css`(`.ic-save[data-dirty]` / `.ic-dot`)。
+- **实测覆盖**:注册→建项目→进 studio→点 Save(POST + toast「Saved version」+ Restore 转可用)→改 quantize(Save `data-dirty` + 橙点 + accent 色)→Restore(quantize 还原 + toast + 脏清 + Undo 可用)→⌘Z(撤销回退)→⌘S(`preventDefault=true` 灭浏览器框 + 存版)。另 curl 鉴权往返验 prune 排序 + userId scoping + 级联删。**唯 Electron ⌘S 菜单 accelerator 未验(⑦ 待真机)**。

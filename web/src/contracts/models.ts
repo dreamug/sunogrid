@@ -147,7 +147,7 @@ export interface MasterComp { // §42.3 抗抽吸慢胶水压缩(v2)
 }
 export interface MasterSat { on: boolean; drive: number; character: 'tape' | 'tube' | 'soft'; mix: number; } // WaveShaper 谐波胶水(memoryless)
 export interface MasterWidth { on: boolean; width: number; monoBelowHz: number; air: number; } // M/S:width 0=mono/1=原/2=宽;monoBelowHz 以下转单声道;air=side 高频
-export interface MasterLimiter { on: boolean; gainDb: number; ceilingDb: number; targetLufs: number | null; release: number; } // maximizer:gainDb=输入 drive(往天花板灌增益=推响度)+ 真峰天花板 + 响度目标(v2)
+export interface MasterLimiter { on: boolean; gainDb: number; ceilingDb: number; targetLufs: number | null; release: number; multiband: boolean; crossHz: number; } // maximizer:gainDb=输入 drive(灌满天花板=推响度)+ 真峰天花板 + multiband(低频单独限幅=推更响还干净)+ crossHz 分频 + 响度目标(v2)
 export interface MasterConfig {
   on: boolean;                          // §42.1a strip 总电源(header ⏻ MASTER);false=全旁路,盖过各段 on
   eq: MasterEq;
@@ -163,7 +163,7 @@ export const DEFAULT_MASTER: MasterConfig = {
   comp: { on: false, threshold: -18, ratio: 2, attack: 30, release: 200, autoRelease: true, knee: 6, makeup: 0, scHpf: 80, mix: 1, lookahead: 3 },
   sat: { on: false, drive: 0.3, character: 'tape', mix: 1 },
   width: { on: false, width: 1, monoBelowHz: 0, air: 0 },
-  limiter: { on: false, gainDb: 0, ceilingDb: -1, targetLufs: null, release: 200 },
+  limiter: { on: false, gainDb: 0, ceilingDb: -1, targetLufs: null, release: 200, multiband: true, crossHz: 120 },
 };
 /** 归一化老工程的 master:**逐子对象深合并** DEFAULT_MASTER → 任何后加字段(如 limiter.gainDb)缺失也补全,
  *  防 UI 读 undefined 崩 / 引擎收到 NaN。浅 spread 会整块替换子对象 → 必须深合并。 */

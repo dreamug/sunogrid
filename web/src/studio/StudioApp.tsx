@@ -589,6 +589,100 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
     const nf = f.slice(1); futureRef.current = nf; setFuture(nf);
     applyEntry(nx);
   };
+
+  // ——— §44 手动版本 / 存点(Checkpoint)———
+  // 存 = 序列化项目态一条 JSON 行(client 即事实来源 §15②,不等发件箱);回退 = pushHistory() + applyEntry(合成 HistEntry,
+  //   库字段中性化)→ §15 发件箱自动落库。范围仅项目态(sessions/bpm/fx/quantize/songTracks),不碰声音库(§44.1)。详见 PRODUCT §44。
+  type CkptSnap = { sessions: Session[]; bpm: number; fx: FxConfig; quantize: Quantize; songTracks: SongLane[] };
+  const [ckptSaving, setCkptSaving] = useState(false);
+  const [ckptHas, setCkptHas] = useState(false);   // 是否已有存点 → 决定 Restore 可用
+  const [ckptAt, setCkptAt] = useState(0);         // 最近存点时间戳(相对时间显示;0=无)
+  const [ckptToast, setCkptToast] = useState<string | null>(null);
+  const ckptToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedKey = useRef<string | null>(null);    // 上次存点的项目态 key(脏检测基准;null=本会话未建立基准 → 不显脏)
+  const showCkptToast = (msg: string) => { setCkptToast(msg); if (ckptToastTimer.current) clearTimeout(ckptToastTimer.current); ckptToastTimer.current = setTimeout(() => setCkptToast(null), 3000); };
+  // 项目态 key = 版本快照涵盖的口径(§16 口径的项目子集);脏检测 + 存点基准 + 挂载初始化共用同一算法。
+  const projStateKey = (ss: Session[], bpm: number, fxc: FxConfig, q: Quantize, st: SongLane[]): string =>
+    JSON.stringify(ss) + '‖' + bpm + '‖' + JSON.stringify(fxc) + '‖' + q + '‖' + JSON.stringify(st);
+  // 落库快照(可能来自旧版)按 load 同款归一后算 key —— 与 live 口径对齐,避免刚加载就误判脏。
+  const snapProjKey = (snap: CkptSnap): string => {
+    const ss = normalizeSongLayout((snap.sessions ?? []).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto), volAuto: normalizeVolAuto(s.volAuto) })));
+    const fxc: FxConfig = { ...DEFAULT_FX, ...(snap.fx ?? {}), xy: { ...DEFAULT_XY, ...((snap.fx as FxConfig)?.xy ?? {}) }, master: normalizeMaster((snap.fx as FxConfig)?.master) };
+    return projStateKey(ss, typeof snap.bpm === 'number' ? snap.bpm : masterBpm, fxc, (snap.quantize ?? '1bar') as Quantize, Array.isArray(snap.songTracks) ? snap.songTracks : []);
+  };
+  const liveProjKey = useMemo(() => projStateKey(sessions, ctx?.bpm ?? masterBpm, fx, quantize, songTracks), [sessions, ctx?.bpm, fx, quantize, songTracks, masterBpm]); // eslint-disable-line react-hooks/exhaustive-deps
+  const liveProjKeyRef = useRef(liveProjKey); liveProjKeyRef.current = liveProjKey;
+  const ckptDirty = savedKey.current != null && liveProjKey !== savedKey.current; // 有基准且不同 = 有未保存改动
+
+  const doSaveCheckpoint = useCallback(async () => {
+    if (!loaded.current || ckptSaving) return;
+    const snap: CkptSnap = { sessions: sessionsRef.current, bpm: ctxRef.current?.bpm ?? masterBpm, fx: fxRef.current, quantize: quantizeRef.current, songTracks: songTracksRef.current };
+    const key = projStateKey(snap.sessions, snap.bpm, snap.fx, snap.quantize, snap.songTracks);
+    setCkptSaving(true);
+    try {
+      await api.projects.saveCheckpoint(projectId, { snapshot: snap });
+      savedKey.current = key; setCkptHas(true); setCkptAt(Date.now());
+      showCkptToast('Saved version');
+    } catch (err) { showCkptToast('Save failed'); console.error('[studio] §44 存点失败:', err); }
+    finally { setCkptSaving(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, ckptSaving]);
+
+  const doRevertCheckpoint = useCallback(async () => {
+    if (!loaded.current || starting.current) return;
+    let snap: CkptSnap;
+    try {
+      const { checkpoint } = await api.projects.latestCheckpoint(projectId);
+      if (!checkpoint) { showCkptToast('No saved version yet'); return; }
+      snap = checkpoint.snapshot as CkptSnap;
+    } catch (err) { showCkptToast('Restore failed'); console.error('[studio] §44 取存点失败:', err); return; }
+    if (!snap || !Array.isArray(snap.sessions)) { showCkptToast('Restore failed'); return; }
+    const sessions = normalizeSongLayout((snap.sessions as Session[]).map((s) => ({ ...s, xyAuto: normalizeXyAuto(s.xyAuto), volAuto: normalizeVolAuto(s.volAuto) })));
+    const fxNorm: FxConfig = { ...DEFAULT_FX, ...(snap.fx ?? {}), xy: { ...DEFAULT_XY, ...((snap.fx as FxConfig)?.xy ?? {}) }, master: normalizeMaster((snap.fx as FxConfig)?.master) };
+    const bpm = typeof snap.bpm === 'number' ? snap.bpm : (ctxRef.current?.bpm ?? masterBpm);
+    const q = (snap.quantize ?? quantizeRef.current) as Quantize;
+    const st = (Array.isArray(snap.songTracks) ? snap.songTracks : songTracksRef.current) as SongLane[];
+    const nextKey = projStateKey(sessions, bpm, fxNorm, q, st);
+    if (nextKey === liveProjKeyRef.current) { savedKey.current = nextKey; showCkptToast('Already at last saved'); return; } // 与当前完全一致 → 免空 undo 步
+    // 回退本身可 ⌘Z:先压当前 live 态。库字段中性化(warps 空 / live 集取当前)→ applyEntry 库分支 no-op(不碰声音库)。
+    pushHistory();
+    const sb = ctxRef.current?.soundsById;
+    applyEntry({ sessions, warps: new Map(), bpm, fx: fxNorm, sessionId: sessionsRef.current[sessionIdx]?.id ?? '', quantize: q, liveSounds: new Set(sb ? sb.keys() : []), liveGens: new Set(gensRef.current.map((g) => g.id)), songTracks: st });
+    savedKey.current = nextKey; // 回退后 live == saved
+    showCkptToast('Reverted to last saved · ⌘Z to undo');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, sessionIdx]);
+
+  // ⌘/Ctrl+S = 存一版,并灭浏览器「保存网页」框(不分焦点,与 ⌘Z 输入框退让不同 —— Save 是通用动作)。
+  useEffect(() => {
+    const onSaveKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); doSaveCheckpoint(); }
+    };
+    window.addEventListener('keydown', onSaveKey);
+    return () => window.removeEventListener('keydown', onSaveKey);
+  }, [doSaveCheckpoint]);
+
+  // 挂载:取最新存点 → 启用 Restore + 初始化脏检测基准(内容与当前一致 → 显干净;有存点即可回退)。
+  useEffect(() => {
+    let alive = true;
+    api.projects.latestCheckpoint(projectId).then(({ checkpoint }) => {
+      if (!alive || !checkpoint) return;
+      try { savedKey.current = snapProjKey(checkpoint.snapshot as CkptSnap); } catch { savedKey.current = null; }
+      setCkptHas(true); setCkptAt(new Date(checkpoint.createdAt).getTime());
+    }).catch(() => {});
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  const relTime = (t: number): string => {
+    if (!t) return '';
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 45) return 'just now';
+    const m = Math.round(s / 60); if (m < 60) return m + 'm ago';
+    const h = Math.round(m / 60); if (h < 24) return h + 'h ago';
+    return Math.round(h / 24) + 'd ago';
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (confirmState) return; // 弹窗开着时,快捷键交给弹窗(Enter/Esc)
@@ -1885,7 +1979,22 @@ export function StudioApp({ projectId, name = 'project', masterBpm, masterKey = 
             </button>
           </>
         )}
+
+        {/* §44 手动版本 / 存点:图标按钮,最右。Restore=回到上一次保存(可 ⌘Z 撤销);Save=存一版(⌘S,有未保存改动时橙点) */}
+        <span className="tb-sep" />
+        <button className="ic ic-rev" disabled={!ckptHas} title={ckptHas ? `Restore to last saved${ckptAt ? ' · ' + relTime(ckptAt) : ''} · ⌘Z to undo` : 'No saved version yet'} aria-label="Restore to last saved version" onClick={doRevertCheckpoint}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 7v6h6" /><path d="M3 13a9 9 0 1 0 3-7.7L3 8" /></svg>
+        </button>
+        <button className="ic ic-save" data-dirty={ckptDirty || undefined} disabled={ckptSaving} title={ckptDirty ? 'Save version (⌘S) · unsaved changes' : 'Save version (⌘S)'} aria-label="Save version" onClick={doSaveCheckpoint}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></svg>
+          {ckptDirty && <span className="ic-dot" aria-hidden="true" />}
+        </button>
       </header>
+
+      {/* §44 存点/回退 toast:短暂提示,3s 自消 */}
+      {ckptToast && (
+        <div role="status" style={{ position: 'fixed', left: '50%', bottom: 24, transform: 'translateX(-50%)', zIndex: 80, display: 'flex', alignItems: 'center', gap: 9, background: 'var(--bg-2)', border: '1px solid var(--line-2)', borderLeft: '3px solid var(--acc)', borderRadius: 'var(--r)', padding: '9px 13px', fontSize: 12, color: 'var(--tx)', boxShadow: '0 8px 22px rgba(0,0,0,.5)' }}>{ckptToast}</div>
+      )}
 
       {sync === 'error' && (
         <div role="alert" style={{ position: 'sticky', top: 0, zIndex: 60, background: '#7f1d1d', color: '#fff', padding: '6px 12px', fontSize: 12, lineHeight: 1.45, borderBottom: '1px solid #b91c1c' }}>
